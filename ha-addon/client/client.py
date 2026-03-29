@@ -43,6 +43,8 @@ HOSTNAME = os.environ.get("HOSTNAME", socket.gethostname())
 PLATFORM = os.environ.get("PLATFORM", sys.platform)
 ESPHOME_BIN = os.environ.get("ESPHOME_BIN")  # If set, skip version manager
 ESPHOME_SEED_VERSION = os.environ.get("ESPHOME_SEED_VERSION")  # Pre-download on startup
+# Base directory for per-slot PlatformIO core dirs (avoids cross-slot conflicts)
+_ESPHOME_VERSIONS_DIR = os.environ.get("ESPHOME_VERSIONS_DIR", "/esphome-versions")
 
 HEADERS = {
     "Authorization": f"Bearer {SERVER_TOKEN}",
@@ -55,7 +57,7 @@ HEADERS = {
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "0.0.6"
+CLIENT_VERSION = "0.0.7"
 
 # Set when the heartbeat detects a newer server-side client bundle.
 # Checked in the main loop so updates only happen between jobs.
@@ -250,7 +252,7 @@ def _apply_update(current_client_id: str) -> None:
         logger.warning("Client update failed: %s", exc)
 
 
-def run_job(client_id: str, job: dict, version_manager: VersionManager) -> None:
+def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_id: int = 1) -> None:
     """Execute a single build job end-to-end."""
     global _active_jobs
     with _active_jobs_lock:
@@ -262,6 +264,17 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager) -> None:
     timeout_seconds = job.get("timeout_seconds", JOB_TIMEOUT)
 
     logger.info("Starting job %s: target=%s esphome=%s", job_id, target, esphome_version)
+
+    # Per-slot PlatformIO core directory — prevents cross-slot package conflicts
+    # when multiple workers run esphome compile simultaneously.
+    pio_dir = os.path.join(_ESPHOME_VERSIONS_DIR, f"pio-slot-{worker_id}")
+    try:
+        os.makedirs(pio_dir, exist_ok=True)
+        subprocess_env = {**os.environ, "PLATFORMIO_CORE_DIR": pio_dir}
+        logger.debug("Worker %d using PLATFORMIO_CORE_DIR=%s", worker_id, pio_dir)
+    except OSError as exc:
+        logger.debug("Could not create pio dir %s (%s); using default PLATFORMIO_CORE_DIR", pio_dir, exc)
+        subprocess_env = dict(os.environ)
 
     # Install ESPHome version (BEFORE starting the timeout timer)
     if ESPHOME_BIN:
@@ -303,6 +316,7 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager) -> None:
             cwd=tmp_dir,
             timeout=timeout_seconds,
             label="compile",
+            env=subprocess_env,
         )
 
         if not compile_ok:
@@ -331,6 +345,7 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager) -> None:
                 cwd=tmp_dir,
                 timeout=OTA_TIMEOUT,
                 label=f"OTA upload (attempt {attempt + 1})",
+                env=subprocess_env,
             )
             ota_logs.append(ota_log)
             if ota_ok:
@@ -357,12 +372,14 @@ def _run_subprocess(
     cwd: str,
     timeout: int,
     label: str,
+    env: Optional[dict] = None,
 ) -> tuple[str, bool]:
     """
     Run a subprocess with a timeout.
 
     Returns (combined_log, success).
     On timeout, kills the process and returns (log + 'TIMED OUT', False).
+    *env* is passed directly to Popen; defaults to inheriting the current env.
     """
     log_lines: list[str] = []
     logger.info("Running %s: %s", label, " ".join(cmd))
@@ -374,6 +391,7 @@ def _run_subprocess(
             stderr=subprocess.STDOUT,
             cwd=cwd,
             text=True,
+            env=env,
         )
     except Exception as exc:
         return f"Failed to start process: {exc}", False
@@ -495,7 +513,7 @@ def worker_loop(
                     "Worker %d claimed job %s for target %s",
                     worker_id, job["job_id"], job["target"],
                 )
-                run_job(client_id, job, version_manager)
+                run_job(client_id, job, version_manager, worker_id)
                 # No sleep after work — immediately poll for next job
             else:
                 logger.warning(

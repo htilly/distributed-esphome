@@ -359,6 +359,7 @@ per worker thread (loop):
 
   on job received:
     ensure esphome version installed (install if not present; thread-safe LRU cache)
+    set PLATFORMIO_CORE_DIR=$ESPHOME_VERSIONS_DIR/pio-slot-{N} (per-slot isolation)
     extract bundle to temp dir
     start timeout timer (job.timeout_seconds)
     run: esphome compile <target.yaml> (capture stdout+stderr)
@@ -429,7 +430,7 @@ Clients self-update when the server is running a newer client version:
 | `HOSTNAME` | `socket.gethostname()` | Worker name shown in UI |
 | `ESPHOME_SEED_VERSION` | — | Pre-install this ESPHome version at startup |
 | `ESPHOME_BIN` | — | Use this binary directly instead of version-manager venvs |
-| `PLATFORMIO_CORE_DIR` | — | Override PlatformIO core directory; set to a persistent path to avoid re-downloading toolchains on container restart |
+| `PLATFORMIO_CORE_DIR` | — | **Deprecated / unnecessary.** Each worker slot now automatically uses `$ESPHOME_VERSIONS_DIR/pio-slot-{N}/` to prevent cross-slot package conflicts. Setting this env var has no effect on multi-slot builds. |
 
 ---
 

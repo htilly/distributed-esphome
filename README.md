@@ -158,7 +158,7 @@ All configuration is via environment variables:
 | `HOSTNAME` | system hostname | Worker name shown in UI |
 | `ESPHOME_SEED_VERSION` | — | Pre-install this ESPHome version at startup |
 | `ESPHOME_BIN` | — | Use this binary instead of the version-manager venvs |
-| `PLATFORMIO_CORE_DIR` | — | Override PlatformIO core directory (set for persistence) |
+| `PLATFORMIO_CORE_DIR` | — | No longer needed — each slot automatically uses `$ESPHOME_VERSIONS_DIR/pio-slot-N/` |
 
 ## Development
 
