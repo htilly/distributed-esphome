@@ -781,10 +781,8 @@ function renderDevices() {
 }
 
 function updateTargetButtons() {
-  const btns = ['btn-upgrade-all','btn-upgrade-selected','btn-upgrade-outdated'];
-  btns.forEach(id => {
-    document.getElementById(id).disabled = activeRun;
-  });
+  // Device panel buttons are never disabled by queue state — the server
+  // handles deduplication, so users can always queue more work.
 }
 
 // ============================================================
@@ -1028,7 +1026,7 @@ async function clearSucceeded() {
   const r = await apiFetch('./ui/api/queue/clear', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ states: ['success'] }),
+    body: JSON.stringify({ states: ['success'], require_ota_success: true }),
   });
   if (r.ok) {
     const data = await r.json();

@@ -292,9 +292,10 @@ async def clear_queue(request: web.Request) -> web.Response:
     if not isinstance(states, list):
         return web.json_response({"error": "states must be a list"}, status=400)
 
+    require_ota_success = bool(body.get("require_ota_success", False))
     queue = request.app["queue"]
     try:
-        cleared = await queue.clear(states)
+        cleared = await queue.clear(states, require_ota_success=require_ota_success)
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     return web.json_response({"cleared": cleared})

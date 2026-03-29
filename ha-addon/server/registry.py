@@ -43,8 +43,31 @@ class ClientRegistry:
     def __init__(self) -> None:
         self._clients: dict[str, Client] = {}
 
-    def register(self, hostname: str, platform: str, client_version: Optional[str] = None) -> str:
-        """Register a new client (or re-register by hostname). Returns client_id."""
+    def register(
+        self,
+        hostname: str,
+        platform: str,
+        client_version: Optional[str] = None,
+        existing_client_id: Optional[str] = None,
+    ) -> str:
+        """Register a client. Returns client_id.
+
+        If *existing_client_id* is provided and that client is still in the
+        registry, update it in place (preserves the entry across auto-updates).
+        Otherwise create a new entry.
+        """
+        if existing_client_id and existing_client_id in self._clients:
+            client = self._clients[existing_client_id]
+            client.hostname = hostname
+            client.platform = platform
+            client.client_version = client_version
+            client.last_seen = _utcnow()
+            logger.info(
+                "Re-registered client %s (%s / %s / v%s)",
+                existing_client_id, hostname, platform, client_version or "?",
+            )
+            return existing_client_id
+
         client_id = str(uuid.uuid4())
         client = Client(
             client_id=client_id,

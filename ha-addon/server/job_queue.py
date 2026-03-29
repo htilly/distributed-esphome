@@ -379,15 +379,22 @@ class JobQueue:
             if j.state in (JobState.PENDING, JobState.ASSIGNED, JobState.RUNNING)
         )
 
-    async def clear(self, states: list[str]) -> int:
-        """Remove terminal jobs whose state is in *states*. Returns count removed."""
+    async def clear(self, states: list[str], require_ota_success: bool = False) -> int:
+        """Remove terminal jobs whose state is in *states*. Returns count removed.
+
+        If *require_ota_success* is True, jobs with ota_result == 'failed' are
+        kept even if their state matches (so "Clear Succeeded" leaves OTA-failed jobs).
+        """
         terminal = {JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT}
         target_states = {JobState(s) for s in states if JobState(s) in terminal}
         async with self._lock:
-            to_remove = [
-                job_id for job_id, job in self._jobs.items()
-                if job.state in target_states
-            ]
+            to_remove = []
+            for job_id, job in self._jobs.items():
+                if job.state not in target_states:
+                    continue
+                if require_ota_success and job.ota_result == "failed":
+                    continue
+                to_remove.append(job_id)
             for job_id in to_remove:
                 del self._jobs[job_id]
             if to_remove:

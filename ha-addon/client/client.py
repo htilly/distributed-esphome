@@ -54,7 +54,7 @@ HEADERS = {
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "0.0.2"
+CLIENT_VERSION = "0.0.3"
 
 # Set when the heartbeat detects a newer server-side client bundle.
 # Checked in the main loop so updates only happen between jobs.
@@ -118,14 +118,22 @@ def get(path: str, params: Optional[dict] = None, timeout: int = 30) -> requests
 # ---------------------------------------------------------------------------
 
 def register() -> str:
-    """Register with server and return client_id. Retries until successful."""
+    """Register with server and return client_id. Retries until successful.
+
+    If DISTRIBUTED_ESPHOME_CLIENT_ID is set in the environment (stashed before
+    an auto-update os.execv), sends it so the server can update in place.
+    """
+    existing_id = os.environ.pop("DISTRIBUTED_ESPHOME_CLIENT_ID", None)
     while True:
         try:
-            resp = post("/api/v1/clients/register", {
+            payload: dict = {
                 "hostname": HOSTNAME,
                 "platform": PLATFORM,
                 "client_version": CLIENT_VERSION,
-            })
+            }
+            if existing_id:
+                payload["client_id"] = existing_id
+            resp = post("/api/v1/clients/register", payload)
             resp.raise_for_status()
             client_id = resp.json()["client_id"]
             logger.info("Registered as client %s (version %s)", client_id, CLIENT_VERSION)
@@ -189,8 +197,12 @@ _update_attempts: int = 0
 _MAX_UPDATE_ATTEMPTS: int = 3
 
 
-def _apply_update() -> None:
-    """Download updated client code from server and restart the process."""
+def _apply_update(current_client_id: str) -> None:
+    """Download updated client code from server and restart the process.
+
+    Stashes *current_client_id* in the environment so the restarted process
+    can re-register in place (keeping the same entry in the server's registry).
+    """
     global _update_attempts
     _update_available.clear()
     _update_attempts += 1
@@ -220,6 +232,7 @@ def _apply_update() -> None:
             target.write_text(content, encoding="utf-8")
             logger.info("Updated %s", filename)
         logger.info("Client updated to %s — restarting", new_version)
+        os.environ["DISTRIBUTED_ESPHOME_CLIENT_ID"] = current_client_id
         os.execv(sys.executable, [sys.executable] + sys.argv)
     except Exception as exc:
         logger.warning("Client update failed: %s", exc)
@@ -479,7 +492,7 @@ def main() -> None:
 
             # Apply pending update only when idle (no job running)
             if _update_available.is_set() and not _in_job:
-                _apply_update()  # may os.execv — never returns on success
+                _apply_update(client_id)  # may os.execv — never returns on success
 
             did_work = False
             try:

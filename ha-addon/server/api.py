@@ -67,8 +67,9 @@ async def register_client(request: web.Request) -> web.Response:
     hostname = body.get("hostname", "unknown")
     platform = body.get("platform", "unknown")
     client_version = body.get("client_version")
+    existing_client_id = body.get("client_id")
     registry = request.app["registry"]
-    client_id = registry.register(hostname, platform, client_version)
+    client_id = registry.register(hostname, platform, client_version, existing_client_id)
     return web.json_response({"client_id": client_id})
 
 
