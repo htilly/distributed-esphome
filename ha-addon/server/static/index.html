@@ -579,6 +579,9 @@ async function refreshServerInfo() {
     const r = await apiFetch('./ui/api/server-info');
     if (r.ok) {
       serverInfo = await r.json();
+      if (serverInfo.addon_version) {
+        document.getElementById('server-version').textContent = 'v' + serverInfo.addon_version;
+      }
       renderDockerCmd();
     }
   } catch(e) { /* ignore */ }
@@ -641,7 +644,6 @@ async function refreshDevices() {
       targetsData = await tr.json();
       if (targetsData.length > 0 && targetsData[0].server_version) {
         serverVersion = targetsData[0].server_version;
-        document.getElementById('server-version').textContent = 'esphome v' + serverVersion;
       }
     }
     if (dr.ok) { devicesData = await dr.json(); }
@@ -803,6 +805,11 @@ function renderQueue() {
     return new Date(b.created_at) - new Date(a.created_at);
   });
 
+  // Preserve checkbox state across re-renders
+  const checkedIds = new Set(
+    [...document.querySelectorAll('.queue-cb:checked')].map(cb => cb.value)
+  );
+
   const rows = [];
   for (const job of sorted) {
     const clientName = job.assigned_client_id
@@ -813,10 +820,14 @@ function renderQueue() {
       ? fmtDuration(job.duration_seconds)
       : (isActive && job.assigned_at ? fmtDuration((Date.now() - new Date(job.assigned_at)) / 1000) : '—');
 
-    // Combined state+OTA badge
+    // Unified state badge — status_text from client is the primary label for active jobs
     let badgeLabel, badgeCls;
-    if (job.state === 'failed') {
-      badgeLabel = 'Compile Failed'; badgeCls = 'badge badge-failed';
+    if (job.state === 'pending') {
+      badgeLabel = 'Pending'; badgeCls = 'badge badge-pending';
+    } else if (job.state === 'assigned' || job.state === 'running') {
+      badgeLabel = job.status_text || 'Working'; badgeCls = 'badge badge-running';
+    } else if (job.state === 'failed') {
+      badgeLabel = 'Failed'; badgeCls = 'badge badge-failed';
     } else if (job.state === 'success') {
       if (job.ota_result === 'success') {
         badgeLabel = 'Success'; badgeCls = 'badge badge-success';
@@ -831,17 +842,13 @@ function renderQueue() {
       badgeLabel = job.state; badgeCls = 'badge badge-' + job.state;
     }
 
-    const statusHtml = job.status_text && ['assigned','running'].includes(job.state)
-      ? `<br><span style="font-size:10px;color:var(--text-muted)">${escapeHtml(job.status_text)}</span>`
-      : '';
-
     const hasLog = job.log && ['success','failed','timed_out'].includes(job.state);
     const canRetry = ['failed','timed_out'].includes(job.state);
 
     rows.push(`<tr data-job="${job.id}">
-      <td><input type="checkbox" class="queue-cb" value="${job.id}"></td>
+      <td><input type="checkbox" class="queue-cb" value="${job.id}"${checkedIds.has(job.id) ? ' checked' : ''}></td>
       <td><strong>${escapeHtml(stripYaml(job.target))}</strong><br><span style="font-size:11px;color:var(--text-muted)">${job.id.slice(0,8)}</span></td>
-      <td><span class="${badgeCls}">${badgeLabel}</span>${statusHtml}</td>
+      <td><span class="${badgeCls}">${escapeHtml(badgeLabel)}</span></td>
       <td style="font-size:12px">${escapeHtml(clientName)}</td>
       <td style="font-size:12px">${dur}</td>
       <td>
@@ -1211,7 +1218,6 @@ function startPolling() {
         targetsData = await tr.json();
         if (targetsData.length && targetsData[0].server_version) {
           serverVersion = targetsData[0].server_version;
-          document.getElementById('server-version').textContent = 'esphome v' + serverVersion;
         }
       }
       if (dr.ok) { devicesData = await dr.json(); }

@@ -20,13 +20,15 @@ routes = web.RouteTableDef()
 
 @routes.get("/ui/api/server-info")
 async def get_server_info(request: web.Request) -> web.Response:
-    """Return server configuration needed by the UI (token, port, client version)."""
+    """Return server configuration needed by the UI (token, port, versions)."""
     from api import _get_server_client_version  # noqa: PLC0415
     config = request.app["config"]
+    addon_version = _get_server_client_version()
     return web.json_response({
         "token": config.get("token", ""),
         "port": int(os.environ.get("PORT", "8765")),
-        "server_client_version": _get_server_client_version(),
+        "server_client_version": addon_version,
+        "addon_version": addon_version,
     })
 
 

@@ -54,7 +54,7 @@ HEADERS = {
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "0.0.3"
+CLIENT_VERSION = "0.0.4"
 
 # Set when the heartbeat detects a newer server-side client bundle.
 # Checked in the main loop so updates only happen between jobs.
@@ -444,6 +444,26 @@ def _submit_ota_result(job_id: str, ota_result: str, ota_log: str) -> None:
 # Main polling loop
 # ---------------------------------------------------------------------------
 
+def _initial_version_check(client_id: str) -> None:
+    """Do one synchronous heartbeat immediately after registration.
+
+    If the server has a newer client version, sets _update_available so the
+    main loop applies the update before picking up any jobs.
+    """
+    try:
+        resp = post("/api/v1/clients/heartbeat", {"client_id": client_id}, timeout=10)
+        if resp.ok:
+            sv = resp.json().get("server_client_version")
+            if sv and sv != CLIENT_VERSION:
+                logger.info(
+                    "Update available before first poll: local=%s server=%s",
+                    CLIENT_VERSION, sv,
+                )
+                _update_available.set()
+    except Exception as exc:
+        logger.debug("Initial version check failed (non-fatal): %s", exc)
+
+
 def main() -> None:
     logger.info("ESPHome Build Client starting (hostname=%s)", HOSTNAME)
 
@@ -461,6 +481,9 @@ def main() -> None:
     # Register with server
     client_id = register()
 
+    # Check for available update before accepting any work
+    _initial_version_check(client_id)
+
     # Start heartbeat thread
     stop_heartbeat = threading.Event()
     hb_thread = threading.Thread(
@@ -470,6 +493,10 @@ def main() -> None:
         name="heartbeat",
     )
     hb_thread.start()
+
+    # Apply update immediately if detected (before first poll)
+    if _update_available.is_set():
+        _apply_update(client_id)
 
     logger.info("Polling for jobs every %ds", POLL_INTERVAL)
 
