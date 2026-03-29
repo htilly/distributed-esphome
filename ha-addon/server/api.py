@@ -68,8 +68,9 @@ async def register_client(request: web.Request) -> web.Response:
     platform = body.get("platform", "unknown")
     client_version = body.get("client_version")
     existing_client_id = body.get("client_id")
+    max_parallel_jobs = int(body.get("max_parallel_jobs", 1))
     registry = request.app["registry"]
-    client_id = registry.register(hostname, platform, client_version, existing_client_id)
+    client_id = registry.register(hostname, platform, client_version, existing_client_id, max_parallel_jobs)
     return web.json_response({"client_id": client_id})
 
 
@@ -114,7 +115,13 @@ async def get_next_job(request: web.Request) -> web.Response:
     if client and client.disabled:
         return web.Response(status=204)
 
-    job = await queue.claim_next(client_id)
+    worker_id_str = request.headers.get("X-Worker-Id", "1")
+    try:
+        worker_id = int(worker_id_str)
+    except ValueError:
+        worker_id = 1
+
+    job = await queue.claim_next(client_id, worker_id)
     if job is None:
         return web.Response(status=204)
 

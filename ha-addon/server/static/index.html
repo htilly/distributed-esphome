@@ -377,6 +377,7 @@
   <img src="https://media.esphome.io/logo/logo-text-on-dark.svg" alt="ESPHome" height="28" style="display:block">
   <h1 style="font-size:15px;font-weight:500;color:var(--text-muted)">Distributed Build</h1>
   <span class="version-badge" id="server-version">v?</span>
+  <span class="version-badge" id="esphome-version" style="color:var(--text-muted)">ESPHome v?</span>
   <span class="spacer"></span>
   <span class="status-dot" id="server-dot" title="Server online"></span>
 </header>
@@ -644,6 +645,7 @@ async function refreshDevices() {
       targetsData = await tr.json();
       if (targetsData.length > 0 && targetsData[0].server_version) {
         serverVersion = targetsData[0].server_version;
+        document.getElementById('esphome-version').textContent = 'ESPHome ' + serverVersion;
       }
     }
     if (dr.ok) { devicesData = await dr.json(); }
@@ -673,30 +675,62 @@ function renderClients() {
     online + '/' + clientsData.length + ' online';
 
   if (!clientsData.length) {
-    tbody.innerHTML = '<tr class="empty-row"><td colspan="4">No clients registered</td></tr>';
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="6">No clients registered</td></tr>';
     return;
   }
 
-  tbody.innerHTML = clientsData.map(c => {
+  const rows = [];
+  for (const c of clientsData) {
+    const slots = c.max_parallel_jobs || 1;
     const statusHtml = c.disabled
       ? '<span class="dot dot-offline"></span><span style="color:var(--text-muted)">Disabled</span>'
       : c.online
         ? '<span class="dot dot-online"></span>Online'
         : '<span class="dot dot-offline"></span>Offline';
-    const jobHtml = c.current_job_target
-      ? '<code style="font-size:12px;color:var(--text)">' + escapeHtml(stripYaml(c.current_job_target)) + '</code>'
-      : c.current_job_id ? '<span style="color:var(--text-muted);font-size:11px">…</span>' : '—';
     const disableBtnCls = c.disabled ? 'btn-success btn-sm' : 'btn-warn btn-sm';
     const disableBtnLabel = c.disabled ? 'Enable' : 'Disable';
-    return `<tr${c.disabled ? ' style="opacity:0.6"' : ''}>
-      <td>${escapeHtml(c.hostname)}</td>
-      <td style="color:var(--text-muted)">${escapeHtml(c.platform)}</td>
-      <td>${statusHtml}</td>
-      <td>${jobHtml}</td>
-      <td>${clientVersionHtml(c.client_version)}</td>
-      <td><button class="${disableBtnCls}" onclick="toggleClientDisabled('${escapeHtml(c.client_id)}', ${!c.disabled})">${disableBtnLabel}</button></td>
-    </tr>`;
-  }).join('');
+    const rowAttr = c.disabled ? ' style="opacity:0.6"' : '';
+
+    for (let slot = 1; slot <= slots; slot++) {
+      // Find active job for this slot (worker_id match; fall back to any active job for slot 1)
+      const slotJob = queueData.find(j =>
+        j.assigned_client_id === c.client_id &&
+        (j.worker_id === slot || (slot === 1 && j.worker_id == null)) &&
+        ['assigned', 'running'].includes(j.state)
+      );
+      const slotName = slots > 1
+        ? `${escapeHtml(c.hostname)}<span style="color:var(--text-muted);font-size:11px">/${slot}</span>`
+        : escapeHtml(c.hostname);
+      let jobHtml;
+      if (slotJob) {
+        const st = slotJob.status_text ? `<br><span style="font-size:10px;color:var(--text-muted)">${escapeHtml(slotJob.status_text)}</span>` : '';
+        jobHtml = `<code style="font-size:12px;color:var(--text)">${escapeHtml(stripYaml(slotJob.target))}</code>${st}`;
+      } else {
+        jobHtml = '<span style="color:var(--text-muted);font-size:12px">Idle</span>';
+      }
+
+      if (slot === 1) {
+        rows.push(`<tr${rowAttr}>
+          <td>${slotName}</td>
+          <td style="color:var(--text-muted)">${escapeHtml(c.platform)}</td>
+          <td>${statusHtml}</td>
+          <td>${jobHtml}</td>
+          <td>${clientVersionHtml(c.client_version)}</td>
+          <td><button class="${disableBtnCls}" onclick="toggleClientDisabled('${escapeHtml(c.client_id)}', ${!c.disabled})">${disableBtnLabel}</button></td>
+        </tr>`);
+      } else {
+        rows.push(`<tr${rowAttr}>
+          <td>${slotName}</td>
+          <td></td>
+          <td></td>
+          <td>${jobHtml}</td>
+          <td></td>
+          <td></td>
+        </tr>`);
+      }
+    }
+  }
+  tbody.innerHTML = rows.join('');
 }
 
 // ============================================================
@@ -812,8 +846,13 @@ function renderQueue() {
 
   const rows = [];
   for (const job of sorted) {
-    const clientName = job.assigned_client_id
-      ? clientsData.find(c => c.client_id === job.assigned_client_id)?.hostname || job.assigned_client_id.slice(0,8)
+    const assignedClient = job.assigned_client_id
+      ? clientsData.find(c => c.client_id === job.assigned_client_id)
+      : null;
+    const baseHostname = assignedClient?.hostname || (job.assigned_client_id ? job.assigned_client_id.slice(0,8) : null);
+    const showSlot = baseHostname && job.worker_id != null && (assignedClient?.max_parallel_jobs || 1) > 1;
+    const clientName = baseHostname
+      ? (showSlot ? `${baseHostname}/${job.worker_id}` : baseHostname)
       : '—';
     const isActive = ['pending', 'assigned', 'running'].includes(job.state);
     const dur = job.duration_seconds != null
@@ -862,6 +901,8 @@ function renderQueue() {
   }
 
   tbody.innerHTML = rows.join('');
+  // Keep client slot occupancy in sync with queue state
+  renderClients();
 }
 
 function openLogModal(jobId) {
@@ -1218,6 +1259,7 @@ function startPolling() {
         targetsData = await tr.json();
         if (targetsData.length && targetsData[0].server_version) {
           serverVersion = targetsData[0].server_version;
+          document.getElementById('esphome-version').textContent = 'ESPHome ' + serverVersion;
         }
       }
       if (dr.ok) { devicesData = await dr.json(); }

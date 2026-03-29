@@ -176,7 +176,7 @@ Disabled clients receive 204 without a job being dequeued.
 
 ### 1.7 Client Registry
 
-- Clients register on connect; server tracks `{ client_id, hostname, platform, last_seen, current_job_id, disabled, client_version }`
+- Clients register on connect; server tracks `{ client_id, hostname, platform, last_seen, current_job_id, disabled, client_version, max_parallel_jobs }`
 - A client is considered **online** if `last_seen` is within 30 seconds (configurable)
 - Heartbeat interval: 10 seconds (client side)
 - Clients can be **disabled** via `POST /ui/api/clients/{client_id}/disable`. Disabled clients still heartbeat and appear in the UI but will not be assigned new jobs (`GET /api/v1/jobs/next` returns 204 immediately)
@@ -225,11 +225,16 @@ Single-page HTML served by the aiohttp server. Uses vanilla JS + CSS (no build s
 
 **Sections:**
 
+**Header**
+- Shows the add-on version badge (e.g. `v0.0.6`) and an ESPHome version badge (e.g. `ESPHome 2024.6.0`)
+
 **Clients Panel**
-- Table: `Hostname | Platform | Status (online/offline) | Version | Current Job | Actions`
+- Table: `Hostname/Slot | Platform | Status | Current Job | Version | Actions`
+- One row per worker slot (`max_parallel_jobs` rows per client); slot suffix shown as `/1`, `/2` etc. when a client has > 1 slot
+- Each slot row shows the job currently running in that slot (target name + status text), or "Idle"
 - Version column shows client version; highlights in orange with an up-arrow if the client version is older than the server's current client version
-- Actions column has a Disable/Enable toggle button; disabled clients are shown at reduced opacity
-- Auto-refreshes every 5 seconds
+- Actions column (Disable/Enable) spans the first slot row only; disabled clients are shown at reduced opacity
+- Auto-refreshes every 5 seconds; also re-renders on each queue refresh (every 3s) to keep slot occupancy current
 
 **Devices Panel**
 - Table: `Device Name | IP | Online | Running Version | Server Version | Needs Update`
@@ -245,6 +250,7 @@ Single-page HTML served by the aiohttp server. Uses vanilla JS + CSS (no build s
 
 **Queue Panel** (visible when a run is active or recent jobs exist)
 - Table columns: `[ ] | Target | State+OTA | Client | Duration | Actions`
+- Client column shows `hostname/worker_id` (e.g. `builder/2`) when the client has multiple slots, plain hostname for single-slot clients
 - State and OTA result are combined in a single badge column
 - Checkbox column for multi-select cancel
 - `Cancel Selected` button; `Retry All Failed` button in header; per-row `Retry` button on failed/timed_out jobs

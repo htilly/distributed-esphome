@@ -24,6 +24,7 @@ class Client:
     current_job_id: Optional[str] = None
     disabled: bool = False
     client_version: Optional[str] = None
+    max_parallel_jobs: int = 1
 
     def to_dict(self) -> dict:
         return {
@@ -34,6 +35,7 @@ class Client:
             "current_job_id": self.current_job_id,
             "disabled": self.disabled,
             "client_version": self.client_version,
+            "max_parallel_jobs": self.max_parallel_jobs,
         }
 
 
@@ -49,6 +51,7 @@ class ClientRegistry:
         platform: str,
         client_version: Optional[str] = None,
         existing_client_id: Optional[str] = None,
+        max_parallel_jobs: int = 1,
     ) -> str:
         """Register a client. Returns client_id.
 
@@ -61,10 +64,11 @@ class ClientRegistry:
             client.hostname = hostname
             client.platform = platform
             client.client_version = client_version
+            client.max_parallel_jobs = max_parallel_jobs
             client.last_seen = _utcnow()
             logger.info(
-                "Re-registered client %s (%s / %s / v%s)",
-                existing_client_id, hostname, platform, client_version or "?",
+                "Re-registered client %s (%s / %s / v%s / %d slots)",
+                existing_client_id, hostname, platform, client_version or "?", max_parallel_jobs,
             )
             return existing_client_id
 
@@ -74,9 +78,13 @@ class ClientRegistry:
             hostname=hostname,
             platform=platform,
             client_version=client_version,
+            max_parallel_jobs=max_parallel_jobs,
         )
         self._clients[client_id] = client
-        logger.info("Registered client %s (%s / %s / v%s)", client_id, hostname, platform, client_version or "?")
+        logger.info(
+            "Registered client %s (%s / %s / v%s / %d slots)",
+            client_id, hostname, platform, client_version or "?", max_parallel_jobs,
+        )
         return client_id
 
     def heartbeat(self, client_id: str) -> bool:

@@ -55,7 +55,7 @@ HEADERS = {
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "0.0.5"
+CLIENT_VERSION = "0.0.6"
 
 # Set when the heartbeat detects a newer server-side client bundle.
 # Checked in the main loop so updates only happen between jobs.
@@ -141,6 +141,7 @@ def register() -> str:
                 "hostname": HOSTNAME,
                 "platform": PLATFORM,
                 "client_version": CLIENT_VERSION,
+                "max_parallel_jobs": MAX_PARALLEL_JOBS,
             }
             if existing_id:
                 payload["client_id"] = existing_id
@@ -477,7 +478,7 @@ def worker_loop(
         try:
             resp = requests.get(
                 f"{SERVER_URL}/api/v1/jobs/next",
-                headers={**HEADERS, "X-Client-Id": client_id},
+                headers={**HEADERS, "X-Client-Id": client_id, "X-Worker-Id": str(worker_id)},
                 timeout=30,
             )
             _on_server_reachable()

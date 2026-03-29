@@ -51,6 +51,7 @@ class Job:
     run_id: str
     assigned_client_id: Optional[str] = None
     assigned_at: Optional[datetime] = None
+    worker_id: Optional[int] = None
     timeout_seconds: int = 300
     created_at: datetime = field(default_factory=_utcnow)
     finished_at: Optional[datetime] = None
@@ -68,6 +69,7 @@ class Job:
             "run_id": self.run_id,
             "assigned_client_id": self.assigned_client_id,
             "assigned_at": _iso(self.assigned_at),
+            "worker_id": self.worker_id,
             "timeout_seconds": self.timeout_seconds,
             "created_at": _iso(self.created_at),
             "finished_at": _iso(self.finished_at),
@@ -88,6 +90,7 @@ class Job:
             run_id=d.get("run_id", ""),
             assigned_client_id=d.get("assigned_client_id"),
             assigned_at=_from_iso(d.get("assigned_at")),
+            worker_id=d.get("worker_id"),
             timeout_seconds=d.get("timeout_seconds", 300),
             created_at=_from_iso(d.get("created_at")) or _utcnow(),
             finished_at=_from_iso(d.get("finished_at")),
@@ -188,7 +191,7 @@ class JobQueue:
             logger.info("Enqueued job %s for target %s", job.id, target)
             return job
 
-    async def claim_next(self, client_id: str) -> Optional[Job]:
+    async def claim_next(self, client_id: str, worker_id: int = 1) -> Optional[Job]:
         """
         Atomically claim the next pending job for *client_id*.
 
@@ -200,8 +203,9 @@ class JobQueue:
                     job.state = JobState.ASSIGNED
                     job.assigned_client_id = client_id
                     job.assigned_at = _utcnow()
+                    job.worker_id = worker_id
                     self._persist()
-                    logger.info("Job %s assigned to client %s", job.id, client_id)
+                    logger.info("Job %s assigned to client %s worker %d", job.id, client_id, worker_id)
                     return job
             return None
 
