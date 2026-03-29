@@ -41,7 +41,16 @@ The server add-on includes a built-in local client, so compilation works out of 
 
 ### 1. Install the HA Add-on
 
-Copy the `ha-addon/` directory to your HA `addons/local/` folder (rename it `distributed-esphome`), then install it via **Settings → Add-ons → Local add-ons**.
+Add this repository to your Home Assistant add-on store:
+
+[![Add repository to my Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fweirded%2Fdistributed-esphome)
+
+Or manually: **Settings → Add-ons → Add-on Store → ⋮ → Repositories** and add `https://github.com/weirded/distributed-esphome`.
+
+Then find **ESPHome Distributed Build Server** in the store and click **Install**.
+
+<details>
+<summary>Manual install (local copy)</summary>
 
 ```bash
 # From this repo root
@@ -51,6 +60,7 @@ ssh ha-host "cd /usr/share/hassio/addons/local && tar -xzf /tmp/distributed-esph
 ```
 
 Then in HA: **Settings → Add-ons → Local add-ons → ESPHome Distributed Build Server → Install**.
+</details>
 
 ### 2. Configure the Add-on
 
