@@ -75,30 +75,30 @@ Then in HA: **Settings → Add-ons → Local add-ons → ESPHome Distributed Bui
 
 ### 3. Add Remote Build Clients (optional)
 
-The Web UI shows a **Docker run** command pre-filled with your server URL and token. You can copy it directly or use the packaging script:
+The Web UI shows a **Docker run** command pre-filled with your server URL and token. You can copy it directly or use the packaging script to build a self-contained archive:
 
 ```bash
-# Build a self-contained distributable archive
+# Build archive (outputs dist/esphome-dist-client-<version>.tar.gz)
 ./package-client.sh http://your-ha-host:8765 your-token
 
 # Deploy to another Docker host
-scp dist/esphome-dist-client.tar.gz user@build-host:/tmp/
-ssh user@build-host "cd /tmp && tar -xzf esphome-dist-client.tar.gz && ./start.sh"
+scp dist/esphome-dist-client-0.0.1.tar.gz user@build-host:/tmp/
+ssh user@build-host "cd /tmp && tar -xzf esphome-dist-client-0.0.1.tar.gz"
+
+# On the build host — start (tails logs; Ctrl-C detaches, container keeps running)
+SERVER_URL=http://your-ha-host:8765 SERVER_TOKEN=your-token ./start.sh
+
+# Or start detached
+SERVER_URL=http://your-ha-host:8765 SERVER_TOKEN=your-token ./start.sh --background
 ```
 
-Or run directly:
+The archive contains three scripts:
 
-```bash
-docker run -d \
-  --name esphome-dist-client \
-  --restart unless-stopped \
-  --hostname $(hostname) \
-  -e SERVER_URL=http://your-ha-host:8765 \
-  -e SERVER_TOKEN=your-token \
-  -e ESPHOME_SEED_VERSION=2024.12.0 \
-  -v esphome-versions:/esphome-versions \
-  ghcr.io/weirded/esphome-dist-client:latest
-```
+| Script | What it does |
+|--------|-------------|
+| `start.sh` | Loads image (if needed), starts container, tails logs. `--background` to detach. Fails immediately if `SERVER_URL` or `SERVER_TOKEN` are unset. |
+| `stop.sh` | Stops and removes the container. |
+| `uninstall.sh` | Stops container, removes image, optionally removes the `esphome-versions` volume. |
 
 > **Note:** Build clients must have network access to your ESP devices (same LAN or VLAN) to push firmware via OTA.
 

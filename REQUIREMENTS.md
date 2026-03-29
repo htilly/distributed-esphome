@@ -502,6 +502,37 @@ client/
 
 ---
 
+## Component 4b: Client Distribution Package
+
+`package-client.sh` builds a self-contained archive for deploying the client to any Docker host without requiring this repo or a Docker registry.
+
+**Usage:**
+```bash
+./package-client.sh [SERVER_URL] [SERVER_TOKEN]
+# Produces: dist/esphome-dist-client-<version>.tar.gz
+```
+
+**Archive contents:**
+
+| File | Description |
+|------|-------------|
+| `esphome-dist-client.tar` | Saved Docker image (docker save) |
+| `start.sh` | Loads image (if needed), starts container, tails logs by default |
+| `stop.sh` | Stops and removes the container |
+| `uninstall.sh` | Stops container, removes image, optionally removes the volume |
+
+**`start.sh` behaviour:**
+- Fails immediately with an error if `SERVER_URL` or `SERVER_TOKEN` are not set (env vars or exported before calling)
+- Default mode: starts container then tails logs in the foreground; Ctrl-C detaches the terminal but the container keeps running
+- `--background` flag: starts detached and prints the `docker logs` command
+- Passes `--hostname $(hostname)` so the container adopts the Docker host's hostname (shown in the UI)
+- Mounts the `esphome-versions` named volume for ESPHome version persistence
+- If an old container with the same name exists, it is removed before starting
+
+**Archive filename** includes the version number (e.g. `esphome-dist-client-0.0.1.tar.gz`) so multiple versions can coexist on disk.
+
+---
+
 ## Component 5: File Layout (This Repo)
 
 ```
