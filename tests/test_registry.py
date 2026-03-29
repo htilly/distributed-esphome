@@ -1,0 +1,166 @@
+"""Unit tests for ClientRegistry — register, heartbeat, disable, versioning."""
+
+from __future__ import annotations
+
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "ha-addon" / "server"))
+
+from registry import ClientRegistry  # noqa: E402
+
+
+@pytest.fixture
+def reg():
+    return ClientRegistry()
+
+
+# ---------------------------------------------------------------------------
+# Registration
+# ---------------------------------------------------------------------------
+
+def test_register_returns_client_id(reg):
+    client_id = reg.register("host1", "linux/amd64")
+    assert client_id is not None
+    assert len(client_id) > 0
+
+
+def test_register_stores_client(reg):
+    client_id = reg.register("host1", "linux/amd64")
+    client = reg.get(client_id)
+    assert client is not None
+    assert client.hostname == "host1"
+    assert client.platform == "linux/amd64"
+
+
+def test_register_stores_client_version(reg):
+    client_id = reg.register("host1", "linux/amd64", client_version="0.0.1")
+    client = reg.get(client_id)
+    assert client.client_version == "0.0.1"
+
+
+def test_register_client_version_none_by_default(reg):
+    client_id = reg.register("host1", "linux/amd64")
+    client = reg.get(client_id)
+    assert client.client_version is None
+
+
+def test_register_multiple_clients_unique_ids(reg):
+    id1 = reg.register("host1", "linux/amd64")
+    id2 = reg.register("host2", "linux/amd64")
+    assert id1 != id2
+
+
+def test_get_all_returns_all_clients(reg):
+    reg.register("host1", "linux/amd64")
+    reg.register("host2", "linux/arm64")
+    clients = reg.get_all()
+    assert len(clients) == 2
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat and online detection
+# ---------------------------------------------------------------------------
+
+def test_heartbeat_returns_true_for_known_client(reg):
+    client_id = reg.register("host1", "linux/amd64")
+    assert reg.heartbeat(client_id) is True
+
+
+def test_heartbeat_returns_false_for_unknown_client(reg):
+    assert reg.heartbeat("unknown-id") is False
+
+
+def test_is_online_after_register(reg):
+    client_id = reg.register("host1", "linux/amd64")
+    assert reg.is_online(client_id, threshold_secs=30) is True
+
+
+def test_is_online_unknown_client(reg):
+    assert reg.is_online("unknown-id") is False
+
+
+def test_is_online_respects_threshold(reg):
+    client_id = reg.register("host1", "linux/amd64")
+    client = reg.get(client_id)
+    # Backdate last_seen far into the past
+    from datetime import datetime, timedelta, timezone
+    client.last_seen = datetime.now(timezone.utc) - timedelta(seconds=60)
+    assert reg.is_online(client_id, threshold_secs=30) is False
+    assert reg.is_online(client_id, threshold_secs=120) is True
+
+
+# ---------------------------------------------------------------------------
+# Disable / enable
+# ---------------------------------------------------------------------------
+
+def test_set_disabled_disables_client(reg):
+    client_id = reg.register("host1", "linux/amd64")
+    assert reg.set_disabled(client_id, True) is True
+    client = reg.get(client_id)
+    assert client.disabled is True
+
+
+def test_set_disabled_enables_client(reg):
+    client_id = reg.register("host1", "linux/amd64")
+    reg.set_disabled(client_id, True)
+    reg.set_disabled(client_id, False)
+    client = reg.get(client_id)
+    assert client.disabled is False
+
+
+def test_set_disabled_returns_false_for_unknown(reg):
+    assert reg.set_disabled("unknown-id", True) is False
+
+
+def test_client_not_disabled_by_default(reg):
+    client_id = reg.register("host1", "linux/amd64")
+    client = reg.get(client_id)
+    assert client.disabled is False
+
+
+def test_disable_does_not_affect_online_status(reg):
+    """Disabling a client should not change is_online — it only affects job assignment."""
+    client_id = reg.register("host1", "linux/amd64")
+    reg.set_disabled(client_id, True)
+    assert reg.is_online(client_id, threshold_secs=30) is True
+
+
+# ---------------------------------------------------------------------------
+# Current job tracking
+# ---------------------------------------------------------------------------
+
+def test_set_job_stores_job_id(reg):
+    client_id = reg.register("host1", "linux/amd64")
+    assert reg.set_job(client_id, "job-123") is True
+    assert reg.get(client_id).current_job_id == "job-123"
+
+
+def test_set_job_clears_job_id(reg):
+    client_id = reg.register("host1", "linux/amd64")
+    reg.set_job(client_id, "job-123")
+    reg.set_job(client_id, None)
+    assert reg.get(client_id).current_job_id is None
+
+
+def test_set_job_returns_false_for_unknown(reg):
+    assert reg.set_job("unknown-id", "job-123") is False
+
+
+# ---------------------------------------------------------------------------
+# to_dict serialization
+# ---------------------------------------------------------------------------
+
+def test_to_dict_includes_all_fields(reg):
+    client_id = reg.register("host1", "linux/amd64", client_version="0.0.1")
+    d = reg.get(client_id).to_dict()
+    assert d["client_id"] == client_id
+    assert d["hostname"] == "host1"
+    assert d["platform"] == "linux/amd64"
+    assert d["client_version"] == "0.0.1"
+    assert d["disabled"] is False
+    assert d["current_job_id"] is None
+    assert "last_seen" in d

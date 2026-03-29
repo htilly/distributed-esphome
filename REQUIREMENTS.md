@@ -118,16 +118,25 @@ All endpoints are under `/api/v1/`. Authentication: shared secret token in `Auth
 | `POST` | `/api/v1/jobs/{id}/result` | Submit success/failure + log |
 | `POST` | `/api/v1/jobs/{id}/status` | Report in-progress status text |
 | `GET`  | `/api/v1/status` | Server health + ESPHome version info |
-| `GET`  | `/ui/api/targets/{filename}/content` | Read YAML config file content |
-| `POST` | `/ui/api/targets/{filename}/content` | Write YAML config file content |
+| `GET`  | `/api/v1/client/version` | Returns current server-side client version |
+| `GET`  | `/api/v1/client/code` | Returns all `.py` files from the bundled client for self-update |
 
 **`POST /api/v1/clients/register`**
 ```json
 // Request
-{ "hostname": "build-node-1", "platform": "linux/amd64" }
+{ "hostname": "build-node-1", "platform": "linux/amd64", "client_version": "0.0.1" }
 // Response
 { "client_id": "uuid" }
 ```
+
+**`POST /api/v1/clients/heartbeat`**
+```json
+// Request
+{ "client_id": "uuid" }
+// Response
+{ "ok": true, "server_client_version": "0.0.1" }
+```
+The client compares `server_client_version` against its own `CLIENT_VERSION` constant. If they differ, the client triggers a self-update (see §2.6).
 
 **`GET /api/v1/jobs/next`**
 ```json
@@ -139,8 +148,9 @@ All endpoints are under `/api/v1/`. Authentication: shared secret token in `Auth
   "bundle_b64": "<base64 tar.gz>",
   "timeout_seconds": 300
 }
-// Response (204 — no jobs available)
+// Response (204 — no jobs available, or client is disabled)
 ```
+Disabled clients receive 204 without a job being dequeued.
 
 **`POST /api/v1/jobs/{id}/result`**
 ```json
@@ -150,12 +160,26 @@ All endpoints are under `/api/v1/`. Authentication: shared secret token in `Auth
   "ota_result": "success"    // or "failed", "skipped"
 }
 ```
+`submit_result` also accepts a second call with only `ota_result` set (and `log` omitted) on an already-`SUCCESS` job. This allows the compile result and OTA result to be reported independently.
+
+**`GET /api/v1/client/code`**
+```json
+// Response
+{
+  "version": "0.0.1",
+  "files": {
+    "client.py": "<file content>",
+    "version_manager.py": "<file content>"
+  }
+}
+```
 
 ### 1.7 Client Registry
 
-- Clients register on connect; server tracks `{ client_id, hostname, platform, last_seen, current_job_id }`
+- Clients register on connect; server tracks `{ client_id, hostname, platform, last_seen, current_job_id, disabled, client_version }`
 - A client is considered **online** if `last_seen` is within 30 seconds (configurable)
 - Heartbeat interval: 10 seconds (client side)
+- Clients can be **disabled** via `POST /ui/api/clients/{client_id}/disable`. Disabled clients still heartbeat and appear in the UI but will not be assigned new jobs (`GET /api/v1/jobs/next` returns 204 immediately)
 
 ### 1.8 Device Status Polling
 
@@ -202,7 +226,9 @@ Single-page HTML served by the aiohttp server. Uses vanilla JS + CSS (no build s
 **Sections:**
 
 **Clients Panel**
-- Table: `Hostname | Platform | Status (online/offline) | Current Job`
+- Table: `Hostname | Platform | Status (online/offline) | Version | Current Job | Actions`
+- Version column shows client version; highlights in orange with an up-arrow if the client version is older than the server's current client version
+- Actions column has a Disable/Enable toggle button; disabled clients are shown at reduced opacity
 - Auto-refreshes every 5 seconds
 
 **Devices Panel**
@@ -218,23 +244,28 @@ Single-page HTML served by the aiohttp server. Uses vanilla JS + CSS (no build s
 - Disabled while a run is in progress
 
 **Queue Panel** (visible when a run is active or recent jobs exist)
-- Table columns: `[ ] | Target | State | Client | Duration | OTA | Actions`
+- Table columns: `[ ] | Target | State+OTA | Client | Duration | Actions`
+- State and OTA result are combined in a single badge column
 - Checkbox column for multi-select cancel
-- `Cancel Selected` button
+- `Cancel Selected` button; `Retry All Failed` button in header; per-row `Retry` button on failed/timed_out jobs
 - State badge color-coding: pending=grey, running=blue, success=green, failed=red, timed_out=orange
 - Auto-refreshes every 3 seconds
 - Log viewer: click a completed job row to expand inline log output
+- Duration counter stops when job reaches a terminal state
 
 **Internal UI API endpoints:**
 
 | Method | Path | Description |
 |--------|------|-------------|
+| `GET`  | `/ui/api/info` | Server info: ESPHome version, client version, online clients |
 | `GET`  | `/ui/api/targets` | List discovered YAML targets with device status |
 | `GET`  | `/ui/api/queue` | Current job queue state |
 | `GET`  | `/ui/api/clients` | Connected build clients |
 | `GET`  | `/ui/api/devices` | Known ESPHome devices with version info |
 | `POST` | `/ui/api/compile` | Start a compile run `{ "targets": ["all" \| "outdated" \| ["file.yaml", ...]] }` |
 | `POST` | `/ui/api/cancel` | Cancel jobs `{ "job_ids": ["uuid", ...] }` |
+| `POST` | `/ui/api/retry` | Re-enqueue failed/timed_out jobs `{ "job_ids": ["uuid", ...] \| "all_failed" }` |
+| `POST` | `/ui/api/clients/{client_id}/disable` | Enable/disable a client `{ "disabled": true \| false }` |
 | `GET`  | `/ui/api/targets/{filename}/content` | Read YAML config file content |
 | `POST` | `/ui/api/targets/{filename}/content` | Write YAML config file content |
 
@@ -350,8 +381,26 @@ loop (concurrent):
   - Compile succeeded + OTA failed → `status: success, ota_result: failed`
   - Compile failed → no OTA attempted → `status: failed, ota_result: null`
 - OTA timeout: separate configurable value (`OTA_TIMEOUT`, default 120s)
+- On OTA failure: retry once after a 5-second delay. No retry on timeout.
 
-### 2.5 Configuration (Environment Variables)
+### 2.5 Connectivity and Reconnection
+
+The client tracks server reachability and auth state with lightweight flags:
+- On connection error: log once (not on every poll); suppress repeated warnings until connectivity is restored
+- On auth failure (401): log once; suppress repeated warnings
+- On heartbeat 404 (server doesn't recognise `client_id`): set a re-registration flag; the main loop re-registers and restarts the heartbeat thread before the next poll
+
+### 2.6 Client Auto-Update
+
+Clients self-update when the server is running a newer client version:
+- Every heartbeat response includes `server_client_version`
+- Client compares against its own `CLIENT_VERSION = "x.y.z"` constant
+- If versions differ, the client sets an internal `_update_available` event
+- The main loop checks this event between jobs (never interrupts a running job)
+- On update: download all `.py` files from `GET /api/v1/client/code`, write them to the client directory, restart the process in-place via `os.execv(sys.executable, sys.argv)` — preserves env vars and Docker restart policy
+- Circuit breaker: if the update fails or the process re-starts into the same version 3 times, no more updates are attempted until the container is restarted
+
+### 2.7 Configuration (Environment Variables)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -363,6 +412,9 @@ loop (concurrent):
 | `OTA_TIMEOUT` | `120` | OTA upload timeout in seconds |
 | `MAX_ESPHOME_VERSIONS` | `3` | Max cached ESPHome versions on disk |
 | `HOSTNAME` | `socket.gethostname()` | Worker name shown in UI |
+| `ESPHOME_SEED_VERSION` | — | Pre-install this ESPHome version at startup |
+| `ESPHOME_BIN` | — | Use this binary directly instead of version-manager venvs |
+| `PLATFORMIO_CORE_DIR` | — | Override PlatformIO core directory; set to a persistent path to avoid re-downloading toolchains on container restart |
 
 ---
 
@@ -372,7 +424,7 @@ loop (concurrent):
 
 ```yaml
 name: "ESPHome Distributed Build Server"
-version: "1.0.0"
+version: "0.0.1"
 slug: "esphome_dist_server"
 description: "Distributed ESPHome compilation coordinator"
 arch: [aarch64, amd64, armhf, armv7, i386]
@@ -399,13 +451,15 @@ options:
   device_poll_interval: 60
   disable_local_client: false
 schema:
-  token: str
+  token: password
   job_timeout: int
   ota_timeout: int
   client_offline_threshold: int
   device_poll_interval: int
   disable_local_client: bool
 ```
+
+A `VERSION` file at `ha-addon/VERSION` contains the plain version string (e.g. `0.0.1`). The server reads this file at runtime via `GET /api/v1/client/version` and includes it in heartbeat responses. The version in `config.yaml`, `VERSION`, and `CLIENT_VERSION` in `client.py` must all be kept in sync.
 
 Both `ingress_port` and `ports:` point to 8765 — the same aiohttp process serves both. Ingress traffic arrives from `172.30.32.2` (trusted, no auth check needed). Direct port traffic must present `Authorization: Bearer <token>` on `/api/v1/*` routes.
 
@@ -544,12 +598,15 @@ distributed-esphome/
 | Job timeout + re-enqueue | `test_queue.py` | State transitions, retry counter increments |
 | Max retries → permanent failure | `test_queue.py` | Job marked `failed` after 3 timeouts |
 | Cancel job (any state) | `test_queue.py` | Transitions to `failed` |
+| Retry failed/timed_out jobs | `test_queue.py` | `retry()` creates new PENDING jobs; skips non-terminal jobs |
 | Restart recovery — pending | `test_queue.py` | Pending jobs reload correctly from JSON |
 | Restart recovery — assigned | `test_queue.py` | Assigned/running jobs reset to pending |
 | YAML scanner discovery | `test_scanner.py` | Finds correct files, excludes `secrets.yaml` from target list |
 | Bundle creation | `test_scanner.py` | tar.gz includes `secrets.yaml` and full tree |
 | Version eviction | `test_client.py` | LRU eviction triggers at limit+1 |
 | Client timeout behavior | `test_client.py` | Job marked failed after timeout, temp dir cleaned |
+| Client registry — disable | `test_registry.py` | `set_disabled` blocks job assignment; `is_online` unaffected |
+| Client registry — versioning | `test_registry.py` | `client_version` stored on register |
 | Device name → YAML mapping | `test_device_poller.py` | Correct match and unmanaged handling |
 
 ### Integration Tests (docker compose, mock ESPHome)

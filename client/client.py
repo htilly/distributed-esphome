@@ -177,7 +177,7 @@ def extract_bundle(bundle_b64: str, dest_dir: str) -> None:
     """Decode and extract the base64 tar.gz bundle into dest_dir."""
     raw = base64.b64decode(bundle_b64)
     with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
-        tar.extractall(path=dest_dir)
+        tar.extractall(path=dest_dir, filter="data")
     logger.debug("Bundle extracted to %s", dest_dir)
 
 
