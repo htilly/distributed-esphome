@@ -28,7 +28,7 @@ from version_manager import VersionManager
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "0.0.23"
+CLIENT_VERSION = "0.0.24"
 
 # ---------------------------------------------------------------------------
 # System information gathering (stdlib only — no psutil dependency)
@@ -518,6 +518,135 @@ def _apply_update(current_client_id: str) -> None:
         logger.warning("Client update failed: %s", exc)
 
 
+def _ota_network_diagnostics(target_path: str, cwd: str, env: dict) -> str:
+    """Run network diagnostics after an OTA failure.
+
+    Parses the target YAML (best-effort) to find the device IP/hostname,
+    then checks TCP connectivity, DNS resolution, and network route.
+    Returns a human-readable diagnostics string for the build log.
+    """
+    import re as _re  # noqa: PLC0415
+
+    lines: list[str] = []
+
+    # Try to find the device address from the YAML config
+    device_addr = None
+    ota_port = None
+    try:
+        with open(target_path, encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        # Look for wifi.manual_ip.static_ip or use the device name
+        ip_match = _re.search(r"static_ip:\s*['\"]?(\d+\.\d+\.\d+\.\d+)", content)
+        if ip_match:
+            device_addr = ip_match.group(1)
+        # Check for OTA port override
+        port_match = _re.search(r"port:\s*(\d+)", content.split("ota:")[1] if "ota:" in content else "")
+        if port_match:
+            ota_port = int(port_match.group(1))
+    except Exception:
+        pass
+
+    # Also try to extract the IP from the esphome config (resolve the device name)
+    device_name = None
+    try:
+        with open(target_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = _re.match(r'\s*name:\s*["\']?([a-zA-Z0-9_-]+)', line)
+                if m:
+                    device_name = m.group(1)
+                    break
+    except Exception:
+        pass
+
+    if not device_addr and device_name:
+        # Try DNS resolution of the device name (ESPHome devices register as <name>.local)
+        try:
+            import socket as _socket  # noqa: PLC0415
+            device_addr = _socket.gethostbyname(f"{device_name}.local")
+            lines.append(f"Resolved {device_name}.local → {device_addr}")
+        except Exception:
+            lines.append(f"DNS: {device_name}.local — FAILED to resolve")
+            # Try without .local
+            try:
+                device_addr = _socket.gethostbyname(device_name)
+                lines.append(f"Resolved {device_name} → {device_addr}")
+            except Exception:
+                lines.append(f"DNS: {device_name} — FAILED to resolve")
+
+    if not device_addr:
+        lines.append("Could not determine device IP for diagnostics")
+        return "\n".join(lines)
+
+    # Determine OTA port: ESP8266 uses 8266, ESP32 uses 3232
+    if not ota_port:
+        # Check both common ports
+        ports_to_check = [3232, 8266]
+    else:
+        ports_to_check = [ota_port]
+
+    lines.append(f"Device IP: {device_addr}")
+
+    # TCP connectivity check
+    import socket as _socket  # noqa: PLC0415
+    for port in ports_to_check:
+        try:
+            sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            sock.settimeout(5)
+            result = sock.connect_ex((device_addr, port))
+            if result == 0:
+                lines.append(f"TCP {device_addr}:{port} — OPEN (connected)")
+            else:
+                lines.append(f"TCP {device_addr}:{port} — CLOSED (errno {result})")
+            sock.close()
+        except _socket.timeout:
+            lines.append(f"TCP {device_addr}:{port} — TIMEOUT (5s)")
+        except Exception as exc:
+            lines.append(f"TCP {device_addr}:{port} — ERROR: {exc}")
+
+    # Ping check (ICMP)
+    try:
+        ping_result = subprocess.run(
+            ["ping", "-c", "3", "-W", "2", device_addr],
+            capture_output=True, text=True, timeout=10,
+        )
+        ping_summary = [l for l in ping_result.stdout.splitlines() if "packet" in l.lower() or "rtt" in l.lower() or "round-trip" in l.lower()]
+        for line in ping_summary:
+            lines.append(f"Ping: {line.strip()}")
+        if ping_result.returncode != 0 and not ping_summary:
+            lines.append(f"Ping: {device_addr} — UNREACHABLE")
+    except Exception as exc:
+        lines.append(f"Ping: {exc}")
+
+    # Check our own IP / network interface
+    try:
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        sock.connect((device_addr, 80))
+        our_ip = sock.getsockname()[0]
+        sock.close()
+        lines.append(f"Client IP: {our_ip} (source for reaching {device_addr})")
+    except Exception:
+        pass
+
+    # Docker network check
+    try:
+        if os.path.exists("/.dockerenv"):
+            lines.append("Running inside Docker container")
+            # Check if we're using host networking
+            try:
+                with open("/proc/1/cgroup", encoding="utf-8", errors="replace") as f:
+                    cgroup = f.read()
+                if "docker" in cgroup:
+                    lines.append("Network mode: bridge (NAT) — consider --network host if OTA fails consistently")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    diag_text = "\n".join(lines)
+    logger.info("OTA diagnostics for %s:\n%s", device_addr, diag_text)
+    return diag_text
+
+
 def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_id: int = 1) -> None:
     """Execute a single build job end-to-end."""
     global _active_jobs
@@ -618,6 +747,12 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
                 break
             if ota_log.endswith("TIMED OUT"):
                 break  # Don't retry timeouts
+
+        # Run network diagnostics on OTA failure to help debug
+        if ota_result == "failed":
+            diag = _ota_network_diagnostics(target_path, tmp_dir, subprocess_env)
+            if diag:
+                ota_logs.append("\n--- Network Diagnostics ---\n" + diag)
 
         logger.info("OTA result for job %s: %s", job_id, ota_result)
         _submit_ota_result(job_id, ota_result, "\n".join(ota_logs))
