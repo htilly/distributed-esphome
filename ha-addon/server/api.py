@@ -100,6 +100,27 @@ async def client_heartbeat(request: web.Request) -> web.Response:
     })
 
 
+@routes.post("/api/v1/clients/deregister")
+async def deregister_client(request: web.Request) -> web.Response:
+    """Remove a client from the registry on clean shutdown."""
+    if not _check_auth(request):
+        return _unauthorized()
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    client_id = body.get("client_id")
+    if not client_id:
+        return web.json_response({"error": "client_id required"}, status=400)
+
+    registry = request.app["registry"]
+    if registry.remove(client_id):
+        logger.info("Client %s deregistered (clean shutdown)", client_id)
+        return web.json_response({"ok": True})
+    return web.json_response({"error": "Unknown client_id"}, status=404)
+
+
 @routes.get("/api/v1/jobs/next")
 async def get_next_job(request: web.Request) -> web.Response:
     if not _check_auth(request):

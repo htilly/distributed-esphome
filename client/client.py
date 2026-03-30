@@ -28,7 +28,7 @@ from version_manager import VersionManager
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "0.0.17"
+CLIENT_VERSION = "0.0.18"
 
 # ---------------------------------------------------------------------------
 # System information gathering (stdlib only — no psutil dependency)
@@ -255,6 +255,8 @@ ESPHOME_BIN = os.environ.get("ESPHOME_BIN")  # If set, skip version manager
 ESPHOME_SEED_VERSION = os.environ.get("ESPHOME_SEED_VERSION")  # Pre-download on startup
 # Base directory for per-slot PlatformIO core dirs (avoids cross-slot conflicts)
 _ESPHOME_VERSIONS_DIR = os.environ.get("ESPHOME_VERSIONS_DIR", "/esphome-versions")
+# Persistent client identity file — survives container restarts
+_CLIENT_ID_FILE = os.path.join(_ESPHOME_VERSIONS_DIR, ".client_id")
 
 HEADERS = {
     "Authorization": f"Bearer {SERVER_TOKEN}",
@@ -332,13 +334,61 @@ def get(path: str, params: Optional[dict] = None, timeout: int = 30) -> requests
 # Registration
 # ---------------------------------------------------------------------------
 
+def _load_client_id() -> Optional[str]:
+    """Load persisted client_id from disk (survives container restarts)."""
+    # Environment override (set by auto-update before os.execv)
+    env_id = os.environ.pop("DISTRIBUTED_ESPHOME_CLIENT_ID", None)
+    if env_id:
+        return env_id
+    try:
+        if os.path.exists(_CLIENT_ID_FILE):
+            with open(_CLIENT_ID_FILE, encoding="utf-8") as f:
+                cid = f.read().strip()
+                if cid:
+                    return cid
+    except OSError:
+        pass
+    return None
+
+
+def _save_client_id(client_id: str) -> None:
+    """Persist client_id to disk."""
+    try:
+        os.makedirs(os.path.dirname(_CLIENT_ID_FILE), exist_ok=True)
+        with open(_CLIENT_ID_FILE, "w", encoding="utf-8") as f:
+            f.write(client_id)
+    except OSError as exc:
+        logger.debug("Could not persist client_id: %s", exc)
+
+
+def _clear_client_id() -> None:
+    """Remove persisted client_id (on clean deregister)."""
+    try:
+        if os.path.exists(_CLIENT_ID_FILE):
+            os.remove(_CLIENT_ID_FILE)
+    except OSError:
+        pass
+
+
+def deregister(client_id: str) -> None:
+    """Tell the server to remove this client (best-effort on shutdown)."""
+    try:
+        resp = post("/api/v1/clients/deregister", {"client_id": client_id})
+        if resp.ok:
+            logger.info("Deregistered client %s", client_id)
+            _clear_client_id()
+        else:
+            logger.debug("Deregister returned %s", resp.status_code)
+    except Exception as exc:
+        logger.debug("Deregister failed: %s", exc)
+
+
 def register() -> str:
     """Register with server and return client_id. Retries until successful.
 
-    If DISTRIBUTED_ESPHOME_CLIENT_ID is set in the environment (stashed before
-    an auto-update os.execv), sends it so the server can update in place.
+    Re-uses a persisted client_id so the server recognises us across restarts.
     """
-    existing_id = os.environ.pop("DISTRIBUTED_ESPHOME_CLIENT_ID", None)
+    existing_id = _load_client_id()
     while True:
         try:
             sysinfo = collect_system_info()
@@ -354,6 +404,7 @@ def register() -> str:
             resp = post("/api/v1/clients/register", payload)
             resp.raise_for_status()
             client_id = resp.json()["client_id"]
+            _save_client_id(client_id)
             logger.info("Registered as client %s (version %s)", client_id, CLIENT_VERSION)
             logger.info(
                 "System: %s | %s | %s cores | %s | %s",
@@ -802,10 +853,21 @@ def _launch_workers(
 
 
 def main() -> None:
+    import signal  # noqa: PLC0415
+
     logger.info(
         "ESPHome Build Client starting (hostname=%s, workers=%d)",
         HOSTNAME, MAX_PARALLEL_JOBS,
     )
+
+    # Handle SIGTERM (sent by Docker on `docker stop`) — raise in main thread
+    _shutdown_requested = threading.Event()
+
+    def _sigterm_handler(signum, frame):
+        logger.info("Received SIGTERM, shutting down")
+        _shutdown_requested.set()
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
 
     version_manager = VersionManager(max_versions=MAX_ESPHOME_VERSIONS)
 
@@ -853,7 +915,7 @@ def main() -> None:
     worker_stop, worker_threads = _launch_workers(client_id, version_manager)
 
     try:
-        while True:
+        while not _shutdown_requested.is_set():
             # Re-register if the heartbeat told us the server doesn't know us.
             # Wait until all workers are idle so in-flight jobs can complete.
             if _reregister_needed.is_set() and _is_idle():
@@ -893,10 +955,12 @@ def main() -> None:
 
             time.sleep(1)
     except KeyboardInterrupt:
-        logger.info("Shutting down")
+        logger.info("Shutting down (Ctrl-C)")
     finally:
         worker_stop.set()
         stop_heartbeat.set()
+        hb_thread.join(timeout=2)
+        deregister(client_id)
 
 
 if __name__ == "__main__":
