@@ -39,7 +39,8 @@ SCRIPTS_DIR="$REPO_ROOT/client/dist-scripts"
 case "$PLATFORM" in
   linux/arm64|linux/aarch64) _ARCH_SUFFIX="-arm64" ;;
   linux/arm/v7)              _ARCH_SUFFIX="-armv7" ;;
-  *)                          _ARCH_SUFFIX="" ;;
+  linux/amd64)               _ARCH_SUFFIX="-x86_64" ;;
+  *)                          _ARCH_SUFFIX="-x86_64" ;;
 esac
 
 OUT_DIR="$REPO_ROOT/dist"
