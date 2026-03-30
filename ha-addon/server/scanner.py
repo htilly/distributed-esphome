@@ -55,6 +55,39 @@ def create_bundle(config_dir: str) -> bytes:
     return buf.getvalue()
 
 
+def _resolve_esphome_config(config_dir: str, target: str) -> Optional[dict]:
+    """Fully resolve an ESPHome YAML config including packages and substitutions.
+
+    Uses ESPHome's own resolution pipeline so that ``packages:``, ``!include``,
+    and ``${substitutions}`` are all handled identically to ``esphome compile``.
+
+    Returns the resolved config dict, or None on error.
+    """
+    try:
+        from esphome.yaml_util import load_yaml  # noqa: PLC0415
+        from esphome.components.substitutions import do_substitution_pass  # noqa: PLC0415
+        from esphome.components.packages import do_packages_pass, merge_packages  # noqa: PLC0415
+        from esphome.core import CORE  # noqa: PLC0415
+
+        path = Path(config_dir) / target
+        CORE.config_path = path
+        config = load_yaml(path)
+        if not isinstance(config, dict):
+            return None
+
+        # Resolve packages (local + remote includes) — skip git updates for speed
+        config = do_packages_pass(config, skip_update=True)
+        config = merge_packages(config)
+
+        # Resolve ${substitutions}
+        do_substitution_pass(config, None, ignore_missing=True)
+
+        return config
+    except Exception:
+        logger.debug("Could not resolve config for %s", target, exc_info=True)
+        return None
+
+
 def get_device_metadata(config_dir: str, target: str) -> dict:
     """Return display metadata from a YAML config file.
 
@@ -64,34 +97,22 @@ def get_device_metadata(config_dir: str, target: str) -> dict:
       - comment:       str | None  — esphome.comment
     """
     result: dict = {"friendly_name": None, "device_name": None, "comment": None}
-    try:
-        from esphome.yaml_util import load_yaml  # noqa: PLC0415
-        from esphome.components.substitutions import do_substitution_pass  # noqa: PLC0415
-        from esphome.core import CORE  # noqa: PLC0415
-
-        path = Path(config_dir) / target
-        CORE.config_path = path
-        config = load_yaml(path)
-        if not isinstance(config, dict):
-            return result
-
-        do_substitution_pass(config, None, ignore_missing=True)
-
-        esphome_block = config.get("esphome") or {}
-        if isinstance(esphome_block, dict):
-            friendly = esphome_block.get("friendly_name")
-            if friendly:
-                result["friendly_name"] = str(friendly)
-            raw_name = esphome_block.get("name")
-            if raw_name:
-                result["device_name"] = str(raw_name).replace("_", " ").replace("-", " ").title()
-            comment = esphome_block.get("comment")
-            if comment:
-                result["comment"] = str(comment)
+    config = _resolve_esphome_config(config_dir, target)
+    if config is None:
         return result
-    except Exception:
-        logger.debug("Could not parse metadata from %s", target, exc_info=True)
-        return result
+
+    esphome_block = config.get("esphome") or {}
+    if isinstance(esphome_block, dict):
+        friendly = esphome_block.get("friendly_name")
+        if friendly:
+            result["friendly_name"] = str(friendly)
+        raw_name = esphome_block.get("name")
+        if raw_name:
+            result["device_name"] = str(raw_name).replace("_", " ").replace("-", " ").title()
+        comment = esphome_block.get("comment")
+        if comment:
+            result["comment"] = str(comment)
+    return result
 
 
 def get_friendly_name(config_dir: str, target: str) -> Optional[str]:
@@ -103,38 +124,23 @@ def get_friendly_name(config_dir: str, target: str) -> Optional[str]:
 def build_name_to_target_map(config_dir: str, targets: list[str]) -> dict[str, str]:
     """Build a mapping from ESPHome device name → YAML filename.
 
-    For each target, parse the ``esphome.name`` field.  If explicitly set, map
-    that name to the target.  Always also map the filename stem (without
-    extension) so filename-based matching still works as a fallback.
+    For each target, resolve the full config (including packages) and extract
+    ``esphome.name``.  Always also map the filename stem so filename-based
+    matching works as a fallback.
     """
     name_map: dict[str, str] = {}
     for target in targets:
         stem = Path(target).stem
         name_map[stem] = target  # fallback: filename stem
-        meta = get_device_metadata(config_dir, target)
-        raw_name = meta.get("device_name")
-        if raw_name:
-            # device_name is title-cased for display; recover the raw name
-            # by re-parsing the YAML (get_device_metadata already does this).
-            pass
-        # Parse raw esphome.name directly (not the title-cased display version)
-        try:
-            from esphome.yaml_util import load_yaml  # noqa: PLC0415
-            from esphome.components.substitutions import do_substitution_pass  # noqa: PLC0415
-            from esphome.core import CORE  # noqa: PLC0415
 
-            path = Path(config_dir) / target
-            CORE.config_path = path
-            config = load_yaml(path)
-            if isinstance(config, dict):
-                do_substitution_pass(config, None, ignore_missing=True)
-                esphome_block = config.get("esphome") or {}
-                if isinstance(esphome_block, dict):
-                    esph_name = esphome_block.get("name")
-                    if esph_name:
-                        name_map[str(esph_name)] = target
-        except Exception:
-            logger.debug("Could not parse esphome.name from %s", target, exc_info=True)
+        config = _resolve_esphome_config(config_dir, target)
+        if config is None:
+            continue
+        esphome_block = config.get("esphome") or {}
+        if isinstance(esphome_block, dict):
+            esph_name = esphome_block.get("name")
+            if esph_name:
+                name_map[str(esph_name)] = target
     return name_map
 
 

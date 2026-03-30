@@ -27,7 +27,7 @@ from version_manager import VersionManager
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "0.0.14"
+CLIENT_VERSION = "0.0.15"
 
 # ---------------------------------------------------------------------------
 # Logging setup — per-worker context filter
