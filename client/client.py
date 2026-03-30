@@ -341,12 +341,13 @@ def register() -> str:
     existing_id = os.environ.pop("DISTRIBUTED_ESPHOME_CLIENT_ID", None)
     while True:
         try:
+            sysinfo = collect_system_info()
             payload: dict = {
                 "hostname": HOSTNAME,
                 "platform": PLATFORM,
                 "client_version": CLIENT_VERSION,
                 "max_parallel_jobs": MAX_PARALLEL_JOBS,
-                "system_info": collect_system_info(),
+                "system_info": sysinfo,
             }
             if existing_id:
                 payload["client_id"] = existing_id
@@ -354,6 +355,14 @@ def register() -> str:
             resp.raise_for_status()
             client_id = resp.json()["client_id"]
             logger.info("Registered as client %s (version %s)", client_id, CLIENT_VERSION)
+            logger.info(
+                "System: %s | %s | %s cores | %s | %s",
+                sysinfo.get("os_version", "?"),
+                sysinfo.get("cpu_model", "?"),
+                sysinfo.get("cpu_cores", "?"),
+                sysinfo.get("total_memory", "?"),
+                sysinfo.get("cpu_arch", "?"),
+            )
             return client_id
         except Exception as exc:
             logger.warning("Registration failed: %s; retrying in 5s", exc)
