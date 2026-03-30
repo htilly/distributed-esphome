@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.32
+- Fix add-on startup: bypass s6-overlay, use Docker tini + direct CMD
+- Root cause: s6-overlay-suexec setuid blocked by container security context
+- Proper architecture: `init: true`, `ENTRYPOINT []`, `CMD ["python3", ...]`
+- Deploy script now flushes stale AppArmor kernel profiles
+
 ## 0.0.31
 - Remove custom AppArmor profile — use HA default instead
 
