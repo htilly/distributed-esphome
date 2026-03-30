@@ -65,6 +65,7 @@ for script in start.sh stop.sh uninstall.sh; do
     cp "$SCRIPTS_DIR/$script" "$TMP_DIR/$script"
 done
 chmod +x "$TMP_DIR"/*.sh
+echo "$VERSION" > "$TMP_DIR/VERSION"
 
 # Bake build-time SERVER_URL and SERVER_TOKEN as a comment in start.sh
 sed -i.bak \
@@ -73,7 +74,7 @@ sed -i.bak \
 rm -f "$TMP_DIR/start.sh.bak"
 
 echo "==> Creating archive $ARCHIVE ..."
-tar -czf "$ARCHIVE" -C "$TMP_DIR" esphome-dist-client.tar start.sh stop.sh uninstall.sh
+tar -czf "$ARCHIVE" -C "$TMP_DIR" VERSION esphome-dist-client.tar start.sh stop.sh uninstall.sh
 
 echo ""
 echo "Done: $ARCHIVE ($(du -h "$ARCHIVE" | cut -f1))"
