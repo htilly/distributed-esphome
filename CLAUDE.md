@@ -83,13 +83,20 @@ When a client claims a job, the server calls `scanner.create_bundle()` which tar
 
 ### Configuration
 
-Server config is loaded from `/data/options.json` (HA add-on) with environment variable fallbacks. Key env vars: `ESPHOME_CONFIG_DIR`, `SERVER_TOKEN`, `JOB_TIMEOUT` (300s), `OTA_TIMEOUT` (120s), `PORT` (8765).
+Server config is loaded from `/data/options.json` (HA add-on) with environment variable fallbacks. Key env vars: `ESPHOME_CONFIG_DIR`, `SERVER_TOKEN`, `JOB_TIMEOUT` (600s), `OTA_TIMEOUT` (120s), `PORT` (8765).
 
-Client config is all via environment: `SERVER_URL`, `SERVER_TOKEN`, `POLL_INTERVAL` (5s), `JOB_TIMEOUT` (300s), `MAX_ESPHOME_VERSIONS` (3).
+Client config is all via environment: `SERVER_URL`, `SERVER_TOKEN`, `POLL_INTERVAL` (5s), `JOB_TIMEOUT` (600s), `MAX_ESPHOME_VERSIONS` (3).
 
 ## Test Setup
 
 `tests/conftest.py` adds `ha-addon/server` and `client` to `sys.path`. Tests use `asyncio_mode = auto` (configured in `pytest.ini`). Sample ESPHome YAML fixtures are in `tests/fixtures/esphome_configs/`.
+
+## Deployment
+
+`hass-4` refers to the local Home Assistant instance. Use the `push-to-hass-4.sh` script to deploy the add-on:
+```bash
+./push-to-hass-4.sh
+```
 
 ## Design Specification
 

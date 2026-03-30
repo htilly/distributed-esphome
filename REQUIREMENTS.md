@@ -73,7 +73,7 @@ Job {
     state: enum(pending, assigned, running, success, failed, timed_out)
     assigned_client_id: str | None
     assigned_at: datetime | None
-    timeout_seconds: int     # default 300
+    timeout_seconds: int     # default 600
     created_at: datetime
     finished_at: datetime | None
     retry_count: int         # max 3 before permanent failure
@@ -146,7 +146,7 @@ The client compares `server_client_version` against its own `CLIENT_VERSION` con
   "target": "living_room.yaml",
   "esphome_version": "2024.3.1",
   "bundle_b64": "<base64 tar.gz>",
-  "timeout_seconds": 300
+  "timeout_seconds": 600
 }
 // Response (204 — no jobs available, or client is disabled)
 ```
@@ -419,7 +419,7 @@ Clients self-update when the server is running a newer client version:
 | `SERVER_TOKEN` | required | Shared auth token |
 | `POLL_INTERVAL` | `5` | Seconds between job polls when idle |
 | `HEARTBEAT_INTERVAL` | `10` | Seconds between heartbeats |
-| `JOB_TIMEOUT` | `300` | Compile timeout in seconds |
+| `JOB_TIMEOUT` | `600` | Compile timeout in seconds |
 | `OTA_TIMEOUT` | `120` | OTA upload timeout in seconds |
 | `MAX_ESPHOME_VERSIONS` | `3` | Max cached ESPHome versions on disk |
 | `MAX_PARALLEL_JOBS` | `2` | Number of concurrent build workers per client |
@@ -457,7 +457,7 @@ map:
   - config:rw
 options:
   token: ""
-  job_timeout: 300
+  job_timeout: 600
   ota_timeout: 120
   client_offline_threshold: 30
   device_poll_interval: 60

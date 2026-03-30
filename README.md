@@ -67,7 +67,7 @@ Then in HA: **Settings → Add-ons → Local add-ons → ESPHome Distributed Bui
 | Option | Default | Description |
 |--------|---------|-------------|
 | `token` | `""` | Shared secret for build client auth (leave empty to auto-generate) |
-| `job_timeout` | `300` | Compile timeout in seconds |
+| `job_timeout` | `600` | Compile timeout in seconds |
 | `ota_timeout` | `120` | OTA upload timeout in seconds |
 | `client_offline_threshold` | `30` | Seconds before a client is considered offline |
 | `device_poll_interval` | `60` | How often to poll device firmware versions (seconds) |
@@ -158,7 +158,7 @@ All configuration is via environment variables:
 | `SERVER_TOKEN` | required | Shared auth token |
 | `POLL_INTERVAL` | `5` | Seconds between job polls when idle |
 | `HEARTBEAT_INTERVAL` | `10` | Seconds between heartbeats |
-| `JOB_TIMEOUT` | `300` | Compile timeout in seconds |
+| `JOB_TIMEOUT` | `600` | Compile timeout in seconds |
 | `OTA_TIMEOUT` | `120` | OTA upload timeout in seconds |
 | `MAX_ESPHOME_VERSIONS` | `3` | Max cached ESPHome versions on disk |
 | `MAX_PARALLEL_JOBS` | `2` | Concurrent build workers per client |
