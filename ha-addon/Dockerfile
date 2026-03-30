@@ -20,6 +20,7 @@ COPY VERSION /app/VERSION
 # Bundle client code so the server can serve it to remote clients for auto-update
 COPY client/ /app/client/
 
-COPY rootfs /
-RUN chmod a+x /etc/services.d/esphome-dist-server/run \
-    && chmod a+x /etc/services.d/esphome-dist-server/finish
+COPY run.sh /run.sh
+RUN chmod a+x /run.sh
+
+CMD ["/run.sh"]
