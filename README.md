@@ -165,6 +165,7 @@ All configuration is via environment variables:
 | `HOSTNAME` | system hostname | Worker name shown in UI |
 | `ESPHOME_SEED_VERSION` | — | Pre-install this ESPHome version at startup |
 | `ESPHOME_BIN` | — | Use this binary instead of the version-manager venvs |
+| `HOST_PLATFORM` | — | Override detected OS in UI (e.g. `macOS 15.3 (Apple M1 Pro)`) — useful when running Docker on non-Linux hosts |
 | `PLATFORMIO_CORE_DIR` | — | No longer needed — each slot automatically uses `$ESPHOME_VERSIONS_DIR/pio-slot-N/` |
 
 ## Development

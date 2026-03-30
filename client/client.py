@@ -28,7 +28,7 @@ from version_manager import VersionManager
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "0.0.16"
+CLIENT_VERSION = "0.0.17"
 
 # ---------------------------------------------------------------------------
 # System information gathering (stdlib only — no psutil dependency)
@@ -180,13 +180,20 @@ def _format_uptime(seconds: float) -> str:
 
 
 def collect_system_info() -> dict:
-    """Gather hardware/OS details using stdlib only. All fields are best-effort."""
+    """Gather hardware/OS details using stdlib only. All fields are best-effort.
+
+    When running in Docker on a non-Linux host, the container sees the VM's
+    Linux.  Set ``HOST_PLATFORM`` to override ``os_version`` with the actual
+    host OS (e.g. ``macOS 15.3 (Apple M1 Pro)``).
+    """
     cpu_count = os.cpu_count()
     mem_bytes = _get_total_memory_bytes()
 
+    os_version = os.environ.get("HOST_PLATFORM") or _get_os_version()
+
     info: dict = {
         "cpu_arch": platform.machine(),
-        "os_version": _get_os_version(),
+        "os_version": os_version,
         "cpu_cores": cpu_count,
         "cpu_model": _get_cpu_model(),
         "total_memory": _format_memory(mem_bytes) if mem_bytes is not None else None,

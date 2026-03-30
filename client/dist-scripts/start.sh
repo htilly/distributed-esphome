@@ -45,6 +45,7 @@ docker run -d \
     -e SERVER_URL="$SERVER_URL" \
     -e SERVER_TOKEN="$SERVER_TOKEN" \
     ${MAX_PARALLEL_JOBS:+-e MAX_PARALLEL_JOBS="$MAX_PARALLEL_JOBS"} \
+    ${HOST_PLATFORM:+-e HOST_PLATFORM="$HOST_PLATFORM"} \
     -v esphome-versions:/esphome-versions \
     "$IMAGE"
 
