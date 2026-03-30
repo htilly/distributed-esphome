@@ -61,24 +61,39 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 docker save "$IMAGE:latest" -o "$TMP_DIR/esphome-dist-client.tar"
 
 echo "==> Copying distribution scripts ..."
+# Bash scripts (macOS / Linux)
 for script in start.sh stop.sh uninstall.sh; do
     cp "$SCRIPTS_DIR/$script" "$TMP_DIR/$script"
 done
 chmod +x "$TMP_DIR"/*.sh
+# PowerShell scripts (Windows)
+for script in start.ps1 stop.ps1 uninstall.ps1; do
+    cp "$SCRIPTS_DIR/$script" "$TMP_DIR/$script"
+done
 echo "$VERSION" > "$TMP_DIR/VERSION"
 
-# Bake build-time SERVER_URL and SERVER_TOKEN as a comment in start.sh
+# Bake build-time SERVER_URL and SERVER_TOKEN as a comment in start.sh / start.ps1
 sed -i.bak \
     "s|{{BUILD_INFO}}|Built with: SERVER_URL=$SERVER_URL  SERVER_TOKEN=$SERVER_TOKEN|" \
     "$TMP_DIR/start.sh"
 rm -f "$TMP_DIR/start.sh.bak"
+sed -i.bak \
+    "s|{{BUILD_INFO}}|Built with: SERVER_URL=$SERVER_URL  SERVER_TOKEN=$SERVER_TOKEN|" \
+    "$TMP_DIR/start.ps1"
+rm -f "$TMP_DIR/start.ps1.bak"
 
 echo "==> Creating archive $ARCHIVE ..."
-tar -czf "$ARCHIVE" -C "$TMP_DIR" VERSION esphome-dist-client.tar start.sh stop.sh uninstall.sh
+tar -czf "$ARCHIVE" -C "$TMP_DIR" VERSION esphome-dist-client.tar \
+    start.sh stop.sh uninstall.sh \
+    start.ps1 stop.ps1 uninstall.ps1
 
 echo ""
 echo "Done: $ARCHIVE ($(du -h "$ARCHIVE" | cut -f1))"
 echo ""
-echo "To deploy to another host:"
+echo "To deploy (macOS/Linux):"
 echo "  scp $ARCHIVE user@host:/tmp/"
 echo "  ssh user@host 'cd /tmp && tar -xzf $(basename "$ARCHIVE") && SERVER_URL=$SERVER_URL SERVER_TOKEN=$SERVER_TOKEN ./start.sh'"
+echo ""
+echo "To deploy (Windows PowerShell):"
+echo "  # Extract the archive, then:"
+echo "  \$env:SERVER_URL='$SERVER_URL'; \$env:SERVER_TOKEN='$SERVER_TOKEN'; .\\start.ps1"
