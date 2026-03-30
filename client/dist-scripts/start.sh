@@ -23,6 +23,31 @@ if [ -z "${SERVER_TOKEN:-}" ]; then
     exit 1
 fi
 
+# Auto-detect host platform if not explicitly set
+if [ -z "${HOST_PLATFORM:-}" ]; then
+    _os="$(uname -s)"
+    case "$_os" in
+        Darwin)
+            _ver="$(sw_vers -productVersion 2>/dev/null || true)"
+            _cpu="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || true)"
+            HOST_PLATFORM="macOS${_ver:+ $_ver}${_cpu:+ ($_cpu)}"
+            ;;
+        Linux)
+            # Running start.sh directly on a Linux host (not inside Docker)
+            if [ -f /etc/os-release ]; then
+                # shellcheck disable=SC1091
+                . /etc/os-release
+                HOST_PLATFORM="${NAME:-Linux}${VERSION_ID:+ $VERSION_ID}"
+            else
+                HOST_PLATFORM="Linux $(uname -r)"
+            fi
+            ;;
+        *)
+            HOST_PLATFORM="$_os $(uname -r)"
+            ;;
+    esac
+fi
+
 IMAGE="esphome-dist-client"
 CONTAINER_NAME="esphome-dist-client"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
