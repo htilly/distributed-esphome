@@ -243,7 +243,7 @@ Single-page HTML served by the aiohttp server. Uses vanilla JS + CSS (no build s
 - Table columns: `[ ] | Target | State | Client | Duration | Actions`
 - Client column shows `hostname/worker_id` (e.g. `builder/2`) for multi-slot clients
 - State badge: pending=grey, running=blue, success=green, failed=red, timed_out=orange
-- OTA outcome reflected in badge: `Success` / `OTA Failed` / `Compiled` (no OTA yet)
+- OTA outcome reflected in badge: `Success` (green) / `OTA Failed` (orange) / `OTA Pending` (blue, awaiting OTA result)
 - `Cancel Selected`, `Retry Selected`, `Retry All Failed` (includes OTA failures), `Clear Succeeded`, `Clear Finished` buttons
 - Per-row `Retry` / `Cancel` / `Log` buttons
 - Triggering a new compile for a target removes any previous terminal jobs for that target
