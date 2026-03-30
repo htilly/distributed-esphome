@@ -71,6 +71,9 @@ chmod +x "$TMP_DIR"/*.sh
 for script in start.ps1 stop.ps1 uninstall.ps1; do
     cp "$SCRIPTS_DIR/$script" "$TMP_DIR/$script"
 done
+# Proxmox template builder
+cp "$SCRIPTS_DIR/build-proxmox-template.sh" "$TMP_DIR/build-proxmox-template.sh"
+chmod +x "$TMP_DIR/build-proxmox-template.sh"
 echo "$VERSION" > "$TMP_DIR/VERSION"
 
 # Bake build-time SERVER_URL and SERVER_TOKEN as a comment in start.sh / start.ps1
@@ -86,7 +89,8 @@ rm -f "$TMP_DIR/start.ps1.bak"
 echo "==> Creating archive $ARCHIVE ..."
 tar -czf "$ARCHIVE" -C "$TMP_DIR" VERSION esphome-dist-client.tar \
     start.sh stop.sh uninstall.sh \
-    start.ps1 stop.ps1 uninstall.ps1
+    start.ps1 stop.ps1 uninstall.ps1 \
+    build-proxmox-template.sh
 
 echo ""
 echo "Done: $ARCHIVE ($(du -h "$ARCHIVE" | cut -f1))"
