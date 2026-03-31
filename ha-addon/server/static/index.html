@@ -309,7 +309,7 @@
       border-radius: var(--radius);
       width: 100%;
       max-width: 960px;
-      max-height: 90vh;
+      height: 80vh;
       display: flex;
       flex-direction: column;
       box-shadow: 0 12px 40px rgba(0,0,0,0.7);
@@ -1038,14 +1038,33 @@ function renderQueue() {
 // Log modal
 // ============================================================
 let logWs = null;
+let logAutoScroll = true;
 
 function buildWsUrl(path) {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const base = document.querySelector('base')?.getAttribute('href') || '/';
-  // Resolve relative path against base href (handles HA Ingress prefix)
   const a = document.createElement('a');
   a.href = base + path;
   return `${proto}//${location.host}${a.pathname}`;
+}
+
+// Strip ANSI escape codes and process \r (carriage return) for progress bars
+function processLogText(existing, newText) {
+  // Strip ANSI escape sequences (colors, cursor moves, etc.)
+  const stripped = newText.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+
+  // Process \r: carriage return overwrites the current line
+  let result = existing;
+  for (const ch of stripped) {
+    if (ch === '\r') {
+      // Remove back to the last newline (overwrite current line)
+      const lastNl = result.lastIndexOf('\n');
+      result = lastNl >= 0 ? result.substring(0, lastNl + 1) : '';
+    } else {
+      result += ch;
+    }
+  }
+  return result;
 }
 
 function openLogModal(jobId) {
@@ -1063,9 +1082,15 @@ function openLogModal(jobId) {
   const logEl = document.getElementById('modal-log');
   const isLive = ['assigned', 'running'].includes(job.state);
 
+  // Track scroll position for auto-tail
+  logAutoScroll = true;
+  logEl.onscroll = () => {
+    const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 30;
+    logAutoScroll = atBottom;
+  };
+
   if (isLive) {
     logEl.textContent = 'Connecting to live log...\n';
-    // Close any previous WebSocket before opening a new one
     if (logWs) { try { logWs.close(); } catch(e) {} logWs = null; }
     if (logPollTimer) { clearTimeout(logPollTimer); logPollTimer = null; }
     try {
@@ -1077,8 +1102,8 @@ function openLogModal(jobId) {
         console.log('Log WebSocket connected');
       };
       logWs.onmessage = (e) => {
-        logEl.textContent += e.data;
-        logEl.scrollTop = logEl.scrollHeight;
+        logEl.textContent = processLogText(logEl.textContent, e.data);
+        if (logAutoScroll) logEl.scrollTop = logEl.scrollHeight;
       };
       logWs.onerror = (err) => {
         console.warn('Log WebSocket error, falling back to polling', err);
@@ -1091,7 +1116,7 @@ function openLogModal(jobId) {
       startLogPolling(jobId);
     }
   } else {
-    logEl.textContent = job.log || '(no log)';
+    logEl.textContent = processLogText('', job.log || '(no log)');
   }
 
   document.getElementById('log-modal').classList.add('open');
@@ -1116,8 +1141,8 @@ async function pollLog() {
       const data = await r.json();
       if (data.log) {
         const logEl = document.getElementById('modal-log');
-        logEl.textContent += data.log;
-        logEl.scrollTop = logEl.scrollHeight;
+        logEl.textContent = processLogText(logEl.textContent, data.log);
+        if (logAutoScroll) logEl.scrollTop = logEl.scrollHeight;
       }
       logPollOffset = data.offset;
       if (!data.finished) {

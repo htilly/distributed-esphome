@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.42
+- Log modal: fixed 80vh height, auto-tail follows output unless user scrolls up
+- Progress bars render correctly (handle \r carriage returns)
+- Strip ANSI escape codes from log output
+
 ## 0.0.41
 - Fix live log streaming: replace websocket-client with HTTP POST batching
   (client auto-update can't install new pip dependencies, so websocket-client
