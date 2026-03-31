@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.43
+- Fix ANSI stripping: handle `[?25l` cursor-hide and other `?`-prefixed escapes
+- Fix \r handling: split on \r correctly for progress bar overwrites
+- Fix auto-scroll: programmatic scrolls no longer reset the auto-tail flag
+
 ## 0.0.42
 - Log modal: fixed 80vh height, auto-tail follows output unless user scrolls up
 - Progress bars render correctly (handle \r carriage returns)

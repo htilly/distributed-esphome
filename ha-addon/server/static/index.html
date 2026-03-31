@@ -1050,19 +1050,21 @@ function buildWsUrl(path) {
 
 // Strip ANSI escape codes and process \r (carriage return) for progress bars
 function processLogText(existing, newText) {
-  // Strip ANSI escape sequences (colors, cursor moves, etc.)
-  const stripped = newText.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+  // Strip ANSI escape sequences: ESC[ ... letter, ESC[ ? ... letter, ESC( ...
+  const stripped = newText.replace(/\x1b\[[\?]?[0-9;]*[a-zA-Z]/g, '')
+                          .replace(/\x1b\([A-Z]/g, '')
+                          .replace(/\x1b[>=]/g, '');
 
-  // Process \r: carriage return overwrites the current line
+  // Split on \r to handle carriage returns (progress bar overwrites)
+  const parts = stripped.split('\r');
   let result = existing;
-  for (const ch of stripped) {
-    if (ch === '\r') {
-      // Remove back to the last newline (overwrite current line)
+  for (let i = 0; i < parts.length; i++) {
+    if (i > 0) {
+      // \r: go back to start of current line
       const lastNl = result.lastIndexOf('\n');
       result = lastNl >= 0 ? result.substring(0, lastNl + 1) : '';
-    } else {
-      result += ch;
     }
+    result += parts[i];
   }
   return result;
 }
@@ -1084,9 +1086,17 @@ function openLogModal(jobId) {
 
   // Track scroll position for auto-tail
   logAutoScroll = true;
+  let _programmaticScroll = false;
   logEl.onscroll = () => {
-    const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 30;
+    if (_programmaticScroll) return;
+    const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 50;
     logAutoScroll = atBottom;
+  };
+  // Helper to scroll without triggering the onscroll check
+  window._logScrollToBottom = () => {
+    _programmaticScroll = true;
+    logEl.scrollTop = logEl.scrollHeight;
+    requestAnimationFrame(() => { _programmaticScroll = false; });
   };
 
   if (isLive) {
@@ -1103,7 +1113,7 @@ function openLogModal(jobId) {
       };
       logWs.onmessage = (e) => {
         logEl.textContent = processLogText(logEl.textContent, e.data);
-        if (logAutoScroll) logEl.scrollTop = logEl.scrollHeight;
+        if (logAutoScroll && window._logScrollToBottom) window._logScrollToBottom();
       };
       logWs.onerror = (err) => {
         console.warn('Log WebSocket error, falling back to polling', err);
@@ -1142,7 +1152,7 @@ async function pollLog() {
       if (data.log) {
         const logEl = document.getElementById('modal-log');
         logEl.textContent = processLogText(logEl.textContent, data.log);
-        if (logAutoScroll) logEl.scrollTop = logEl.scrollHeight;
+        if (logAutoScroll && window._logScrollToBottom) window._logScrollToBottom();
       }
       logPollOffset = data.offset;
       if (!data.finished) {
