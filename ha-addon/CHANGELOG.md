@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.0.49
+- Version bump to trigger CI e2e test re-run
+
 ## 0.0.48
 - Simplify job state machine: replace ASSIGNED + RUNNING with a single WORKING state
   - PENDING → WORKING → SUCCESS/FAILED (RUNNING was unused in production)
