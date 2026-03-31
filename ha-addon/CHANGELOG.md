@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.39
+- HTTP polling fallback for live logs when WebSocket through HA Ingress fails
+- Console debug logging for WebSocket connection troubleshooting
+- GET /ui/api/jobs/{id}/log?offset=N endpoint for offset-based log tailing
+
 ## 0.0.38
 - WebSocket-based live log streaming: build client streams subprocess output line-by-line to the server; browser tails job logs in real-time via a WebSocket in the log modal
 

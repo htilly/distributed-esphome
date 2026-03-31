@@ -107,6 +107,23 @@ async def get_queue(request: web.Request) -> web.Response:
     return web.json_response(jobs)
 
 
+@routes.get("/ui/api/jobs/{id}/log")
+async def get_job_log(request: web.Request) -> web.Response:
+    """HTTP fallback for log tailing (used when WebSocket fails)."""
+    job_id = request.match_info["id"]
+    offset = int(request.rel_url.query.get("offset", "0"))
+    queue = request.app["queue"]
+    job = queue.get(job_id)
+    if not job:
+        return web.json_response({"error": "Job not found"}, status=404)
+    finished = job.state in (JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT)
+    full_log = job.log if finished else job._streaming_log
+    if full_log is None:
+        full_log = ""
+    chunk = full_log[offset:]
+    return web.json_response({"log": chunk, "offset": len(full_log), "finished": finished})
+
+
 @routes.get("/ui/api/jobs/{id}/log/ws")
 async def ws_browser_log(request: web.Request) -> web.WebSocketResponse:
     """WebSocket endpoint for browser live log tailing."""

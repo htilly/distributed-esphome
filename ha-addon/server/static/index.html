@@ -1064,23 +1064,31 @@ function openLogModal(jobId) {
   const isLive = ['assigned', 'running'].includes(job.state);
 
   if (isLive) {
-    logEl.textContent = '';
+    logEl.textContent = 'Connecting to live log...\n';
     // Close any previous WebSocket before opening a new one
     if (logWs) { try { logWs.close(); } catch(e) {} logWs = null; }
+    if (logPollTimer) { clearTimeout(logPollTimer); logPollTimer = null; }
     try {
-      logWs = new WebSocket(buildWsUrl(`ui/api/jobs/${jobId}/log/ws`));
+      const wsUrl = buildWsUrl(`ui/api/jobs/${jobId}/log/ws`);
+      console.log('Opening log WebSocket:', wsUrl);
+      logWs = new WebSocket(wsUrl);
+      logWs.onopen = () => {
+        logEl.textContent = '';
+        console.log('Log WebSocket connected');
+      };
       logWs.onmessage = (e) => {
         logEl.textContent += e.data;
         logEl.scrollTop = logEl.scrollHeight;
       };
-      logWs.onerror = () => {
-        logEl.textContent += '\n[WebSocket error — log updates paused]';
+      logWs.onerror = (err) => {
+        console.warn('Log WebSocket error, falling back to polling', err);
+        logEl.textContent = '';
+        startLogPolling(jobId);
       };
-      logWs.onclose = () => {
-        logWs = null;
-      };
+      logWs.onclose = () => { logWs = null; };
     } catch(e) {
-      logEl.textContent = '(Could not open live log connection)';
+      console.warn('WebSocket failed, falling back to polling', e);
+      startLogPolling(jobId);
     }
   } else {
     logEl.textContent = job.log || '(no log)';
@@ -1089,10 +1097,44 @@ function openLogModal(jobId) {
   document.getElementById('log-modal').classList.add('open');
 }
 
+let logPollTimer = null;
+let logPollOffset = 0;
+let logPollJobId = null;
+
+function startLogPolling(jobId) {
+  logPollOffset = 0;
+  logPollJobId = jobId;
+  pollLog();
+}
+
+async function pollLog() {
+  if (!logPollJobId) return;
+  if (!document.getElementById('log-modal').classList.contains('open')) return;
+  try {
+    const r = await apiFetch(`./ui/api/jobs/${logPollJobId}/log?offset=${logPollOffset}`);
+    if (r.ok) {
+      const data = await r.json();
+      if (data.log) {
+        const logEl = document.getElementById('modal-log');
+        logEl.textContent += data.log;
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+      logPollOffset = data.offset;
+      if (!data.finished) {
+        logPollTimer = setTimeout(pollLog, 1000);
+        return;
+      }
+    }
+  } catch(e) {}
+  logPollTimer = setTimeout(pollLog, 1000);
+}
+
 function closeLogModal(e) {
   if (!e || e.target === document.getElementById('log-modal')) {
     document.getElementById('log-modal').classList.remove('open');
     if (logWs) { try { logWs.close(); } catch(ex) {} logWs = null; }
+    if (logPollTimer) { clearTimeout(logPollTimer); logPollTimer = null; }
+    logPollJobId = null;
   }
 }
 
