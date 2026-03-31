@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.0.40
+## 0.0.41
 - Fix live log streaming: replace websocket-client with HTTP POST batching
   (client auto-update can't install new pip dependencies, so websocket-client
   was never available on deployed clients)
