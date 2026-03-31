@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.46
+- Fix log streaming latency: use read1() for non-blocking pipe reads
+  (returns available bytes immediately instead of waiting to fill 4KB buffer)
+
 ## 0.0.45
 - Replace custom log renderer with xterm.js terminal emulator
   - Full ANSI escape code support (colors, cursor movement, \r progress bars)

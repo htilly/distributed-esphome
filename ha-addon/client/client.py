@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import requests
 
@@ -29,7 +29,7 @@ from version_manager import VersionManager
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "0.0.45"
+CLIENT_VERSION = "0.0.46"
 
 # ---------------------------------------------------------------------------
 # System information gathering (stdlib only — no psutil dependency)
@@ -849,15 +849,19 @@ def _run_subprocess(
     timer = threading.Timer(timeout, _kill_on_timeout)
     timer.start()
     try:
-        # Read raw bytes in chunks to preserve \r for progress bars
+        # read1() returns whatever bytes are available immediately (no blocking
+        # to fill a full buffer), so we flush output to the server promptly.
+        assert proc.stdout is not None
+        raw: Any = proc.stdout
         while True:
-            chunk = proc.stdout.read(4096)  # type: ignore[union-attr]
+            chunk = raw.read1(8192) if hasattr(raw, 'read1') else raw.read(4096)
             if not chunk:
                 break
             text = chunk.decode("utf-8", errors="replace")
             log_chunks.append(text)
             flush_buffer.append(text)
-            if time.monotonic() - last_flush >= FLUSH_INTERVAL:
+            now = time.monotonic()
+            if now - last_flush >= FLUSH_INTERVAL:
                 _flush_log()
         proc.wait()
         _flush_log()  # final flush
