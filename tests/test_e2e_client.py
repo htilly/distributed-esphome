@@ -132,14 +132,14 @@ class FakeServer:
         self._jobs: list[dict] = []
         self._lock = threading.Lock()
 
+        self._httpd = HTTPServer(("127.0.0.1", 0), _Handler)
+        self._httpd._fake = self  # type: ignore[attr-defined]
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+
     @property
     def streamed_log(self) -> str:
         """Return all streamed log lines concatenated."""
         return "".join(self.log_lines)
-
-        self._httpd = HTTPServer(("127.0.0.1", 0), _Handler)
-        self._httpd._fake = self  # type: ignore[attr-defined]
-        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
 
     @property
     def url(self) -> str:

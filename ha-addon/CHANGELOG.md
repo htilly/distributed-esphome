@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.50
+- Fix e2e tests: FakeServer __init__ was broken by misplaced property
+- All 111 tests passing (95 unit + 16 e2e)
+
 ## 0.0.49
 - Version bump to trigger CI e2e test re-run
 
