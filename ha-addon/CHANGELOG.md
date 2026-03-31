@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.0.37
+- Backfill missing changelog entries
+- Strengthen CLAUDE.md release process instructions
+
+## 0.0.36
+- Added "always bump version on push" rule to CLAUDE.md
+
+## 0.0.35
+- Docker run command in UI uses server version tag instead of :latest
+- Container named `distributed-esphome-worker`
+
+## 0.0.34
+- GHCR publish workflow for client Docker image (multi-arch: amd64 + arm64)
+- Skip e2e tests in pre-push hook (1.4s instead of 2.5 minutes)
+
+## 0.0.33
+- Single client codebase: removed duplicate top-level `client/` directory
+- `ha-addon/client/` is now the single source of truth
+- Committed client code to git for GitHub-based installs
+- Removed `scripts/sync-client.sh`
+
 ## 0.0.32
 - Fix add-on startup: bypass s6-overlay, use Docker tini + direct CMD
 - Root cause: s6-overlay-suexec setuid blocked by container security context
