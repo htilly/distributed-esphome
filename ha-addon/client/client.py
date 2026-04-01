@@ -29,7 +29,7 @@ from version_manager import VersionManager
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "0.0.61"
+CLIENT_VERSION = "0.0.62"
 
 # ---------------------------------------------------------------------------
 # System information gathering (stdlib only — no psutil dependency)
@@ -197,30 +197,15 @@ def _format_uptime(seconds: float) -> str:
 
 
 def _get_cpu_usage() -> Optional[float]:
-    """Return CPU usage as a percentage (0-100) by sampling /proc/stat.
+    """Return CPU usage as a percentage (0-100) using load average.
 
-    Returns None if /proc/stat is unavailable (non-Linux).
+    Uses os.getloadavg() (1-minute average) divided by core count.
+    Works in Docker on both Linux and macOS without /proc/stat sampling.
     """
     try:
-        def _read_cpu_times():
-            with open("/proc/stat", encoding="utf-8") as f:
-                line = f.readline()  # first line: "cpu  user nice system idle ..."
-            parts = line.split()
-            # user, nice, system, idle, iowait, irq, softirq, steal
-            times = [int(x) for x in parts[1:9]]
-            idle = times[3] + times[4]  # idle + iowait
-            total = sum(times)
-            return idle, total
-
-        idle1, total1 = _read_cpu_times()
-        time.sleep(0.1)
-        idle2, total2 = _read_cpu_times()
-
-        idle_delta = idle2 - idle1
-        total_delta = total2 - total1
-        if total_delta == 0:
-            return 0.0
-        return round((1.0 - idle_delta / total_delta) * 100, 1)
+        load1, _, _ = os.getloadavg()
+        cores = os.cpu_count() or 1
+        return round(min(load1 / cores * 100, 100.0), 1)
     except Exception:
         return None
 

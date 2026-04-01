@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.62
+- Fix CPU usage reporting: use os.getloadavg() instead of /proc/stat sampling
+  (works reliably in Docker on macOS, no 100ms sleep per heartbeat)
+
 ## 0.0.61
 - Workers report CPU utilization on every heartbeat (sampled from /proc/stat)
 - Scheduling uses effective score = perf_score × (1 - cpu_usage/100)
