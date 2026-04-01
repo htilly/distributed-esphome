@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.53
+- Fix CI: exclude e2e tests (need ESPHome installed, take 3+ minutes)
+- Add 10-minute timeout and concurrency cancellation to CI workflow
+
 ## 0.0.52
 - Redesigned Connect Worker modal with configurable form fields
   (container name, hostname, parallel jobs, seed version, host platform, restart policy)

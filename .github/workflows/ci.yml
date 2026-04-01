@@ -4,9 +4,14 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -23,7 +28,7 @@ jobs:
             mypy types-requests
 
       - name: Run unit tests
-        run: pytest tests/ -v
+        run: pytest tests/ --ignore=tests/test_e2e_client.py -v
 
       - name: mypy — server
         run: mypy ha-addon/server/ --ignore-missing-imports
