@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.0.57
+- Auto-reload UI when server version changes (polls every 30s, shows toast, reloads after 1.5s)
+
 ## 0.0.56
 - Performance-based job scheduling: faster workers claim jobs first
   - If a faster idle worker exists, slower workers defer for 2 seconds

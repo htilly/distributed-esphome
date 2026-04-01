@@ -694,6 +694,7 @@ let workersData = [];
 let serverInfo = { token: '', port: 8765 };
 let expandedJobs = new Set();
 let activeRun = false;
+let _initialAddonVersion = null;
 
 // ============================================================
 // Utility
@@ -751,6 +752,15 @@ async function refreshServerInfo() {
       serverInfo = await r.json();
       if (serverInfo.addon_version) {
         document.getElementById('server-version').textContent = 'v' + serverInfo.addon_version;
+        // Auto-reload when the server version changes (new deployment)
+        if (_initialAddonVersion === null) {
+          _initialAddonVersion = serverInfo.addon_version;
+        } else if (serverInfo.addon_version !== _initialAddonVersion) {
+          console.log('Server version changed:', _initialAddonVersion, '→', serverInfo.addon_version);
+          toast('New version detected — reloading...', 'info');
+          setTimeout(() => location.reload(), 1500);
+          return;
+        }
       }
       renderDockerCmd();
     }
@@ -1655,6 +1665,9 @@ function closeEditorModal(e) {
 // Auto-refresh polling
 // ============================================================
 function startPolling() {
+  // Server info: every 30s (detects version changes → auto-reload)
+  setInterval(refreshServerInfo, 30000);
+
   // Workers: every 5s
   setInterval(async () => {
     try {
