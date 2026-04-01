@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.66
+- Instant UI reload on server upgrade: X-Server-Version header on every response,
+  checked by apiFetch — triggers reload within 3s (next queue poll)
+- Better logging for ESPHome version detection failures (shows HTTP status, hints at fix)
+
 ## 0.0.65
 - Fix ESPHome version detection: add `hassio_api: true` to config.yaml
   (Supervisor API was returning 403 without this permission)

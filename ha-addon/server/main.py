@@ -35,6 +35,15 @@ INDEX_HTML = STATIC_DIR / "index.html"
 # ---------------------------------------------------------------------------
 
 @web.middleware
+async def version_header_middleware(request: web.Request, handler):
+    """Attach X-Server-Version header to every response for UI change detection."""
+    response = await handler(request)
+    from api import _get_server_client_version  # noqa: PLC0415
+    response.headers["X-Server-Version"] = _get_server_client_version()
+    return response
+
+
+@web.middleware
 async def auth_middleware(request: web.Request, handler):
     path = request.path
 
@@ -138,9 +147,12 @@ async def _fetch_ha_esphome_version(session: aiohttp.ClientSession) -> Optional[
                     if version:
                         logger.info("Detected HA ESPHome add-on version %s (slug: %s)", version, slug)
                         return str(version)
-        except Exception:
-            logger.debug("Supervisor query failed for slug %s", slug, exc_info=True)
+                else:
+                    logger.warning("Supervisor query for %s returned HTTP %d (need hassio_api: true in config.yaml?)", slug, resp.status)
+        except Exception as exc:
+            logger.warning("Supervisor query failed for slug %s: %s", slug, exc)
 
+    logger.warning("Could not detect ESPHome add-on version from Supervisor API")
     return None
 
 
@@ -242,7 +254,7 @@ def create_app() -> web.Application:
 
     device_poller = DevicePoller(poll_interval=cfg.device_poll_interval)
 
-    app = web.Application(middlewares=[auth_middleware])
+    app = web.Application(middlewares=[version_header_middleware, auth_middleware])
     app["config"] = cfg
     app["queue"] = queue
     app["registry"] = registry

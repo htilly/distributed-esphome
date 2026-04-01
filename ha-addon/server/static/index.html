@@ -809,7 +809,15 @@ function toast(msg, type='info') {
 }
 
 async function apiFetch(path, opts={}) {
-  return fetch(path, opts);
+  const r = await fetch(path, opts);
+  // Detect server version changes from response header (triggers reload within 3s)
+  const sv = r.headers.get('X-Server-Version');
+  if (sv && _initialAddonVersion && sv !== _initialAddonVersion) {
+    console.log('Server version changed (header):', _initialAddonVersion, '→', sv);
+    toast('New server version — reloading...', 'info');
+    setTimeout(() => location.reload(), 1000);
+  }
+  return r;
 }
 
 // ============================================================
