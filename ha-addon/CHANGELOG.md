@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.65
+- Fix ESPHome version detection: add `hassio_api: true` to config.yaml
+  (Supervisor API was returning 403 without this permission)
+- Suppress noisy aiohttp access logs (heartbeats, polls) — set to WARNING level
+
 ## 0.0.64
 - Auto-detect ESPHome add-on version changes every 5 minutes
   (no server restart needed when ESPHome is updated on HA)
