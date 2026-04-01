@@ -164,18 +164,38 @@ async def _fetch_pypi_versions(session: aiohttp.ClientSession, limit: int = 10) 
 
 
 async def pypi_version_refresher(app: web.Application) -> None:
-    """Background task: refresh available ESPHome versions from PyPI every hour."""
+    """Background task: refresh PyPI versions hourly and re-check HA ESPHome add-on every 5 min."""
+    check_interval = 30   # check HA add-on version every 30 seconds
+    pypi_countdown = 0    # fetch PyPI immediately on first loop
     while True:
-        await asyncio.sleep(_PYPI_CACHE_TTL)
+        await asyncio.sleep(check_interval)
         try:
             async with aiohttp.ClientSession() as session:
-                versions = await _fetch_pypi_versions(session)
-            if versions:
-                app["esphome_available_versions"] = versions
-                app["esphome_versions_fetched_at"] = time.monotonic()
-                logger.info("Refreshed PyPI ESPHome version list: %d versions", len(versions))
+                # Re-check HA ESPHome add-on version
+                new_detected = await _fetch_ha_esphome_version(session)
+                old_detected = app.get("esphome_detected_version")
+                if new_detected and new_detected != old_detected:
+                    logger.info(
+                        "ESPHome add-on version changed: %s → %s",
+                        old_detected, new_detected,
+                    )
+                    app["esphome_detected_version"] = new_detected
+                    # Auto-update selected version to match
+                    from scanner import set_esphome_version  # noqa: PLC0415
+                    set_esphome_version(new_detected)
+                    logger.info("Auto-selected ESPHome %s (matches updated add-on)", new_detected)
+
+                # Refresh PyPI list periodically
+                pypi_countdown -= check_interval
+                if pypi_countdown <= 0:
+                    pypi_countdown = _PYPI_CACHE_TTL
+                    versions = await _fetch_pypi_versions(session)
+                    if versions:
+                        app["esphome_available_versions"] = versions
+                        app["esphome_versions_fetched_at"] = time.monotonic()
+                        logger.info("Refreshed PyPI ESPHome version list: %d versions", len(versions))
         except Exception:
-            logger.exception("Error refreshing PyPI ESPHome versions")
+            logger.exception("Error in version refresher")
 
 
 # ---------------------------------------------------------------------------

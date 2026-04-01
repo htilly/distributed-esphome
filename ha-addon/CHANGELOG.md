@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.64
+- Auto-detect ESPHome add-on version changes every 5 minutes
+  (no server restart needed when ESPHome is updated on HA)
+- Auto-selects the new version when the add-on is updated
+
 ## 0.0.63
 - ESPHome version is now detected from the HA Supervisor add-on API at startup
   (falls back to installed package, then "unknown")
