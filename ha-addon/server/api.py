@@ -188,29 +188,30 @@ async def get_next_job(request: web.Request) -> web.Response:
 
     hostname = worker.hostname if worker else None
 
-    # Performance-based scheduling: if a faster worker with free slots exists,
-    # defer claiming recently-enqueued jobs so the faster worker gets them.
+    # Performance-based scheduling: prefer faster workers.
+    # Defer if a faster worker with equal-or-fewer active jobs exists.
+    # This ensures: single jobs → fastest worker; batch jobs → spread across workers.
     faster_idle = False
     if worker and worker.system_info:
         my_score = worker.system_info.get("perf_score", 0)
         cfg_threshold = cfg.worker_offline_threshold
-        # Count active jobs per worker from the queue (authoritative)
+        # Count active jobs per worker from the queue
         active_jobs_by_worker: dict[str, int] = {}
         for j in queue.get_all():
             if j.state == JobState.WORKING and j.assigned_client_id:
                 active_jobs_by_worker[j.assigned_client_id] = \
                     active_jobs_by_worker.get(j.assigned_client_id, 0) + 1
+        my_active = active_jobs_by_worker.get(client_id, 0)
         for other in registry.get_all():
             if other.client_id == client_id:
                 continue
             if other.disabled or not registry.is_online(other.client_id, cfg_threshold):
                 continue
-            # Check if this worker has free slots
-            active = active_jobs_by_worker.get(other.client_id, 0)
-            if active >= other.max_parallel_jobs:
-                continue  # all slots busy
+            other_active = active_jobs_by_worker.get(other.client_id, 0)
             other_score = (other.system_info or {}).get("perf_score", 0)
-            if other_score > my_score:
+            # Defer if a faster worker has equal or fewer active jobs AND has free slots
+            if other_score > my_score and other_active <= my_active \
+                    and other_active < other.max_parallel_jobs:
                 faster_idle = True
                 break
 

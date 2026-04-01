@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.59
+- Fix job scheduling: remove broken grace period approach, replace with
+  simple rule: defer if a faster worker has equal-or-fewer jobs AND free slots
+  - Single job → fastest worker
+  - Two jobs → one per worker (fastest first)
+  - Batch → spread across all, then fastest gets more
+
 ## 0.0.58
 - Fix multi-slot scheduling: count actual WORKING jobs per worker (not just
   current_job_id) so 2 jobs go to 2 different workers instead of both slots

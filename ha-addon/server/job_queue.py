@@ -218,10 +218,6 @@ class JobQueue:
             logger.info("Enqueued job %s for target %s", job.id, target)
             return job
 
-    # How long to wait for a faster worker to claim a job before allowing
-    # any worker to take it (seconds).
-    PERF_GRACE_PERIOD = 2.0
-
     async def claim_next(
         self,
         client_id: str,
@@ -232,12 +228,14 @@ class JobQueue:
         """
         Atomically claim the next pending job for *client_id*.
 
-        If *faster_idle_worker_exists* is True and the job was enqueued
-        within the last PERF_GRACE_PERIOD seconds, returns None to let
-        the faster worker claim it on its next poll cycle.
+        If *faster_idle_worker_exists* is True, returns None so the
+        faster worker can claim on its next poll cycle.
 
         Returns the claimed Job or None if the queue is empty.
         """
+        if faster_idle_worker_exists:
+            return None
+
         now = _utcnow()
         async with self._lock:
             for job in self._jobs.values():
@@ -246,11 +244,6 @@ class JobQueue:
                 # Pinned jobs can only be claimed by the designated worker
                 if job.pinned_client_id and job.pinned_client_id != client_id:
                     continue
-                # Prefer faster workers for recently-enqueued jobs
-                if faster_idle_worker_exists:
-                    age = (now - job.created_at).total_seconds()
-                    if age < self.PERF_GRACE_PERIOD:
-                        continue  # skip this job — let a faster worker take it
                 job.state = JobState.WORKING
                 job.assigned_client_id = client_id
                 job.assigned_hostname = hostname
