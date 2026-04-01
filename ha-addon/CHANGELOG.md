@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.67
+- Support encrypted API connections to ESPHome devices
+  - Extracts `api: encryption: key:` from resolved YAML configs
+  - Passes noise_psk to aioesphomeapi so encrypted devices report version/status
+  - Devices requiring encryption but without a known key are still marked online
+
 ## 0.0.66
 - Instant UI reload on server upgrade: X-Server-Version header on every response,
   checked by apiFetch — triggers reload within 3s (next queue poll)

@@ -109,8 +109,8 @@ async def config_scanner(app: web.Application) -> None:
             if targets != prev_targets:
                 logger.info("Config change detected: %d targets (was %d)", len(targets), len(prev_targets))
                 if device_poller:
-                    name_map = build_name_to_target_map(cfg.config_dir, targets)
-                    device_poller.update_compile_targets(targets, name_map)
+                    name_map, enc_keys = build_name_to_target_map(cfg.config_dir, targets)
+                    device_poller.update_compile_targets(targets, name_map, enc_keys)
                 prev_targets = targets
         except Exception:
             logger.exception("Error in config scanner")
@@ -305,8 +305,8 @@ def create_app() -> web.Application:
 
         # Update device poller with known targets
         targets = scan_configs(cfg.config_dir)
-        name_map = build_name_to_target_map(cfg.config_dir, targets)
-        device_poller.update_compile_targets(targets, name_map)
+        name_map, enc_keys = build_name_to_target_map(cfg.config_dir, targets)
+        device_poller.update_compile_targets(targets, name_map, enc_keys)
 
         # Start device poller
         await device_poller.start(app)

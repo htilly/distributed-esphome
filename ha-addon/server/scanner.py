@@ -159,14 +159,20 @@ def get_friendly_name(config_dir: str, target: str) -> Optional[str]:
     return meta["friendly_name"] or meta["device_name"]
 
 
-def build_name_to_target_map(config_dir: str, targets: list[str]) -> dict[str, str]:
+def build_name_to_target_map(
+    config_dir: str, targets: list[str],
+) -> tuple[dict[str, str], dict[str, str]]:
     """Build a mapping from ESPHome device name → YAML filename.
 
     For each target, resolve the full config (including packages) and extract
     ``esphome.name``.  Always also map the filename stem so filename-based
     matching works as a fallback.
+
+    Returns (name_map, encryption_keys) where encryption_keys maps
+    device names to base64-encoded noise PSK keys.
     """
     name_map: dict[str, str] = {}
+    encryption_keys: dict[str, str] = {}
     for target in targets:
         stem = Path(target).stem
         name_map[stem] = target  # fallback: filename stem
@@ -175,10 +181,22 @@ def build_name_to_target_map(config_dir: str, targets: list[str]) -> dict[str, s
         if config is None:
             continue
         esphome_block = config.get("esphome") or {}
+        device_name: Optional[str] = None
         if isinstance(esphome_block, dict):
             esph_name = esphome_block.get("name")
             if esph_name:
-                name_map[str(esph_name)] = target
-    return name_map
+                device_name = str(esph_name)
+                name_map[device_name] = target
+
+        # Extract API encryption key if present
+        api_block = config.get("api") or {}
+        if isinstance(api_block, dict):
+            enc_block = api_block.get("encryption") or {}
+            if isinstance(enc_block, dict):
+                key = enc_block.get("key")
+                if key:
+                    key_name = device_name or stem
+                    encryption_keys[key_name] = str(key)
+    return name_map, encryption_keys
 
 

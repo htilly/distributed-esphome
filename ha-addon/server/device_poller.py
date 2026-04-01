@@ -72,6 +72,7 @@ class DevicePoller:
         self._devices: dict[str, Device] = {}  # keyed by device name
         self._compile_targets: list[str] = []
         self._name_to_target: dict[str, str] = {}
+        self._encryption_keys: dict[str, str] = {}  # device_name → noise_psk (base64)
         self._lock = asyncio.Lock()
         self._zeroconf: Optional[AsyncZeroconf] = None
         self._browser: Optional[ServiceBrowser] = None
@@ -232,7 +233,8 @@ class DevicePoller:
         if not AIOESPHOMEAPI_AVAILABLE:
             return
         try:
-            client = aioesphomeapi.APIClient(ip, 6053, password=None)
+            noise_psk = self._encryption_keys.get(name)
+            client = aioesphomeapi.APIClient(ip, 6053, password=None, noise_psk=noise_psk)
             await client.connect(login=True)
             try:
                 info = await client.device_info()
@@ -246,12 +248,21 @@ class DevicePoller:
                         self._save_cache()
             finally:
                 await client.disconnect()
-        except Exception:
-            logger.debug("Could not query device %s at %s", name, ip)
+        except Exception as exc:
+            exc_str = str(exc).lower()
             async with self._lock:
                 dev = self._devices.get(name)
                 if dev:
-                    dev.online = False
+                    if "encryption" in exc_str:
+                        # Device is online but requires encryption and we don't
+                        # have the key (or the key is wrong). Mark as online.
+                        dev.online = True
+                        dev.last_seen = _utcnow()
+                        self._save_cache()
+                        logger.debug("Device %s at %s requires encryption — marked online", name, ip)
+                    else:
+                        dev.online = False
+                        logger.debug("Could not query device %s at %s: %s", name, ip, str(exc))
 
     # ------------------------------------------------------------------
     # Cache
@@ -303,6 +314,7 @@ class DevicePoller:
         self,
         targets: list[str],
         name_to_target: Optional[dict[str, str]] = None,
+        encryption_keys: Optional[dict[str, str]] = None,
     ) -> None:
         """
         Inform the poller about known YAML targets so it can map device
@@ -311,9 +323,13 @@ class DevicePoller:
         *name_to_target* maps ESPHome device names (and filename stems) to
         YAML filenames, handling cases where ``esphome.name`` differs from
         the filename.
+
+        *encryption_keys* maps device names to base64-encoded noise PSK keys
+        for devices that require API encryption.
         """
         self._compile_targets = list(targets)
         self._name_to_target = name_to_target or {}
+        self._encryption_keys = encryption_keys or {}
         for dev in self._devices.values():
             dev.compile_target = self._map_target(dev.name)
 
