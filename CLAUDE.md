@@ -112,10 +112,13 @@ Worker config is all via environment: `SERVER_URL`, `SERVER_TOKEN`, `POLL_INTERV
 
 **Stable releases (merge to `main`):**
 - Use `bash scripts/bump-version.sh X.Y.Z` for the stable version
-- Finalize `ha-addon/CHANGELOG.md` — consolidate dev changes into release entry
+- Finalize `ha-addon/CHANGELOG.md` — consolidate dev changes into a clean release entry
+  (use `WORKITEMS.md` and `BUGS.md` as source material, group by category)
 - The pre-push hook enforces a changelog entry when pushing to `main`
 - Tag the release: `git tag vX.Y.Z && git push origin vX.Y.Z`
 - GHCR images are published automatically on push to `main`
+
+**Changelog is NOT updated during development on `develop`.** The WORKITEMS.md and BUGS.md files track progress with version numbers. The changelog is written once at release time.
 
 ## Design Specification
 

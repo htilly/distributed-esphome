@@ -575,6 +575,22 @@ async def rename_target(request: web.Request) -> web.Response:
     _config_cache.pop(new_filename, None)
 
     logger.info("Renamed config %s → %s", filename, new_filename)
+
+    # Enqueue a compile+OTA job so the device gets flashed with the new name.
+    # The device is still running the old firmware with the old hostname,
+    # so OTA will reach it at the old address. After reboot, it comes up
+    # with the new name.
+    queue = request.app["queue"]
+    server_version = get_esphome_version()
+    cfg = _cfg(request)
+    await queue.enqueue(
+        target=new_filename,
+        esphome_version=server_version,
+        run_id=str(uuid.uuid4()),
+        timeout_seconds=cfg.job_timeout,
+    )
+    logger.info("Enqueued compile+OTA for renamed device %s", new_filename)
+
     return web.json_response({"ok": True, "new_filename": new_filename})
 
 

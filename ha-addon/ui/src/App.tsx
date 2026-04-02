@@ -339,8 +339,10 @@ export default function App() {
     if (!newName) return;
     try {
       const result = await renameTarget(target, newName);
-      addToast(`Renamed to ${stripYaml(result.new_filename)}`, 'success');
+      addToast(`Renamed to ${stripYaml(result.new_filename)} — compiling new firmware...`, 'success');
       await fetchDevicesAndTargets();
+      await fetchQueue();
+      switchTab('queue');
     } catch (err) {
       addToast('Rename failed: ' + (err as Error).message, 'error');
     }
