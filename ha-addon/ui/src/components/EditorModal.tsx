@@ -1,7 +1,18 @@
 import Editor, { type OnMount } from '@monaco-editor/react';
+import * as yaml from 'js-yaml';
 import { useEffect, useRef, useState } from 'react';
 import { getSecretKeys, getTargetContent, saveTargetContent } from '../api/client';
 import type { ToastType } from './Toast';
+
+// ESPHome uses custom YAML tags that standard parsers reject. Register them so
+// js-yaml can parse ESPHome configs without throwing on !include, !secret, etc.
+const ESPHOME_SCHEMA = yaml.DEFAULT_SCHEMA.extend([
+  new yaml.Type('!include', { kind: 'scalar', construct: (data) => data }),
+  new yaml.Type('!secret', { kind: 'scalar', construct: (data) => data }),
+  new yaml.Type('!lambda', { kind: 'scalar', construct: (data) => data }),
+  new yaml.Type('!extend', { kind: 'mapping', construct: (data) => data }),
+  new yaml.Type('!remove', { kind: 'scalar', construct: () => null }),
+]);
 
 interface Props {
   target: string | null;
@@ -123,14 +134,50 @@ function getYamlPath(
   return path;
 }
 
-// Build Monaco markers for unknown top-level keys (only top-level to keep
-// complexity manageable for a first validation pass).
+// Collect YAML syntax error markers by actually parsing the content.
+// Uses an ESPHome-aware schema so custom tags (!include, !secret, !lambda,
+// !extend, !remove) don't themselves cause parse errors.
+function collectSyntaxMarkers(
+  model: import('monaco-editor').editor.ITextModel,
+  monaco: typeof import('monaco-editor'),
+): import('monaco-editor').editor.IMarkerData[] {
+  const markers: import('monaco-editor').editor.IMarkerData[] = [];
+  try {
+    yaml.loadAll(model.getValue(), undefined, { schema: ESPHOME_SCHEMA });
+  } catch (e: unknown) {
+    const err = e as { mark?: { line?: number; column?: number }; reason?: string; message?: string };
+    if (err.mark) {
+      const line = (err.mark.line ?? 0) + 1;
+      const col = (err.mark.column ?? 0) + 1;
+      markers.push({
+        severity: monaco.MarkerSeverity.Error,
+        message: err.reason || err.message || 'YAML syntax error',
+        startLineNumber: line,
+        startColumn: col,
+        endLineNumber: line,
+        endColumn: model.getLineLength(line) + 1,
+      });
+    }
+  }
+  return markers;
+}
+
+// Build Monaco markers: YAML syntax errors (errors) plus unknown top-level
+// keys (warnings, only when no syntax errors so noise is minimal).
 function validateYaml(
   model: import('monaco-editor').editor.ITextModel,
   schema: Record<string, unknown>,
   monaco: typeof import('monaco-editor'),
 ): void {
-  const markers: import('monaco-editor').editor.IMarkerData[] = [];
+  // Always check syntax first — if parsing fails, skip schema warnings since
+  // the document isn't even well-formed.
+  const syntaxMarkers = collectSyntaxMarkers(model, monaco);
+  if (syntaxMarkers.length > 0) {
+    monaco.editor.setModelMarkers(model, 'esphome', syntaxMarkers);
+    return;
+  }
+
+  const schemaMarkers: import('monaco-editor').editor.IMarkerData[] = [];
   const content = model.getValue();
   const lines = content.split('\n');
   const topProps = (schema.properties as Record<string, unknown> | undefined) ?? {};
@@ -152,7 +199,7 @@ function validateYaml(
 
     const key = trimmed.slice(0, colonIdx).trim();
     if (key && !(key in topProps)) {
-      markers.push({
+      schemaMarkers.push({
         severity: monaco.MarkerSeverity.Warning,
         message: `Unknown component: "${key}"`,
         startLineNumber: i + 1,
@@ -163,7 +210,7 @@ function validateYaml(
     }
   }
 
-  monaco.editor.setModelMarkers(model, 'esphome', markers);
+  monaco.editor.setModelMarkers(model, 'esphome', schemaMarkers);
 }
 
 // Guard: only register the completion provider and validation once per page load.
@@ -178,7 +225,16 @@ export function EditorModal({ target, onClose, onToast, onValidate, monacoTheme 
   const [loading, setLoading] = useState(false);
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
 
-  // Load content when target changes
+  // Keep stable refs to callbacks so the fetch effect depends only on [target],
+  // not on new function references from each parent re-render (which would
+  // re-fetch on every poll cycle and wipe local edits).
+  const onCloseRef = useRef(onClose);
+  const onToastRef = useRef(onToast);
+  useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
+  useEffect(() => { onToastRef.current = onToast; }, [onToast]);
+
+  // Load content when target changes — intentionally [target] only so that
+  // background polls refreshing the parent do NOT overwrite unsaved edits.
   useEffect(() => {
     if (!target) return;
     setLoading(true);
@@ -188,15 +244,16 @@ export function EditorModal({ target, onClose, onToast, onValidate, monacoTheme 
         setLoading(false);
       })
       .catch(err => {
-        onToast('Failed to load file: ' + (err as Error).message, 'error');
+        onToastRef.current('Failed to load file: ' + (err as Error).message, 'error');
         setLoading(false);
-        onClose();
+        onCloseRef.current();
       });
 
     // Start fetching the schema as soon as the editor opens so it's ready
     // by the time the user begins typing.
     loadEsphomeSchema().catch(() => null);
-  }, [target, onClose, onToast]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target]);
 
   // Keyboard handler
   useEffect(() => {
@@ -299,16 +356,18 @@ export function EditorModal({ target, onClose, onToast, onValidate, monacoTheme 
       if (_validationTimer !== null) clearTimeout(_validationTimer);
       _validationTimer = setTimeout(() => {
         const model = editor.getModel();
-        if (!model || !esphomeSchema) return;
-        validateYaml(model, esphomeSchema, monaco);
+        if (!model) return;
+        // Always run syntax validation. Schema validation (unknown keys) only
+        // runs when the schema has been fetched — syntax errors take priority
+        // anyway and validateYaml skips schema warnings when syntax fails.
+        validateYaml(model, esphomeSchema ?? {}, monaco);
       }, 500);
     });
 
     // Run an initial validation pass once the schema is available
     loadEsphomeSchema().then(schema => {
-      if (!schema) return;
       const model = editor.getModel();
-      if (model) validateYaml(model, schema, monaco);
+      if (model) validateYaml(model, schema ?? {}, monaco);
     }).catch(() => null);
   }
 

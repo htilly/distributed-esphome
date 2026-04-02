@@ -218,10 +218,12 @@ export default function App() {
   async function handleCancelJobs(ids: string[]) {
     try {
       const data = await cancelJobs(ids);
-      const msg = data.cancelled === 1
-        ? `Cancelled ${stripYaml(queue.find(j => j.id === ids[0])?.target ?? ids[0])}`
-        : `Cancelled ${data.cancelled} jobs`;
-      addToast(msg, 'success');
+      if (data.cancelled > 0) {
+        const msg = data.cancelled === 1
+          ? `Cancelled ${stripYaml(queue.find(j => j.id === ids[0])?.target ?? ids[0])}`
+          : `Cancelled ${data.cancelled} jobs`;
+        addToast(msg, 'success');
+      }
       await fetchQueue();
     } catch (err) {
       addToast('Error: ' + (err as Error).message, 'error');
@@ -231,10 +233,12 @@ export default function App() {
   async function handleRetryJobs(ids: string[]) {
     try {
       const data = await retryJobs(ids);
-      const msg = data.retried === 1
-        ? `Retrying ${stripYaml(queue.find(j => j.id === ids[0])?.target ?? ids[0])}`
-        : `Retrying ${data.retried} jobs`;
-      addToast(msg, 'success');
+      if (data.retried > 0) {
+        const msg = data.retried === 1
+          ? `Retrying ${stripYaml(queue.find(j => j.id === ids[0])?.target ?? ids[0])}`
+          : `Retrying ${data.retried} jobs`;
+        addToast(msg, 'success');
+      }
       await fetchQueue();
     } catch (err) {
       addToast('Error: ' + (err as Error).message, 'error');
@@ -244,8 +248,10 @@ export default function App() {
   async function handleRetryAllFailed() {
     try {
       const data = await retryAllFailed();
-      const msg = data.retried === 1 ? 'Retrying 1 job' : `Retrying ${data.retried} failed jobs`;
-      addToast(msg, 'success');
+      if (data.retried > 0) {
+        const msg = data.retried === 1 ? 'Retrying 1 job' : `Retrying ${data.retried} failed jobs`;
+        addToast(msg, 'success');
+      }
       await fetchQueue();
     } catch (err) {
       addToast('Error: ' + (err as Error).message, 'error');
@@ -255,8 +261,10 @@ export default function App() {
   async function handleClearSucceeded() {
     try {
       const data = await clearQueue(['success'], true);
-      const msg = data.cleared === 1 ? 'Cleared 1 succeeded job' : `Cleared ${data.cleared} succeeded jobs`;
-      addToast(msg, 'success');
+      if (data.cleared > 0) {
+        const msg = data.cleared === 1 ? 'Cleared 1 succeeded job' : `Cleared ${data.cleared} succeeded jobs`;
+        addToast(msg, 'success');
+      }
       await fetchQueue();
     } catch {
       addToast('Clear failed', 'error');
@@ -266,8 +274,10 @@ export default function App() {
   async function handleClearFinished() {
     try {
       const data = await clearQueue(['success', 'failed', 'timed_out']);
-      const msg = data.cleared === 1 ? 'Cleared 1 finished job' : `Cleared ${data.cleared} finished jobs`;
-      addToast(msg, 'success');
+      if (data.cleared > 0) {
+        const msg = data.cleared === 1 ? 'Cleared 1 finished job' : `Cleared ${data.cleared} finished jobs`;
+        addToast(msg, 'success');
+      }
       await fetchQueue();
     } catch {
       addToast('Clear failed', 'error');

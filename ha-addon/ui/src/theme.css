@@ -306,7 +306,12 @@ button {
   cursor: pointer;
   transition: background 0.15s, opacity 0.15s;
 }
-button:disabled { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
+button:disabled,
+button[disabled] {
+  opacity: 0.45 !important;
+  cursor: not-allowed !important;
+  pointer-events: none !important;
+}
 
 .btn-primary   { background: var(--accent); color: #fff; }
 .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }

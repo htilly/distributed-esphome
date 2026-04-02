@@ -11,7 +11,9 @@
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
+    "@types/js-yaml": "^4.0.9",
     "@xterm/xterm": "^6.0.0",
+    "js-yaml": "^4.1.1",
     "monaco-editor": "^0.55.1",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
