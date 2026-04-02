@@ -112,6 +112,7 @@ interface Props {
   onToast: (msg: string, type?: ToastType) => void;
   onValidate?: (target: string) => void;
   onCompile?: (target: string) => void;
+  onRename?: (target: string) => void;
   monacoTheme?: string;
   esphomeVersion?: string | null;
 }
@@ -240,11 +241,15 @@ let _completionRegistered = false;
 // Debounce timer handle for validation
 let _validationTimer: ReturnType<typeof setTimeout> | null = null;
 
-export function EditorModal({ target, onClose, onToast, onValidate, onCompile, monacoTheme = 'vs-dark', esphomeVersion }: Props) {
+// Track dirty-line decorations (module-level so the callback closure can access it)
+let _dirtyDecorationIds: string[] = [];
+
+export function EditorModal({ target, onClose, onToast, onValidate, onCompile, onRename, monacoTheme = 'vs-dark', esphomeVersion }: Props) {
   const isOpen = target !== null;
   const [content, setContent] = useState('');
   const [loading, setLoading] = useState(false);
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
+  const savedContentRef = useRef('');
 
   // Keep the module-level version variable in sync so the completion provider
   // (registered once, outside the component lifecycle) always sees the current value.
@@ -268,6 +273,7 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, m
     getTargetContent(target)
       .then(c => {
         setContent(c);
+        savedContentRef.current = c;
         setLoading(false);
       })
       .catch(err => {
@@ -296,110 +302,122 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, m
     if (e.target === e.currentTarget) onClose();
   }
 
+  function updateDirtyDecorations(editor: Parameters<OnMount>[0]) {
+    const model = editor.getModel();
+    if (!model) return;
+    const currentLines = model.getValue().split('\n');
+    const savedLines = savedContentRef.current.split('\n');
+    const decorations: import('monaco-editor').editor.IModelDeltaDecoration[] = [];
+    const maxLen = Math.max(currentLines.length, savedLines.length);
+    for (let i = 0; i < maxLen; i++) {
+      if (i >= currentLines.length) break;
+      if (i >= savedLines.length || currentLines[i] !== savedLines[i]) {
+        decorations.push({
+          range: { startLineNumber: i + 1, startColumn: 1, endLineNumber: i + 1, endColumn: 1 },
+          options: { isWholeLine: true, className: 'dirty-line', glyphMarginClassName: 'dirty-glyph' },
+        });
+      }
+    }
+    _dirtyDecorationIds = editor.deltaDecorations(_dirtyDecorationIds, decorations);
+  }
+
   function handleEditorDidMount(
     editor: Parameters<OnMount>[0],
     monaco: Parameters<OnMount>[1],
   ) {
     editorRef.current = editor;
+    _dirtyDecorationIds = [];
 
-    if (_completionRegistered) return;
-    _completionRegistered = true;
+    if (!_completionRegistered) {
+      _completionRegistered = true;
 
-    // --- Completion provider ---
-    monaco.languages.registerCompletionItemProvider('yaml', {
-      // Fire on space (for "!secret <cursor>") and colon (sub-key context).
-      triggerCharacters: [' ', ':'],
+      // --- Completion provider ---
+      monaco.languages.registerCompletionItemProvider('yaml', {
+        triggerCharacters: [' ', ':'],
 
-      async provideCompletionItems(
-        model: import('monaco-editor').editor.ITextModel,
-        position: import('monaco-editor').Position,
-      ) {
-        const word = model.getWordUntilPosition(position);
-        const range = {
-          startLineNumber: position.lineNumber,
-          endLineNumber: position.lineNumber,
-          startColumn: word.startColumn,
-          endColumn: word.endColumn,
-        };
-
-        // 1. Detect "!secret <cursor>" — offer secret key names from the server
-        const lineContent = model.getLineContent(position.lineNumber);
-        const beforeCursor = lineContent.substring(0, position.column - 1);
-        if (/!secret\s+\S*$/.test(beforeCursor) || beforeCursor.trimEnd().endsWith('!secret')) {
-          try {
-            const keys = await getSecretKeys();
-            return {
-              suggestions: keys.map(k => ({
-                label: k,
-                kind: monaco.languages.CompletionItemKind.Variable,
-                insertText: k,
-                documentation: 'Secret from secrets.yaml',
-                range,
-              })),
-            };
-          } catch {
-            return { suggestions: [] };
-          }
-        }
-
-        // Ensure the component list is loaded before offering completions.
-        const components = await loadComponentList();
-
-        const indent = currentLineIndent(model, position);
-
-        // 2. Top-level (indent 0): suggest all ESPHome component names.
-        if (indent === 0) {
-          return {
-            suggestions: components.map(name => ({
-              label: name,
-              kind: monaco.languages.CompletionItemKind.Module,
-              insertText: name + ':\n  ',
-              documentation: `ESPHome component: ${name}`,
-              range,
-            })),
+        async provideCompletionItems(
+          model: import('monaco-editor').editor.ITextModel,
+          position: import('monaco-editor').Position,
+        ) {
+          const word = model.getWordUntilPosition(position);
+          const range = {
+            startLineNumber: position.lineNumber,
+            endLineNumber: position.lineNumber,
+            startColumn: word.startColumn,
+            endColumn: word.endColumn,
           };
-        }
 
-        // 3. Indented context: fetch per-component schema from schema.esphome.io
-        //    and suggest its config_vars. Fall back to COMMON_SUB_KEYS if the
-        //    schema is unavailable (custom components, network error, etc.).
-        const parent = findParentComponent(model, position.lineNumber);
-        if (parent) {
-          try {
-            const schemaData = await fetchComponentSchema(parent, _currentEsphomeVersion);
-            const vars = getConfigVars(schemaData, parent);
-            if (vars.length > 0) {
+          const lineContent = model.getLineContent(position.lineNumber);
+          const beforeCursor = lineContent.substring(0, position.column - 1);
+          if (/!secret\s+\S*$/.test(beforeCursor) || beforeCursor.trimEnd().endsWith('!secret')) {
+            try {
+              const keys = await getSecretKeys();
               return {
-                suggestions: vars.map(v => ({
-                  label: v.name,
-                  kind: v.required
-                    ? monaco.languages.CompletionItemKind.Field
-                    : monaco.languages.CompletionItemKind.Property,
-                  insertText: v.name + ': ',
-                  documentation: v.docs,
-                  // Required keys sort first; within each group, alphabetical.
-                  sortText: (v.required ? '0' : '1') + v.name,
+                suggestions: keys.map(k => ({
+                  label: k,
+                  kind: monaco.languages.CompletionItemKind.Variable,
+                  insertText: k,
+                  documentation: 'Secret from secrets.yaml',
                   range,
                 })),
               };
+            } catch {
+              return { suggestions: [] };
             }
-          } catch {
-            // Schema fetch failed — fall through to generic keys below.
           }
-        }
 
-        return {
-          suggestions: COMMON_SUB_KEYS.map(k => ({
-            label: k,
-            kind: monaco.languages.CompletionItemKind.Property,
-            insertText: k + ': ',
-            range,
-          })),
-        };
-      },
-    });
+          const components = await loadComponentList();
+          const indent = currentLineIndent(model, position);
 
-    // --- Inline validation on content change ---
+          if (indent === 0) {
+            return {
+              suggestions: components.map(name => ({
+                label: name,
+                kind: monaco.languages.CompletionItemKind.Module,
+                insertText: name + ':\n  ',
+                documentation: `ESPHome component: ${name}`,
+                range,
+              })),
+            };
+          }
+
+          const parent = findParentComponent(model, position.lineNumber);
+          if (parent) {
+            try {
+              const schemaData = await fetchComponentSchema(parent, _currentEsphomeVersion);
+              const vars = getConfigVars(schemaData, parent);
+              if (vars.length > 0) {
+                return {
+                  suggestions: vars.map(v => ({
+                    label: v.name,
+                    kind: v.required
+                      ? monaco.languages.CompletionItemKind.Field
+                      : monaco.languages.CompletionItemKind.Property,
+                    insertText: v.name + ': ',
+                    documentation: v.docs,
+                    sortText: (v.required ? '0' : '1') + v.name,
+                    range,
+                  })),
+                };
+              }
+            } catch {
+              // Schema fetch failed — fall through to generic keys below.
+            }
+          }
+
+          return {
+            suggestions: COMMON_SUB_KEYS.map(k => ({
+              label: k,
+              kind: monaco.languages.CompletionItemKind.Property,
+              insertText: k + ': ',
+              range,
+            })),
+          };
+        },
+      });
+    }
+
+    // --- Inline validation + dirty-line tracking on content change ---
     editor.onDidChangeModelContent(() => {
       if (_validationTimer !== null) clearTimeout(_validationTimer);
       _validationTimer = setTimeout(() => {
@@ -407,10 +425,10 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, m
         if (!model) return;
         validateYaml(model, monaco);
       }, 500);
+      updateDirtyDecorations(editor);
     });
 
     // Run an initial validation pass; re-run once the component list arrives
-    // so unknown-component warnings appear without requiring a keystroke.
     const model = editor.getModel();
     if (model) validateYaml(model, monaco);
     loadComponentList().then(() => {
@@ -424,6 +442,8 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, m
     const value = editorRef.current.getValue();
     try {
       await saveTargetContent(target, value);
+      savedContentRef.current = value;
+      if (editorRef.current) updateDirtyDecorations(editorRef.current);
       onToast('Saved ' + target, 'success');
       onClose();
     } catch (err) {
@@ -436,6 +456,7 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, m
     const value = editorRef.current.getValue();
     try {
       await saveTargetContent(target, value);
+      savedContentRef.current = value;
       onToast('Saved ' + target, 'success');
       onCompile?.(target);
       onClose();
@@ -472,6 +493,15 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, m
               Validate
             </button>
           )}
+          {onRename && target && target !== 'secrets.yaml' && (
+            <button
+              className="btn-secondary btn-sm"
+              onClick={() => { onRename(target); onClose(); }}
+              title="Rename this device"
+            >
+              Rename
+            </button>
+          )}
           <button className="modal-close" onClick={onClose}>✕</button>
         </div>
         <div className="monaco-container">
@@ -494,6 +524,8 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, m
                 suggestOnTriggerCharacters: true,
                 wordBasedSuggestions: 'off',
                 acceptSuggestionOnCommitCharacter: true,
+                hover: { enabled: true },
+                glyphMargin: true,
               }}
               onMount={handleEditorDidMount}
             />

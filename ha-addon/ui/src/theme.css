@@ -51,6 +51,23 @@ header {
   z-index: 100;
   box-shadow: var(--shadow);
 }
+/* Keep header dark in light mode so the ESPHome logo (light gray text) stays readable */
+[data-theme="light"] header {
+  background: #1a1d27;
+  border-bottom-color: #2e3350;
+  color: #e2e8f0;
+}
+[data-theme="light"] header .version-badge {
+  background: #22263a;
+  border-color: #2e3350;
+  color: #8892a4;
+}
+[data-theme="light"] header .version-badge:hover {
+  background: #2e3350;
+  color: #e2e8f0;
+}
+[data-theme="light"] header span { color: #8892a4; }
+[data-theme="light"] header .status-dot { background: #22c55e; }
 
 header .version-badge {
   background: var(--surface2);
@@ -489,6 +506,12 @@ input[type="checkbox"] {
 .editor-header .modal-close { color: #888; }
 .editor-header .modal-close:hover { color: #ccc; background: #3c3c3c; }
 .monaco-container { flex: 1; overflow: hidden; border-radius: 0 0 var(--radius) var(--radius); }
+
+/* Dirty-line highlighting in editor */
+.dirty-line { background: rgba(255, 200, 50, 0.08); }
+.dirty-glyph { margin-left: 3px; border-left: 3px solid rgba(255, 200, 50, 0.5); }
+[data-theme="light"] .dirty-line { background: rgba(200, 150, 0, 0.06); }
+[data-theme="light"] .dirty-glyph { border-left-color: rgba(200, 150, 0, 0.4); }
 
 [data-theme="light"] .editor-modal {
   background: #ffffff;

@@ -29,7 +29,7 @@ function matchesFilter(filter: string, ...fields: (string | null | undefined)[])
   return fields.some(f => f?.toLowerCase().includes(q));
 }
 
-function RenameModal({ currentName, onConfirm, onClose }: {
+export function RenameModal({ currentName, onConfirm, onClose }: {
   currentName: string;
   onConfirm: (newName: string) => void;
   onClose: () => void;
@@ -59,7 +59,7 @@ function RenameModal({ currentName, onConfirm, onClose }: {
             style={{ width: '100%', padding: '8px 12px', background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', color: 'var(--text)', fontSize: 14 }}
           />
           <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 8 }}>
-            This will update the config file, rename it, and compile+flash the device with the new name via OTA.
+            This will update the config file, rename it, and compile + upgrade the device with the new name via OTA.
           </p>
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
             <button className="btn-secondary btn-sm" onClick={onClose}>Cancel</button>
@@ -68,7 +68,7 @@ function RenameModal({ currentName, onConfirm, onClose }: {
               disabled={!name.trim() || name.trim() === stripYaml(currentName)}
               onClick={() => onConfirm(name.trim())}
             >
-              Rename &amp; Flash
+              Rename &amp; Upgrade
             </button>
           </div>
         </div>
@@ -184,6 +184,7 @@ export function DevicesTab({ targets, devices, onCompile, onEdit, onLogs, onToas
   const getTargetValue = (t: Target): string => {
     if (sort.col === 'device') return t.friendly_name || t.device_name || stripYaml(t.target);
     if (sort.col === 'status') return t.online == null ? 'unknown' : t.online ? 'online' : 'offline';
+    if (sort.col === 'ha') return t.ha_configured ? (t.ha_connected === true ? 'connected' : t.ha_connected === false ? 'disconnected' : 'configured') : '';
     if (sort.col === 'ip') return t.ip_address || '';
     if (sort.col === 'running') return t.running_version || '';
     return '';
@@ -191,6 +192,7 @@ export function DevicesTab({ targets, devices, onCompile, onEdit, onLogs, onToas
   const getUnmanagedValue = (d: Device): string => {
     if (sort.col === 'device') return d.name;
     if (sort.col === 'status') return d.online ? 'online' : 'offline';
+    if (sort.col === 'ha') return '';
     if (sort.col === 'ip') return d.ip_address || '';
     if (sort.col === 'running') return d.running_version || '';
     return '';
@@ -264,6 +266,7 @@ export function DevicesTab({ targets, devices, onCompile, onEdit, onLogs, onToas
                 <th><input type="checkbox" ref={selectAllRef} onChange={handleSelectAll} /></th>
                 <SortableHeader label="Device" col="device" sort={sort} onSort={handleSort} />
                 <SortableHeader label="Status" col="status" sort={sort} onSort={handleSort} />
+                <SortableHeader label="HA" col="ha" sort={sort} onSort={handleSort} />
                 <SortableHeader label="IP" col="ip" sort={sort} onSort={handleSort} />
                 <SortableHeader label="Running" col="running" sort={sort} onSort={handleSort} />
                 <th></th>
@@ -272,7 +275,7 @@ export function DevicesTab({ targets, devices, onCompile, onEdit, onLogs, onToas
             <tbody ref={tbodyRef}>
               {!hasResults ? (
                 <tr className="empty-row">
-                  <td colSpan={6}>
+                  <td colSpan={7}>
                     {filter
                       ? 'No devices match your search'
                       : 'No devices found — ensure ESPHome configs are in /config/esphome/'}
@@ -449,46 +452,29 @@ function TargetRow({
   const displayName = t.friendly_name || t.device_name || stripYaml(t.target);
   const showIpLink = t.has_web_server && t.online && t.ip_address;
 
-  let haBadge: React.ReactNode = null;
+  let haCell: React.ReactNode;
   if (t.ha_configured) {
-    const color = t.ha_connected === true
-      ? 'var(--success, #22c55e)'
-      : t.ha_connected === false
-        ? 'var(--warn, #f59e0b)'
-        : 'var(--text-muted)';
-    const label = t.ha_connected === true
-      ? 'In Home Assistant (connected)'
-      : t.ha_connected === false
-        ? 'In Home Assistant (disconnected)'
-        : 'In Home Assistant';
-    haBadge = (
-      <span
-        title={label}
-        aria-label={label}
-        style={{
-          display: 'inline-block',
-          marginLeft: 6,
-          fontSize: 11,
-          color,
-          verticalAlign: 'middle',
-          cursor: 'default',
-          userSelect: 'none',
-        }}
-      >
-        &#8962;
-      </span>
-    );
+    if (t.ha_connected === true) {
+      haCell = <><span className="dot dot-online"></span>Connected</>;
+    } else if (t.ha_connected === false) {
+      haCell = <><span className="dot dot-offline"></span>Disconnected</>;
+    } else {
+      haCell = <span style={{ color: 'var(--text-muted)' }}>Configured</span>;
+    }
+  } else {
+    haCell = <span style={{ color: 'var(--text-muted)' }}>—</span>;
   }
 
   return (
     <tr>
       <td><input type="checkbox" className="target-cb" value={t.target} /></td>
       <td>
-        <span className="device-name">{displayName}{haBadge}</span>
+        <span className="device-name">{displayName}</span>
         <div className="device-filename">{stripYaml(t.target)}</div>
         {t.comment && <div className="device-comment">{t.comment}</div>}
       </td>
       <td>{statusEl}</td>
+      <td style={{ fontSize: 12 }}>{haCell}</td>
       <td style={{ fontFamily: 'monospace', fontSize: 12 }}>
         {showIpLink
           ? (
@@ -535,6 +521,7 @@ function UnmanagedRow({ device: d }: { device: Device }) {
         <div className="device-filename" style={{ color: '#6b7280' }}>No config</div>
       </td>
       <td>{statusEl}</td>
+      <td style={{ fontSize: 12 }}><span style={{ color: 'var(--text-muted)' }}>—</span></td>
       <td style={{ fontFamily: 'monospace', fontSize: 12 }}>
         <span style={{ color: 'var(--text-muted)' }}>{d.ip_address || '—'}</span>
       </td>

@@ -23,7 +23,7 @@ import {
 } from './api/client';
 import { ConnectWorkerModal } from './components/ConnectWorkerModal';
 import { DeviceLogModal } from './components/DeviceLogModal';
-import { DevicesTab } from './components/DevicesTab';
+import { DevicesTab, RenameModal } from './components/DevicesTab';
 import { EditorModal } from './components/EditorModal';
 import { EsphomeVersionDropdown } from './components/EsphomeVersionDropdown';
 import { LogModal } from './components/LogModal';
@@ -92,6 +92,7 @@ export default function App() {
   const [deviceLogTarget, setDeviceLogTarget] = useState<string | null>(null);
   const [editorTarget, setEditorTarget] = useState<string | null>(null);
   const [connectModalOpen, setConnectModalOpen] = useState(false);
+  const [renameModalTarget, setRenameModalTarget] = useState<string | null>(null);
 
   // Apply theme to <html> element on mount and on change
   useEffect(() => {
@@ -497,6 +498,7 @@ export default function App() {
           onToast={addToast}
           onValidate={handleValidate}
           onCompile={(target) => { handleCompile([target]); switchTab('queue'); }}
+          onRename={(target) => { setEditorTarget(null); setRenameModalTarget(target); }}
           monacoTheme={theme === 'light' ? 'vs' : 'vs-dark'}
           esphomeVersion={esphomeVersions.selected ?? esphomeVersions.detected ?? undefined}
         />
@@ -507,6 +509,18 @@ export default function App() {
           serverInfo={serverInfo}
           esphomeVersion={seedVersion}
           onClose={() => setConnectModalOpen(false)}
+        />
+      )}
+
+      {renameModalTarget && (
+        <RenameModal
+          currentName={renameModalTarget}
+          onConfirm={newName => {
+            const t = renameModalTarget;
+            setRenameModalTarget(null);
+            handleRenameDevice(t, newName);
+          }}
+          onClose={() => setRenameModalTarget(null)}
         />
       )}
     </>

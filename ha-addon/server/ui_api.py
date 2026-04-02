@@ -191,12 +191,21 @@ async def get_targets(request: web.Request) -> web.Response:
 
         ha_configured, ha_connected = _ha_status_for_target(ha_entity_status, target, meta)
 
+        # 4.2c: Use HA connected state as additional online signal.
+        # If the device poller hasn't confirmed online yet but HA says connected,
+        # treat the device as online.
+        poller_online = dev.online if dev else None
+        if poller_online is not True and ha_connected is True:
+            effective_online = True
+        else:
+            effective_online = poller_online
+
         entry: dict = {
             "target": target,
             "friendly_name": meta["friendly_name"],
             "device_name": meta["device_name"],
             "comment": meta["comment"],
-            "online": dev.online if dev else None,
+            "online": effective_online,
             "running_version": dev.running_version if dev else None,
             "compilation_time": dev.compilation_time if dev else None,
             "config_modified": config_modified,
