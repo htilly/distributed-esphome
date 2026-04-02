@@ -3,6 +3,7 @@ import {
   cancelJobs,
   clearQueue,
   compile,
+  deleteTarget,
   disableWorker,
   getDevices,
   getEsphomeVersions,
@@ -21,6 +22,7 @@ import {
   validateConfig,
 } from './api/client';
 import { ConnectWorkerModal } from './components/ConnectWorkerModal';
+import { DeviceLogModal } from './components/DeviceLogModal';
 import { DevicesTab } from './components/DevicesTab';
 import { EditorModal } from './components/EditorModal';
 import { EsphomeVersionDropdown } from './components/EsphomeVersionDropdown';
@@ -87,6 +89,7 @@ export default function App() {
 
   const [versionDropdownOpen, setVersionDropdownOpen] = useState(false);
   const [logJobId, setLogJobId] = useState<string | null>(null);
+  const [deviceLogTarget, setDeviceLogTarget] = useState<string | null>(null);
   const [editorTarget, setEditorTarget] = useState<string | null>(null);
   const [connectModalOpen, setConnectModalOpen] = useState(false);
 
@@ -327,18 +330,19 @@ export default function App() {
     }
   }
 
-  async function handleDeleteDevice() {
-    // The actual delete API call, confirmation dialog, and toast are handled
-    // inside DeviceMenu so they execute close to the user's click. This
-    // callback only needs to refresh the device list.
-    await fetchDevicesAndTargets();
+  async function handleDeleteDevice(target: string, archive: boolean) {
+    try {
+      await deleteTarget(target, archive);
+      addToast(`${archive ? 'Archived' : 'Deleted'} ${stripYaml(target)}`, 'success');
+      await fetchDevicesAndTargets();
+    } catch (err) {
+      addToast('Delete failed: ' + (err as Error).message, 'error');
+    }
   }
 
-  async function handleRenameDevice(target: string) {
-    const newName = window.prompt('New device name:', stripYaml(target));
-    if (!newName) return;
+  async function handleRenameDevice(oldTarget: string, newName: string) {
     try {
-      const result = await renameTarget(target, newName);
+      const result = await renameTarget(oldTarget, newName);
       addToast(`Renamed to ${stripYaml(result.new_filename)} — compiling new firmware...`, 'success');
       await fetchDevicesAndTargets();
       await fetchQueue();
@@ -437,6 +441,7 @@ export default function App() {
             devices={devices}
             onCompile={handleCompile}
             onEdit={setEditorTarget}
+            onLogs={setDeviceLogTarget}
             onToast={addToast}
             onDelete={handleDeleteDevice}
             onRename={handleRenameDevice}
@@ -475,6 +480,13 @@ export default function App() {
         onClose={() => setLogJobId(null)}
         onRetry={handleRetryJobs}
       />
+
+      {deviceLogTarget && (
+        <DeviceLogModal
+          target={deviceLogTarget}
+          onClose={() => setDeviceLogTarget(null)}
+        />
+      )}
 
       {editorTarget && (
         <EditorModal

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { deleteTarget, getApiKey } from '../api/client';
+import { getApiKey } from '../api/client';
 import type { Device, Target } from '../types';
 import { stripYaml } from '../utils';
 import { useSortable } from '../hooks/useSortable';
@@ -10,9 +10,10 @@ interface Props {
   devices: Device[];
   onCompile: (targets: string[] | 'all' | 'outdated') => void;
   onEdit: (target: string) => void;
+  onLogs: (target: string) => void;
   onToast: (msg: string, type?: 'info' | 'success' | 'error') => void;
-  onDelete: () => void;
-  onRename: (target: string) => void;
+  onDelete: (target: string, archive: boolean) => void;
+  onRename: (oldTarget: string, newName: string) => void;
 }
 
 function timeAgo(isoString: string): string {
@@ -28,9 +29,88 @@ function matchesFilter(filter: string, ...fields: (string | null | undefined)[])
   return fields.some(f => f?.toLowerCase().includes(q));
 }
 
-export function DevicesTab({ targets, devices, onCompile, onEdit, onToast, onDelete, onRename }: Props) {
+function RenameModal({ currentName, onConfirm, onClose }: {
+  currentName: string;
+  onConfirm: (newName: string) => void;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState(stripYaml(currentName));
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { inputRef.current?.select(); }, []);
+
+  return (
+    <div className="modal-overlay open" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal" style={{ maxWidth: 480, height: 'auto' }}>
+        <div className="modal-header">
+          <div className="modal-header-left"><h3>Rename Device</h3></div>
+          <button className="modal-close" onClick={onClose}>&#x2715;</button>
+        </div>
+        <div className="modal-body" style={{ padding: 18 }}>
+          <label style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6, display: 'block' }}>
+            New device name
+          </label>
+          <input
+            ref={inputRef}
+            type="text"
+            value={name}
+            onChange={e => setName(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && name.trim() && name.trim() !== stripYaml(currentName) && onConfirm(name.trim())}
+            style={{ width: '100%', padding: '8px 12px', background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', color: 'var(--text)', fontSize: 14 }}
+          />
+          <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 8 }}>
+            This will update the config file, rename it, and compile+flash the device with the new name via OTA.
+          </p>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
+            <button className="btn-secondary btn-sm" onClick={onClose}>Cancel</button>
+            <button
+              className="btn-primary btn-sm"
+              disabled={!name.trim() || name.trim() === stripYaml(currentName)}
+              onClick={() => onConfirm(name.trim())}
+            >
+              Rename &amp; Flash
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeleteModal({ target, onConfirm, onClose }: {
+  target: string;
+  onConfirm: (archive: boolean) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="modal-overlay open" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal" style={{ maxWidth: 480, height: 'auto' }}>
+        <div className="modal-header">
+          <div className="modal-header-left"><h3>Delete Device</h3></div>
+          <button className="modal-close" onClick={onClose}>&#x2715;</button>
+        </div>
+        <div className="modal-body" style={{ padding: 18 }}>
+          <p>Are you sure you want to delete <strong>{stripYaml(target)}</strong>?</p>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
+            <button className="btn-secondary btn-sm" onClick={onClose}>Cancel</button>
+            <button className="btn-warn btn-sm" onClick={() => onConfirm(true)}>
+              Archive
+            </button>
+            <button className="btn-danger btn-sm" onClick={() => onConfirm(false)}>
+              Delete Permanently
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function DevicesTab({ targets, devices, onCompile, onEdit, onLogs, onToast, onDelete, onRename }: Props) {
   const [filter, setFilter] = useState('');
   const { sort, handleSort, sortedItems } = useSortable();
+  const [renameTarget, setRenameTarget] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
   // Track checked state in a ref — we read DOM directly to avoid re-render loops
   const tbodyRef = useRef<HTMLTableSectionElement>(null);
@@ -169,7 +249,7 @@ export function DevicesTab({ targets, devices, onCompile, onEdit, onToast, onDel
                 }}
                 title="Clear filter"
               >
-                ×
+                &times;
               </button>
             )}
           </div>
@@ -198,7 +278,16 @@ export function DevicesTab({ targets, devices, onCompile, onEdit, onToast, onDel
               ) : (
                 <>
                   {filteredTargets.map(t => (
-                    <TargetRow key={t.target} target={t} onCompile={onCompile} onEdit={onEdit} onToast={onToast} onDelete={onDelete} onRename={onRename} />
+                    <TargetRow
+                      key={t.target}
+                      target={t}
+                      onCompile={onCompile}
+                      onEdit={onEdit}
+                      onLogs={onLogs}
+                      onToast={onToast}
+                      onDelete={setDeleteTarget}
+                      onRename={setRenameTarget}
+                    />
                   ))}
                   {filteredUnmanaged.map(d => (
                     <UnmanagedRow key={d.name} device={d} />
@@ -209,6 +298,30 @@ export function DevicesTab({ targets, devices, onCompile, onEdit, onToast, onDel
           </table>
         </div>
       </div>
+
+      {renameTarget && (
+        <RenameModal
+          currentName={renameTarget}
+          onConfirm={newName => {
+            const target = renameTarget;
+            setRenameTarget(null);
+            onRename(target, newName);
+          }}
+          onClose={() => setRenameTarget(null)}
+        />
+      )}
+
+      {deleteTarget && (
+        <DeleteModal
+          target={deleteTarget}
+          onConfirm={archive => {
+            const target = deleteTarget;
+            setDeleteTarget(null);
+            onDelete(target, archive);
+          }}
+          onClose={() => setDeleteTarget(null)}
+        />
+      )}
     </div>
   );
 }
@@ -221,7 +334,7 @@ function DeviceMenu({
 }: {
   target: Target;
   onToast: (msg: string, type?: 'info' | 'success' | 'error') => void;
-  onDelete: () => void;
+  onDelete: (target: string) => void;
   onRename: (target: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -250,21 +363,14 @@ function DeviceMenu({
     }
   }
 
-  async function handleRename() {
+  function handleRename() {
     setOpen(false);
     onRename(t.target);
   }
 
-  async function handleDelete() {
+  function handleDelete() {
     setOpen(false);
-    if (!window.confirm(`Delete ${stripYaml(t.target)}? The file will be moved to .archive/`)) return;
-    try {
-      await deleteTarget(t.target);
-      onToast(`Deleted ${stripYaml(t.target)}`, 'success');
-      onDelete();
-    } catch (err) {
-      onToast('Delete failed: ' + (err as Error).message, 'error');
-    }
+    onDelete(t.target);
   }
 
   return (
@@ -309,6 +415,7 @@ function TargetRow({
   target: t,
   onCompile,
   onEdit,
+  onLogs,
   onToast,
   onDelete,
   onRename,
@@ -316,8 +423,9 @@ function TargetRow({
   target: Target;
   onCompile: (targets: string[]) => void;
   onEdit: (target: string) => void;
+  onLogs: (target: string) => void;
   onToast: (msg: string, type?: 'info' | 'success' | 'error') => void;
-  onDelete: () => void;
+  onDelete: (target: string) => void;
   onRename: (target: string) => void;
 }) {
   let lastSeenEl: React.ReactNode = null;
@@ -369,6 +477,9 @@ function TargetRow({
         <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
           <button className={`${upgradeBtnCls} btn-sm`} onClick={() => onCompile([t.target])}>Upgrade</button>
           <button className="btn-secondary btn-sm" onClick={() => onEdit(t.target)}>Edit</button>
+          {t.online && (
+            <button className="btn-secondary btn-sm" onClick={() => onLogs(t.target)} title="Stream live logs from this device">Logs</button>
+          )}
           <DeviceMenu target={t} onToast={onToast} onDelete={onDelete} onRename={onRename} />
         </div>
       </td>

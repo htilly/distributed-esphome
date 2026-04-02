@@ -199,6 +199,86 @@ async def get_job_log(request: web.Request) -> web.Response:
     return web.json_response({"log": chunk, "offset": len(full_log), "finished": finished})
 
 
+@routes.get("/ui/api/targets/{filename}/logs/ws")
+async def ws_device_log(request: web.Request) -> web.WebSocketResponse:
+    """WebSocket endpoint for streaming live device logs via the native API."""
+    filename = request.match_info["filename"]
+    device_poller = request.app.get("device_poller")
+
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+
+    if not device_poller:
+        await ws.send_str("Device poller not available\n")
+        await ws.close()
+        return ws
+
+    # Find the device for this target
+    dev = None
+    for d in device_poller.get_devices():
+        if d.compile_target == filename:
+            dev = d
+            break
+
+    if not dev or not dev.ip_address:
+        await ws.send_str(f"Device not found or no IP address for {filename}\n")
+        await ws.close()
+        return ws
+
+    noise_psk = device_poller._encryption_keys.get(dev.name)
+    addr = device_poller._address_overrides.get(dev.name) or dev.ip_address
+
+    import asyncio as _asyncio  # noqa: PLC0415
+    import aioesphomeapi  # noqa: PLC0415
+    from aioesphomeapi import LogLevel  # noqa: PLC0415
+    from typing import Any  # noqa: PLC0415
+
+    client = aioesphomeapi.APIClient(addr, 6053, password=None, noise_psk=noise_psk)
+    unsub = None
+
+    try:
+        await ws.send_str(f"Connecting to {dev.name} at {addr}...\n")
+        await client.connect(login=True)
+        await ws.send_str("Connected. Streaming logs...\n\n")
+
+        loop = _asyncio.get_event_loop()
+
+        def log_callback(msg: Any) -> None:
+            if ws.closed:
+                return
+            text = msg.message.decode("utf-8", errors="replace")
+            if not text.endswith("\n"):
+                text += "\n"
+            _asyncio.ensure_future(ws.send_str(text), loop=loop)
+
+        # subscribe_logs is synchronous and returns an unsubscribe callable.
+        unsub = client.subscribe_logs(log_callback, log_level=LogLevel.LOG_LEVEL_VERY_VERBOSE)
+
+        # Keep the WebSocket open until the browser disconnects.
+        async for msg in ws:
+            if msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
+                break
+
+    except Exception as exc:
+        logger.debug("Device log WebSocket error for %s: %s", filename, exc)
+        try:
+            await ws.send_str(f"\nConnection error: {exc}\n")
+        except Exception:
+            pass
+    finally:
+        if unsub is not None:
+            try:
+                unsub()
+            except Exception:
+                pass
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+    return ws
+
+
 @routes.get("/ui/api/jobs/{id}/log/ws")
 async def ws_browser_log(request: web.Request) -> web.WebSocketResponse:
     """WebSocket endpoint for browser live log tailing."""
@@ -578,8 +658,16 @@ async def rename_target(request: web.Request) -> web.Response:
 
     # Enqueue a compile+OTA job so the device gets flashed with the new name.
     # The device is still running the old firmware with the old hostname,
-    # so OTA will reach it at the old address. After reboot, it comes up
-    # with the new name.
+    # so OTA must target the OLD address. We look up the device by the old
+    # config filename and pass its current IP as ota_address.
+    device_poller = request.app.get("device_poller")
+    old_device_addr = None
+    if device_poller:
+        for d in device_poller.get_devices():
+            if d.compile_target == filename:
+                old_device_addr = device_poller._address_overrides.get(d.name) or d.ip_address
+                break
+
     queue = request.app["queue"]
     server_version = get_esphome_version()
     cfg = _cfg(request)
@@ -588,6 +676,7 @@ async def rename_target(request: web.Request) -> web.Response:
         esphome_version=server_version,
         run_id=str(uuid.uuid4()),
         timeout_seconds=cfg.job_timeout,
+        ota_address=old_device_addr,
     )
     logger.info("Enqueued compile+OTA for renamed device %s", new_filename)
 

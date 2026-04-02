@@ -60,6 +60,7 @@ class Job:
     ota_result: Optional[str] = None
     ota_only: bool = False  # skip compile, just re-run OTA upload
     validate_only: bool = False  # run esphome config (validation) instead of compile+OTA
+    ota_address: Optional[str] = None  # override OTA target address (used after rename)
     pinned_client_id: Optional[str] = None  # only this client can claim the job
     status_text: Optional[str] = None  # transient; not persisted
     _streaming_log: str = field(default="", repr=False)  # transient; not persisted
@@ -83,6 +84,7 @@ class Job:
             "ota_result": self.ota_result,
             "ota_only": self.ota_only,
             "validate_only": self.validate_only,
+            "ota_address": self.ota_address,
             "pinned_client_id": self.pinned_client_id,
             "status_text": self.status_text,
             "duration_seconds": self.duration_seconds(),
@@ -112,6 +114,7 @@ class Job:
             ota_result=d.get("ota_result"),
             ota_only=d.get("ota_only", False),
             validate_only=d.get("validate_only", False),
+            ota_address=d.get("ota_address"),
             pinned_client_id=d.get("pinned_client_id"),
         )
 
@@ -177,6 +180,7 @@ class JobQueue:
         run_id: str,
         timeout_seconds: int,
         validate_only: bool = False,
+        ota_address: Optional[str] = None,
     ) -> Optional[Job]:
         """
         Create and enqueue a new job for *target*.
@@ -217,6 +221,7 @@ class JobQueue:
                 run_id=run_id,
                 timeout_seconds=timeout_seconds,
                 validate_only=validate_only,
+                ota_address=ota_address,
             )
             self._jobs[job.id] = job
             self._persist()

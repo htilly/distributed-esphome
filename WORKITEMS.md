@@ -57,9 +57,9 @@ Mark items `[x]` when complete.
 
 ## Live Device Logs
 
-- [ ] **4.1a Server endpoint** — `GET /ui/api/targets/{f}/logs/ws` WebSocket, connects via aioesphomeapi
-- [ ] **4.1b Handle encryption** — pass noise_psk from extracted keys
-- [ ] **4.1c Logs button on device row** — opens log modal connected to device (not job) log stream
+- [x] **4.1a Server endpoint** (1.1.0-dev.18) — `GET /ui/api/targets/{f}/logs/ws` WebSocket, connects via aioesphomeapi
+- [x] **4.1b Handle encryption** (1.1.0-dev.18) — passes noise_psk from extracted keys
+- [x] **4.1c Logs button on device row** (1.1.0-dev.18) — DeviceLogModal with xterm.js, opens for online devices
 - [ ] **4.1d Web Serial logs** — browser-side USB serial log viewer (Web Serial API)
 
 ---

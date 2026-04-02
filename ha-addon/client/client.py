@@ -29,7 +29,7 @@ from version_manager import VersionManager
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.1.0-dev.17"
+CLIENT_VERSION = "1.1.0-dev.18"
 
 # ---------------------------------------------------------------------------
 # System information gathering (stdlib only — no psutil dependency)
@@ -810,8 +810,13 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
                 _report_status(job_id, "OTA Retry")
                 time.sleep(5)
             _report_status(job_id, "OTA Upgrade")
+            upload_cmd = [esphome_bin, "upload", target_path]
+            # If ota_address is set (e.g. after a rename), target the old device address
+            ota_address = job.get("ota_address")
+            if ota_address:
+                upload_cmd.extend(["--device", ota_address])
             ota_log, ota_ok = _run_subprocess(
-                [esphome_bin, "upload", target_path],
+                upload_cmd,
                 cwd=tmp_dir,
                 timeout=OTA_TIMEOUT,
                 label=f"OTA upload (attempt {attempt + 1})",

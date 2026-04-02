@@ -171,8 +171,17 @@ export function LogModal({ jobId, queue, workers, onClose, onRetry }: Props) {
     return () => document.removeEventListener('keydown', handler);
   }, [isOpen, onClose]);
 
+  // Only close on overlay click if mousedown also started on the overlay.
+  // This prevents closing when the user drags to select text and the drag
+  // ends outside the modal content area.
+  const mouseDownTargetRef = useRef<EventTarget | null>(null);
+  function handleOverlayMouseDown(e: React.MouseEvent<HTMLDivElement>) {
+    mouseDownTargetRef.current = e.target;
+  }
   function handleOverlayClick(e: React.MouseEvent<HTMLDivElement>) {
-    if (e.target === e.currentTarget) onClose();
+    if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget) {
+      onClose();
+    }
   }
 
   // Compute header contents from current job state
@@ -233,6 +242,7 @@ export function LogModal({ jobId, queue, workers, onClose, onRetry }: Props) {
     <div
       id="log-modal"
       className={`modal-overlay${isOpen ? ' open' : ''}`}
+      onMouseDown={handleOverlayMouseDown}
       onClick={handleOverlayClick}
     >
       <div className="modal">
