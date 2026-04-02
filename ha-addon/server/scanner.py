@@ -93,21 +93,34 @@ def create_bundle(config_dir: str) -> bytes:
     return buf.getvalue()
 
 
+# Cache resolved configs by (target, mtime) to avoid repeated git clones
+_config_cache: dict[str, tuple[float, dict]] = {}  # target → (mtime, resolved_config)
+
+
 def _resolve_esphome_config(config_dir: str, target: str) -> Optional[dict]:
     """Fully resolve an ESPHome YAML config including packages and substitutions.
 
     Uses ESPHome's own resolution pipeline so that ``packages:``, ``!include``,
     and ``${substitutions}`` are all handled identically to ``esphome compile``.
 
+    Results are cached by file mtime — only re-resolved when the file changes.
+
     Returns the resolved config dict, or None on error.
     """
     try:
+        path = Path(config_dir) / target
+        mtime = path.stat().st_mtime
+
+        # Return cached result if mtime hasn't changed
+        cached = _config_cache.get(target)
+        if cached and cached[0] == mtime:
+            return cached[1]
+
         from esphome.yaml_util import load_yaml  # noqa: PLC0415
         from esphome.components.substitutions import do_substitution_pass  # noqa: PLC0415
         from esphome.components.packages import do_packages_pass, merge_packages  # noqa: PLC0415
         from esphome.core import CORE  # noqa: PLC0415
 
-        path = Path(config_dir) / target
         CORE.config_path = path
         config = load_yaml(path)
         if not isinstance(config, dict):
@@ -120,6 +133,7 @@ def _resolve_esphome_config(config_dir: str, target: str) -> Optional[dict]:
         # Resolve ${substitutions}
         do_substitution_pass(config, None, ignore_missing=True)
 
+        _config_cache[target] = (mtime, config)
         return config
     except Exception:
         logger.debug("Could not resolve config for %s", target, exc_info=True)

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.71
+- Cache resolved ESPHome configs by file mtime — eliminates repeated git clones
+  on startup and every poll cycle (was cloning remote packages every 15 seconds)
+
 ## 0.0.70
 - Ping-based liveness fallback (mimics official ESPHome dashboard)
   - When API connection fails, falls back to ICMP ping via icmplib
