@@ -16,6 +16,7 @@ interface Props {
   workers: Worker[];
   onCancel: (ids: string[]) => void;
   onRetry: (ids: string[]) => void;
+  onClear: (ids: string[]) => void;
   onRetryAllFailed: () => void;
   onClearSucceeded: () => void;
   onClearFinished: () => void;
@@ -36,6 +37,7 @@ export function QueueTab({
   workers,
   onCancel,
   onRetry,
+  onClear,
   onRetryAllFailed,
   onClearSucceeded,
   onClearFinished,
@@ -128,6 +130,7 @@ export function QueueTab({
                     workers={workers}
                     onCancel={onCancel}
                     onRetry={onRetry}
+                    onClear={onClear}
                     onOpenLog={onOpenLog}
                     onEdit={onEdit}
                   />
@@ -146,6 +149,7 @@ function QueueRow({
   workers,
   onCancel,
   onRetry,
+  onClear,
   onOpenLog,
   onEdit,
 }: {
@@ -153,6 +157,7 @@ function QueueRow({
   workers: Worker[];
   onCancel: (ids: string[]) => void;
   onRetry: (ids: string[]) => void;
+  onClear: (ids: string[]) => void;
   onOpenLog: (jobId: string) => void;
   onEdit: (target: string) => void;
 }) {
@@ -219,6 +224,9 @@ function QueueRow({
             <button className="btn-secondary btn-sm" onClick={() => onOpenLog(job.id)}>Log</button>
           )}
           <button className="btn-secondary btn-sm" onClick={() => onEdit(job.target)}>Edit</button>
+          {isJobFinished(job) && (
+            <button className="btn-secondary btn-sm" onClick={() => onClear([job.id])}>Clear</button>
+          )}
         </div>
       </td>
     </tr>

@@ -460,6 +460,20 @@ class JobQueue:
             if j.state in (JobState.PENDING, JobState.WORKING)
         )
 
+    async def remove_jobs(self, job_ids: list[str]) -> int:
+        """Remove terminal jobs by ID. Returns count removed."""
+        terminal = {JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT}
+        async with self._lock:
+            removed = 0
+            for job_id in job_ids:
+                job = self._jobs.get(job_id)
+                if job and job.state in terminal:
+                    del self._jobs[job_id]
+                    removed += 1
+            if removed:
+                self._persist()
+            return removed
+
     async def clear(self, states: list[str], require_ota_success: bool = False) -> int:
         """Remove terminal jobs whose state is in *states*. Returns count removed.
 

@@ -117,22 +117,10 @@ async def ha_entity_poller(app: web.Application) -> None:
         await asyncio.sleep(30)
         try:
             async with aiohttp.ClientSession() as session:
-                # Entity registry: gives us platform="esphome" entries — most
-                # reliable signal that a device is configured in HA.
-                async with session.get(
-                    "http://supervisor/core/api/config/entity_registry",
-                    headers=headers,
-                    timeout=timeout,
-                ) as resp:
-                    if resp.status != 200:
-                        logger.debug(
-                            "HA entity registry returned HTTP %d — skipping poll",
-                            resp.status,
-                        )
-                        continue
-                    entity_registry: list[dict] = await resp.json()
-
-                # States: used to read binary_sensor.<name>_status connectivity.
+                # /api/states is the only REST endpoint that works from an add-on.
+                # The entity registry (platform field) is WebSocket-only.
+                # ESPHome devices always create a binary_sensor.<name>_status entity
+                # with device_class=connectivity — that's our signal.
                 async with session.get(
                     "http://supervisor/core/api/states",
                     headers=headers,
@@ -146,40 +134,30 @@ async def ha_entity_poller(app: web.Application) -> None:
                         continue
                     states: list[dict] = await resp.json()
 
-            # Build a map of entity_local → connected state from
-            # binary_sensor.<name>_status entities (state "on" = connected).
-            # Key: entity_local of the status entity, e.g. "living_room_sensor_status"
-            # Value: True if connected, False if disconnected.
-            connectivity: dict[str, bool] = {}
+            # Derive both "configured" and "connected" from status entities.
+            # ESPHome creates binary_sensor.<device_name>_status with
+            # device_class=connectivity for each device. state "on" = connected.
+            # Key by the device portion (without _status suffix) so
+            # _ha_status_for_target can match by normalised device name.
+            ha_status: dict[str, dict] = {}
             for entity in states:
                 entity_id: str = entity.get("entity_id", "")
-                if entity_id.startswith("binary_sensor.") and entity_id.endswith("_status"):
-                    entity_local = entity_id[len("binary_sensor."):]  # e.g. "living_room_sensor_status"
-                    connectivity[entity_local] = entity.get("state") == "on"
-
-            # Build the configured set from ESPHome platform entries.
-            # ha_status is keyed by entity_local (e.g. "living_room_sensor_temperature").
-            # For status entities, we also store connectivity directly on the entry.
-            # _ha_status_for_target matches by prefix: any entity_local starting with
-            # norm_name + "_" means the device is configured. It reads connectivity
-            # from the "<norm_name>_status" entry specifically.
-            ha_status: dict[str, dict] = {}
-            for entry in entity_registry:
-                if entry.get("platform") != "esphome":
+                if not entity_id.startswith("binary_sensor.") or not entity_id.endswith("_status"):
                     continue
-                eid: str = entry.get("entity_id", "")
-                if "." not in eid:
+                attrs = entity.get("attributes") or {}
+                if attrs.get("device_class") != "connectivity":
                     continue
-                entity_local = eid.split(".", 1)[1]  # e.g. "living_room_sensor_temperature"
-                connected: bool | None = connectivity.get(entity_local)  # non-None only for _status entities
-                ha_status[entity_local] = {
+                # e.g. "binary_sensor.living_room_sensor_status" → "living_room_sensor"
+                norm_name = entity_id[len("binary_sensor."):-len("_status")]
+                connected = entity.get("state") == "on"
+                ha_status[norm_name] = {
                     "configured": True,
                     "connected": connected,
                 }
 
             app["ha_entity_status"] = ha_status
             logger.debug(
-                "HA entity status updated: %d ESPHome entities",
+                "HA entity status updated: %d ESPHome devices found",
                 len(ha_status),
             )
 

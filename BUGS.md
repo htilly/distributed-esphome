@@ -90,3 +90,17 @@
 
 46. FIXED (1.1.0-dev.20) - Light mode header kept dark so ESPHome logo stays readable.
 
+47. FIXED (1.1.0-dev.21) - Validation failure opens log modal automatically. Improved toast message.
+
+48. FIXED (1.1.0-dev.21) - Validate button saves editor content first, then validates against current text.
+
+49. FIXED (1.1.0-dev.21) - Dirty line highlight color made more visible (0.08 → 0.15 opacity).
+
+50. FIXED (1.1.0-dev.21) - Editor footer shows "n lines changed" when there are unsaved changes.
+
+51. FIXED (1.1.0-dev.21) - Clear button on each finished job row in Queue tab.
+
+52. FIXED (1.1.0-dev.21) - HA status not populating. Entity registry REST API doesn't exist; switched to /api/states with binary_sensor device_class=connectivity filter.
+
+53. FIXED (1.1.0-dev.21) - Dark mode checkboxes use color-scheme: dark.
+

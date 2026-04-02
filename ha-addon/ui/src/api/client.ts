@@ -127,6 +127,17 @@ export async function retryAllFailed(): Promise<{ retried: number }> {
   return retryJobs('all_failed');
 }
 
+export async function removeJobs(ids: string[]): Promise<{ removed: number }> {
+  const r = await apiFetch('./ui/api/queue/remove', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids }),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error((data as { error?: string }).error || String(r.status));
+  return data as { removed: number };
+}
+
 export async function clearQueue(
   states: string[],
   requireOtaSuccess?: boolean,

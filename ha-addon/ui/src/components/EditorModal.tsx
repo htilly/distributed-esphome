@@ -250,6 +250,7 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, o
   const [loading, setLoading] = useState(false);
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
   const savedContentRef = useRef('');
+  const [dirtyLineCount, setDirtyLineCount] = useState(0);
 
   // Keep the module-level version variable in sync so the completion provider
   // (registered once, outside the component lifecycle) always sees the current value.
@@ -319,6 +320,7 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, o
       }
     }
     _dirtyDecorationIds = editor.deltaDecorations(_dirtyDecorationIds, decorations);
+    setDirtyLineCount(decorations.length);
   }
 
   function handleEditorDidMount(
@@ -487,8 +489,20 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, o
           {onValidate && target && target !== 'secrets.yaml' && (
             <button
               className="btn-secondary btn-sm"
-              onClick={() => onValidate(target)}
-              title="Validate config via esphome config (2-5s)"
+              onClick={async () => {
+                if (!editorRef.current || !target) return;
+                const value = editorRef.current.getValue();
+                try {
+                  await saveTargetContent(target, value);
+                  savedContentRef.current = value;
+                  updateDirtyDecorations(editorRef.current);
+                } catch (err) {
+                  onToast('Save failed: ' + (err as Error).message, 'error');
+                  return;
+                }
+                onValidate(target);
+              }}
+              title="Save and validate config via esphome config (2-5s)"
             >
               Validate
             </button>
@@ -531,6 +545,11 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, o
             />
           )}
         </div>
+        {dirtyLineCount > 0 && (
+          <div className="editor-footer">
+            {dirtyLineCount} line{dirtyLineCount !== 1 ? 's' : ''} changed
+          </div>
+        )}
       </div>
     </div>
   );

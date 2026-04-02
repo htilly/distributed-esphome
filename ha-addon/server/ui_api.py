@@ -108,10 +108,9 @@ def _ha_status_for_target(
 ) -> tuple[bool, bool | None]:
     """Return (ha_configured, ha_connected) for a given compile target.
 
-    Matching strategy: ESPHome device names use hyphens (e.g. living-room-sensor)
-    but HA entity_ids use underscores (living_room_sensor_temperature). We
-    normalise the target's device name to underscores and check whether any
-    entity in the registry starts with that normalised prefix.
+    ha_entity_status is keyed by normalised device name (e.g. "living_room_sensor")
+    derived from binary_sensor.<name>_status entities with device_class=connectivity.
+    We normalise the target's device name the same way and do a direct lookup.
 
     Returns (False, None) when no match is found or ha_entity_status is empty.
     """
@@ -123,28 +122,10 @@ def _ha_status_for_target(
     raw_name: str = meta.get("device_name_raw") or target.replace(".yaml", "")
     norm_name = raw_name.replace("-", "_").replace(" ", "_").lower()
 
-    configured = False
-    connected: bool | None = None
-
-    for entity_local, status in ha_entity_status.items():
-        # entity_local looks like "living_room_sensor_temperature"
-        # norm_name looks like "living_room_sensor"
-        # Match if the entity_local equals the norm or starts with norm + "_"
-        if entity_local == norm_name or entity_local.startswith(norm_name + "_"):
-            configured = True
-            # If any entity reports a definitive connected state, use it.
-            # Prefer the binary_sensor.<name>_status entity (connected != None)
-            # over entities without a connectivity signal.
-            if status.get("connected") is not None:
-                connected = status["connected"]
-                break  # status entity is authoritative — stop searching
-
-    if configured and connected is None:
-        # We found entities for this device but no _status binary sensor.
-        # We cannot determine connectivity, leave as None.
-        pass
-
-    return configured, connected
+    entry = ha_entity_status.get(norm_name)
+    if entry:
+        return True, entry.get("connected")
+    return False, None
 
 
 @routes.get("/ui/api/targets")
@@ -857,6 +838,27 @@ async def remove_client(request: web.Request) -> web.Response:
 async def set_client_disabled(request: web.Request) -> web.Response:
     """Legacy alias for POST /ui/api/workers/{client_id}/disable."""
     return await _set_disabled_handler(request, request.match_info["client_id"])
+
+
+@routes.post("/ui/api/queue/remove")
+async def remove_jobs(request: web.Request) -> web.Response:
+    """Remove finished jobs from the queue by ID.
+
+    Body: { "ids": ["job-id-1", "job-id-2"] }
+    Returns: { "removed": N }
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    job_ids = body.get("ids", [])
+    if not isinstance(job_ids, list) or not job_ids:
+        return web.json_response({"error": "ids must be a non-empty list"}, status=400)
+
+    queue = request.app["queue"]
+    removed = await queue.remove_jobs(job_ids)
+    return web.json_response({"removed": removed})
 
 
 @routes.post("/ui/api/queue/clear")

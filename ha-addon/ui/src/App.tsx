@@ -5,6 +5,7 @@ import {
   compile,
   deleteTarget,
   disableWorker,
+  removeJobs,
   getDevices,
   getEsphomeVersions,
   getInitialAddonVersion,
@@ -229,7 +230,7 @@ export default function App() {
               return;
             }
             if (latestJob.state === 'failed') {
-              addToast(`Validation failed for ${stripYaml(target)} — check log for details`, 'error');
+              addToast(`Validation failed for ${stripYaml(target)}`, 'error');
               setLogJobId(jobId);
               return;
             }
@@ -292,6 +293,15 @@ export default function App() {
         const msg = data.cleared === 1 ? 'Cleared 1 succeeded job' : `Cleared ${data.cleared} succeeded jobs`;
         addToast(msg, 'success');
       }
+      await fetchQueue();
+    } catch {
+      addToast('Clear failed', 'error');
+    }
+  }
+
+  async function handleClearJobs(ids: string[]) {
+    try {
+      await removeJobs(ids);
       await fetchQueue();
     } catch {
       addToast('Clear failed', 'error');
@@ -454,6 +464,7 @@ export default function App() {
             workers={workers}
             onCancel={handleCancelJobs}
             onRetry={handleRetryJobs}
+            onClear={handleClearJobs}
             onRetryAllFailed={handleRetryAllFailed}
             onClearSucceeded={handleClearSucceeded}
             onClearFinished={handleClearFinished}
