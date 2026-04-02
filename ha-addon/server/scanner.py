@@ -146,11 +146,17 @@ def get_device_metadata(config_dir: str, target: str) -> dict:
     """Return display metadata from a YAML config file.
 
     Returns a dict with keys:
-      - friendly_name: str | None  — esphome.friendly_name (substitutions resolved)
-      - device_name:   str | None  — esphome.name formatted as title case
-      - comment:       str | None  — esphome.comment
+      - friendly_name:  str | None  — esphome.friendly_name (substitutions resolved)
+      - device_name:    str | None  — esphome.name formatted as title case
+      - comment:        str | None  — esphome.comment
+      - has_web_server: bool        — True if the web_server component is present
     """
-    result: dict = {"friendly_name": None, "device_name": None, "comment": None}
+    result: dict = {
+        "friendly_name": None,
+        "device_name": None,
+        "comment": None,
+        "has_web_server": False,
+    }
     config = _resolve_esphome_config(config_dir, target)
     if config is None:
         return result
@@ -166,6 +172,11 @@ def get_device_metadata(config_dir: str, target: str) -> dict:
         comment = esphome_block.get("comment")
         if comment:
             result["comment"] = str(comment)
+
+    # Detect presence of the web_server component (enables the IP → HTTP link in UI)
+    if config.get("web_server") is not None:
+        result["has_web_server"] = True
+
     return result
 
 

@@ -101,6 +101,14 @@ async def get_targets(request: web.Request) -> web.Response:
                     config_modified = mtime_dt > compile_dt
             except Exception:
                 pass
+        # Determine if this target has an API encryption key in its config
+        has_api_key = False
+        if device_poller and device_poller._encryption_keys:
+            for name, _key in device_poller._encryption_keys.items():
+                if device_poller._map_target(name) == target:
+                    has_api_key = True
+                    break
+
         entry: dict = {
             "target": target,
             "friendly_name": meta["friendly_name"],
@@ -118,6 +126,8 @@ async def get_targets(request: web.Request) -> web.Response:
             "ip_address": dev.ip_address if dev else None,
             "last_seen": dev.last_seen.isoformat() if dev and dev.last_seen else None,
             "server_version": server_version,
+            "has_api_key": has_api_key,
+            "has_web_server": meta["has_web_server"],
         }
         result.append(entry)
 

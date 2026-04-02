@@ -306,7 +306,7 @@ button {
   cursor: pointer;
   transition: background 0.15s, opacity 0.15s;
 }
-button:disabled { opacity: 0.45; cursor: not-allowed; }
+button:disabled { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
 
 .btn-primary   { background: var(--accent); color: #fff; }
 .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
@@ -515,5 +515,62 @@ input[type="checkbox"] {
   height: 100%;
 }
 
+/* ---- Hamburger / action menu ---- */
+.action-menu-wrap {
+  position: relative;
+  display: inline-block;
+}
+.action-menu-btn {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 14px;
+  font-weight: 700;
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  line-height: 1;
+  letter-spacing: 1px;
+}
+.action-menu-btn:hover { background: var(--border); color: var(--text); }
+.action-menu-dropdown {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  z-index: 200;
+  min-width: 160px;
+  overflow: hidden;
+}
+.action-menu-dropdown.open { display: block; }
+.action-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  border-radius: 0;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+}
+.action-menu-item:hover:not(:disabled) { background: var(--border); }
+.action-menu-item:disabled { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
+
 /* IP address link in devices table */
+.ip-link {
+  color: var(--accent);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
 .ip-link:hover { text-decoration: underline; }

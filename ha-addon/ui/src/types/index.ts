@@ -26,6 +26,8 @@ export interface Target {
   last_seen?: string;
   compilation_time?: number;
   server_version?: string;
+  has_api_key?: boolean;
+  has_web_server?: boolean;
 }
 
 export interface Device {

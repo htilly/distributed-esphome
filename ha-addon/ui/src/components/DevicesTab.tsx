@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { getApiKey } from '../api/client';
 import type { Device, Target } from '../types';
 import { stripYaml } from '../utils';
@@ -174,6 +174,62 @@ export function DevicesTab({ targets, devices, onCompile, onEdit, onToast }: Pro
   );
 }
 
+function DeviceMenu({
+  target: t,
+  onToast,
+}: {
+  target: Target;
+  onToast: (msg: string, type?: 'info' | 'success' | 'error') => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  // Close on click outside
+  useEffect(() => {
+    if (!open) return;
+    function handleClick(e: MouseEvent) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [open]);
+
+  async function handleCopyApiKey() {
+    setOpen(false);
+    try {
+      const key = await getApiKey(t.target);
+      await navigator.clipboard.writeText(key);
+      onToast('API key copied!', 'success');
+    } catch {
+      onToast('No API key found', 'info');
+    }
+  }
+
+  return (
+    <div className="action-menu-wrap" ref={wrapRef}>
+      <button
+        className="action-menu-btn btn-sm"
+        onClick={() => setOpen(o => !o)}
+        title="More actions"
+      >
+        &middot;&middot;&middot;
+      </button>
+      <div className={`action-menu-dropdown${open ? ' open' : ''}`}>
+        <button
+          className="action-menu-item"
+          onClick={handleCopyApiKey}
+          disabled={!t.has_api_key}
+          title={t.has_api_key ? 'Copy API encryption key' : 'No API key configured'}
+        >
+          &#128273; Copy API Key
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function TargetRow({
   target: t,
   onCompile,
@@ -201,21 +257,7 @@ function TargetRow({
 
   const upgradeBtnCls = t.needs_update ? 'btn-success' : 'btn-secondary';
   const displayName = t.friendly_name || t.device_name || stripYaml(t.target);
-
-  async function handleCopyApiKey() {
-    try {
-      const key = await getApiKey(t.target);
-      await navigator.clipboard.writeText(key);
-      onToast('API key copied!', 'success');
-    } catch (err) {
-      const msg = (err as Error).message;
-      if (msg.includes('No API key') || msg === '404') {
-        onToast('No API key', 'info');
-      } else {
-        onToast('No API key', 'info');
-      }
-    }
-  }
+  const showIpLink = t.has_web_server && t.online && t.ip_address;
 
   return (
     <tr>
@@ -226,27 +268,29 @@ function TargetRow({
         {t.comment && <div className="device-comment">{t.comment}</div>}
       </td>
       <td>{statusEl}</td>
-      <td style={{ color: 'var(--text-muted)', fontFamily: 'monospace', fontSize: 12 }}>
-        {t.online && t.ip_address
-          ? <a href={`http://${t.ip_address}`} target="_blank" rel="noopener" style={{ color: 'inherit', textDecoration: 'none' }} className="ip-link">{t.ip_address}</a>
-          : (t.ip_address || '—')}
+      <td style={{ fontFamily: 'monospace', fontSize: 12 }}>
+        {showIpLink
+          ? (
+            <a
+              href={`http://${t.ip_address}`}
+              target="_blank"
+              rel="noopener"
+              className="ip-link"
+            >
+              {t.ip_address}<span style={{ fontSize: 10 }}>&#8599;</span>
+            </a>
+          )
+          : <span style={{ color: 'var(--text-muted)' }}>{t.ip_address || '—'}</span>}
       </td>
       <td style={{ fontSize: 12 }}>
         {t.running_version || '—'}
         {t.config_modified && <div className="config-modified">config changed</div>}
       </td>
       <td>
-        <div style={{ display: 'flex', gap: 4 }}>
+        <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
           <button className={`${upgradeBtnCls} btn-sm`} onClick={() => onCompile([t.target])}>Upgrade</button>
           <button className="btn-secondary btn-sm" onClick={() => onEdit(t.target)}>Edit</button>
-          <button
-            className="btn-secondary btn-sm"
-            onClick={handleCopyApiKey}
-            title="Copy API encryption key"
-            style={{ padding: '4px 7px' }}
-          >
-            &#128273;
-          </button>
+          <DeviceMenu target={t} onToast={onToast} />
         </div>
       </td>
     </tr>
@@ -258,6 +302,7 @@ function UnmanagedRow({ device: d }: { device: Device }) {
     ? <><span className="dot dot-online"></span>Online</>
     : <><span className="dot dot-offline"></span>Offline</>;
 
+  // Unmanaged devices (no config) don't have web_server info — never link their IP
   return (
     <tr>
       <td></td>
@@ -266,10 +311,8 @@ function UnmanagedRow({ device: d }: { device: Device }) {
         <div className="device-filename" style={{ color: '#6b7280' }}>No config</div>
       </td>
       <td>{statusEl}</td>
-      <td style={{ color: 'var(--text-muted)', fontFamily: 'monospace', fontSize: 12 }}>
-        {d.online && d.ip_address
-          ? <a href={`http://${d.ip_address}`} target="_blank" rel="noopener" style={{ color: 'inherit', textDecoration: 'none' }} className="ip-link">{d.ip_address}</a>
-          : (d.ip_address || '—')}
+      <td style={{ fontFamily: 'monospace', fontSize: 12 }}>
+        <span style={{ color: 'var(--text-muted)' }}>{d.ip_address || '—'}</span>
       </td>
       <td style={{ fontSize: 12 }}>{d.running_version || '—'}</td>
       <td></td>
