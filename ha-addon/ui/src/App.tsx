@@ -459,6 +459,7 @@ export default function App() {
           onToast={addToast}
           onValidate={handleValidate}
           monacoTheme={theme === 'light' ? 'vs' : 'vs-dark'}
+          esphomeVersion={esphomeVersions.selected ?? esphomeVersions.detected ?? undefined}
         />
       )}
 

@@ -14,8 +14,8 @@ const ESPHOME_SCHEMA = yaml.DEFAULT_SCHEMA.extend([
   new yaml.Type('!remove', { kind: 'scalar', construct: () => null }),
 ]);
 
-// Common sub-keys that appear under most component blocks.
-// Offered as secondary completions after the user has typed a component name.
+// Common sub-keys offered as a last-resort fallback when no component schema
+// is available (e.g. custom components not in schema.esphome.io).
 const COMMON_SUB_KEYS = [
   'platform', 'name', 'id', 'pin', 'internal', 'disabled_by_default',
   'on_value', 'on_state', 'filters', 'update_interval', 'unit_of_measurement',
@@ -23,13 +23,102 @@ const COMMON_SUB_KEYS = [
   'sda', 'scl', 'frequency', 'rx_pin', 'tx_pin', 'baud_rate',
 ];
 
+// ---- Per-component schema fetching from schema.esphome.io ----
+
+// Module-level cache: key is "<version>/<component>", value is raw JSON response.
+const _schemaCache: Record<string, unknown> = {};
+
+async function fetchComponentSchema(component: string, esphomeVersion: string): Promise<unknown> {
+  const key = `${esphomeVersion}/${component}`;
+  if (_schemaCache[key] !== undefined) return _schemaCache[key];
+
+  // Try version-specific first, fall back to 'dev' which always exists.
+  for (const ver of [esphomeVersion, 'dev']) {
+    try {
+      const r = await fetch(`https://schema.esphome.io/${ver}/${component}.json`);
+      if (r.ok) {
+        const data: unknown = await r.json();
+        _schemaCache[key] = data;
+        return data;
+      }
+    } catch {
+      // Network error — try next version or give up.
+    }
+  }
+
+  // Cache negative result so we don't retry on every keystroke.
+  _schemaCache[key] = null;
+  return null;
+}
+
+interface ConfigVar {
+  name: string;
+  docs?: string;
+  required?: boolean;
+}
+
+function getConfigVars(schemaData: unknown, componentName: string): ConfigVar[] {
+  if (!schemaData || typeof schemaData !== 'object') return [];
+
+  const comp = (schemaData as Record<string, unknown>)[componentName];
+  if (!comp || typeof comp !== 'object') return [];
+
+  const schemas = (comp as Record<string, unknown>).schemas;
+  if (!schemas || typeof schemas !== 'object') return [];
+
+  const configSchema = (schemas as Record<string, unknown>).CONFIG_SCHEMA;
+  if (!configSchema || typeof configSchema !== 'object') return [];
+
+  const schema = (configSchema as Record<string, unknown>).schema;
+  if (!schema || typeof schema !== 'object') return [];
+
+  const configVars = (schema as Record<string, unknown>).config_vars;
+  if (!configVars || typeof configVars !== 'object') return [];
+
+  return Object.entries(configVars as Record<string, unknown>).map(([name, info]) => ({
+    name,
+    docs: (info && typeof info === 'object' && typeof (info as Record<string, unknown>).docs === 'string')
+      ? (info as Record<string, string>).docs
+      : '',
+    required: (info && typeof info === 'object')
+      ? (info as Record<string, unknown>).key === 'Required'
+      : false,
+  }));
+}
+
+// Walk up from the current line to find the nearest indent-0 YAML key, which
+// is the top-level component name the cursor is nested under.
+function findParentComponent(
+  model: import('monaco-editor').editor.ITextModel,
+  lineNumber: number,
+): string | null {
+  for (let i = lineNumber; i >= 1; i--) {
+    const line = model.getLineContent(i);
+    const trimmed = line.trimStart();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const indent = line.length - trimmed.length;
+    if (indent === 0) {
+      const colonIdx = trimmed.indexOf(':');
+      const key = colonIdx >= 0 ? trimmed.slice(0, colonIdx).trim() : trimmed.trim();
+      return key || null;
+    }
+  }
+  return null;
+}
+
 interface Props {
   target: string | null;
   onClose: () => void;
   onToast: (msg: string, type?: ToastType) => void;
   onValidate?: (target: string) => void;
   monacoTheme?: string;
+  esphomeVersion?: string | null;
 }
+
+// Module-level variable that holds the ESPHome version currently in use.
+// Set each time the editor mounts so the async completion provider can read it
+// without needing a closure that captures a stale prop value.
+let _currentEsphomeVersion = 'dev';
 
 // Module-level component list cache — fetched once per page load from the
 // server's /ui/api/esphome-schema endpoint which reflects the actual installed
@@ -150,11 +239,17 @@ let _completionRegistered = false;
 // Debounce timer handle for validation
 let _validationTimer: ReturnType<typeof setTimeout> | null = null;
 
-export function EditorModal({ target, onClose, onToast, onValidate, monacoTheme = 'vs-dark' }: Props) {
+export function EditorModal({ target, onClose, onToast, onValidate, monacoTheme = 'vs-dark', esphomeVersion }: Props) {
   const isOpen = target !== null;
   const [content, setContent] = useState('');
   const [loading, setLoading] = useState(false);
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
+
+  // Keep the module-level version variable in sync so the completion provider
+  // (registered once, outside the component lifecycle) always sees the current value.
+  useEffect(() => {
+    if (esphomeVersion) _currentEsphomeVersion = esphomeVersion;
+  }, [esphomeVersion]);
 
   // Keep stable refs to callbacks so the fetch effect depends only on [target],
   // not on new function references from each parent re-render (which would
@@ -264,7 +359,34 @@ export function EditorModal({ target, onClose, onToast, onValidate, monacoTheme 
           };
         }
 
-        // 3. Indented context: suggest common sub-keys.
+        // 3. Indented context: fetch per-component schema from schema.esphome.io
+        //    and suggest its config_vars. Fall back to COMMON_SUB_KEYS if the
+        //    schema is unavailable (custom components, network error, etc.).
+        const parent = findParentComponent(model, position.lineNumber);
+        if (parent) {
+          try {
+            const schemaData = await fetchComponentSchema(parent, _currentEsphomeVersion);
+            const vars = getConfigVars(schemaData, parent);
+            if (vars.length > 0) {
+              return {
+                suggestions: vars.map(v => ({
+                  label: v.name,
+                  kind: v.required
+                    ? monaco.languages.CompletionItemKind.Field
+                    : monaco.languages.CompletionItemKind.Property,
+                  insertText: v.name + ': ',
+                  documentation: v.docs,
+                  // Required keys sort first; within each group, alphabetical.
+                  sortText: (v.required ? '0' : '1') + v.name,
+                  range,
+                })),
+              };
+            }
+          } catch {
+            // Schema fetch failed — fall through to generic keys below.
+          }
+        }
+
         return {
           suggestions: COMMON_SUB_KEYS.map(k => ({
             label: k,
