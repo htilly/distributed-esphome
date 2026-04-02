@@ -213,31 +213,9 @@ export default function App() {
     try {
       const result = await validateConfig(target);
       const jobId = result.job_id;
-      addToast(`Validating ${stripYaml(target)}...`, 'info');
       await fetchQueue();
-
-      // Poll for validation result (completes in 2-5 seconds)
-      if (jobId) {
-        const pollForResult = async () => {
-          for (let i = 0; i < 30; i++) { // up to 30 seconds
-            await new Promise(r => setTimeout(r, 1000));
-            const latestQueue = await getQueue();
-            setQueue(latestQueue);
-            const latestJob = latestQueue.find((j: Job) => j.id === jobId);
-            if (!latestJob) break;
-            if (latestJob.state === 'success' && latestJob.validate_only) {
-              addToast(`${stripYaml(target)} is valid`, 'success');
-              return;
-            }
-            if (latestJob.state === 'failed') {
-              addToast(`Validation failed for ${stripYaml(target)}`, 'error');
-              setLogJobId(jobId);
-              return;
-            }
-          }
-        };
-        pollForResult().catch(() => {});
-      }
+      // Open the streaming log modal immediately — user sees output in real time
+      if (jobId) setLogJobId(jobId);
     } catch (err) {
       addToast('Validate failed: ' + (err as Error).message, 'error');
     }

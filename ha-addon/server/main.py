@@ -24,6 +24,8 @@ logging.basicConfig(
 )
 # Suppress noisy per-request access logs (heartbeats, polls, UI refreshes)
 logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
+# Suppress aioesphomeapi connection warnings (expected when devices are offline)
+logging.getLogger("aioesphomeapi.connection").setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -112,6 +114,7 @@ async def ha_entity_poller(app: web.Application) -> None:
 
     headers = {"Authorization": f"Bearer {token}"}
     timeout = aiohttp.ClientTimeout(total=10)
+    first_poll = True
 
     while True:
         await asyncio.sleep(30)
@@ -127,8 +130,8 @@ async def ha_entity_poller(app: web.Application) -> None:
                     timeout=timeout,
                 ) as resp:
                     if resp.status != 200:
-                        logger.debug(
-                            "HA states returned HTTP %d — skipping poll",
+                        logger.warning(
+                            "HA states returned HTTP %d — check homeassistant_api: true in config.yaml",
                             resp.status,
                         )
                         continue
@@ -140,12 +143,16 @@ async def ha_entity_poller(app: web.Application) -> None:
             # Key by the device portion (without _status suffix) so
             # _ha_status_for_target can match by normalised device name.
             ha_status: dict[str, dict] = {}
+            # Also collect all binary_sensor.*_status for diagnostics
+            all_status_sensors: list[str] = []
             for entity in states:
                 entity_id: str = entity.get("entity_id", "")
                 if not entity_id.startswith("binary_sensor.") or not entity_id.endswith("_status"):
                     continue
                 attrs = entity.get("attributes") or {}
-                if attrs.get("device_class") != "connectivity":
+                device_class = attrs.get("device_class", "")
+                all_status_sensors.append(f"{entity_id} (dc={device_class}, state={entity.get('state')})")
+                if device_class != "connectivity":
                     continue
                 # e.g. "binary_sensor.living_room_sensor_status" → "living_room_sensor"
                 norm_name = entity_id[len("binary_sensor."):-len("_status")]
@@ -156,13 +163,25 @@ async def ha_entity_poller(app: web.Application) -> None:
                 }
 
             app["ha_entity_status"] = ha_status
-            logger.debug(
-                "HA entity status updated: %d ESPHome devices found",
-                len(ha_status),
-            )
+
+            if first_poll:
+                first_poll = False
+                logger.info(
+                    "HA entity poller: %d total states, %d binary_sensor.*_status entities, %d matched (connectivity). "
+                    "Status sensors: %s",
+                    len(states),
+                    len(all_status_sensors),
+                    len(ha_status),
+                    "; ".join(all_status_sensors[:20]) if all_status_sensors else "(none found)",
+                )
+            else:
+                logger.debug(
+                    "HA entity status updated: %d ESPHome devices found",
+                    len(ha_status),
+                )
 
         except Exception:
-            logger.debug("Error polling HA entity status", exc_info=True)
+            logger.warning("Error polling HA entity status", exc_info=True)
 
 
 async def config_scanner(app: web.Application) -> None:
@@ -216,7 +235,7 @@ async def _fetch_ha_esphome_version(session: aiohttp.ClientSession) -> Optional[
                     data = await resp.json()
                     version = data.get("data", {}).get("version")
                     if version:
-                        logger.info("Detected HA ESPHome add-on version %s (slug: %s)", version, slug)
+                        logger.debug("Detected HA ESPHome add-on version %s (slug: %s)", version, slug)
                         return str(version)
                 else:
                     logger.warning("Supervisor query for %s returned HTTP %d (need hassio_api: true in config.yaml?)", slug, resp.status)
@@ -227,7 +246,7 @@ async def _fetch_ha_esphome_version(session: aiohttp.ClientSession) -> Optional[
     return None
 
 
-async def _fetch_pypi_versions(session: aiohttp.ClientSession, limit: int = 10) -> list[str]:
+async def _fetch_pypi_versions(session: aiohttp.ClientSession, limit: int = 50) -> list[str]:
     """Return recent ESPHome versions from PyPI, newest first."""
     try:
         async with session.get(

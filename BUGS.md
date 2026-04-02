@@ -104,3 +104,13 @@
 
 53. FIXED (1.1.0-dev.21) - Dark mode checkboxes use color-scheme: dark.
 
+54. FIXED (1.1.0-dev.22) - aioesphomeapi.connection log level set to ERROR (expected when devices offline).
+
+55. FIXED (1.1.0-dev.22) - "Detected HA ESPHome add-on version" changed to DEBUG level.
+
+56. FIXED (1.1.0-dev.22) - PyPI version limit increased from 10 to 50.
+
+57. FIXED (1.1.0-dev.22) - Validate opens streaming log modal directly. No more toasts for validation flow.
+
+58. INVESTIGATING (1.1.0-dev.22) - Added diagnostic INFO log on first HA poll cycle showing total states, status sensors found, and matching details. Deploy and check logs to identify root cause.
+
