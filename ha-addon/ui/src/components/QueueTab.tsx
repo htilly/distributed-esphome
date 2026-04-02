@@ -97,8 +97,8 @@ export function QueueTab({
           <h2>Queue</h2>
           <div className="actions">
             <button className="btn-warn btn-sm" onClick={onRetryAllFailed} disabled={!hasFailedJobs}>Retry All Failed</button>
-            <button className="btn-warn btn-sm" onClick={handleRetrySelected}>Retry Selected</button>
-            <button className="btn-danger btn-sm" onClick={handleCancelSelected}>Cancel Selected</button>
+            <button className="btn-warn btn-sm" onClick={handleRetrySelected} disabled={queue.length === 0}>Retry Selected</button>
+            <button className="btn-danger btn-sm" onClick={handleCancelSelected} disabled={queue.length === 0}>Cancel Selected</button>
             <button className="btn-success btn-sm" onClick={onClearSucceeded} disabled={!hasSuccessfulJobs}>Clear Succeeded</button>
             <button className="btn-secondary btn-sm" onClick={onClearFinished} disabled={!hasFinishedJobs}>Clear Finished</button>
           </div>

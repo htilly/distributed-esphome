@@ -328,21 +328,22 @@ export default function App() {
           onToggle={handleVersionDropdownToggle}
           onSelect={handleSelectEsphomeVersion}
         />
-        <button
-          className="btn-secondary btn-sm"
+        <span
+          className="version-badge"
+          style={{ cursor: 'pointer' }}
           onClick={() => setEditorTarget('secrets.yaml')}
           title="Edit secrets.yaml"
         >
           Secrets
-        </button>
-        <button
-          className="btn-secondary btn-sm"
+        </span>
+        <span
+          className="version-badge"
+          style={{ cursor: 'pointer', fontSize: 13 }}
           onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
           title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-          style={{ padding: '4px 8px', fontSize: 14 }}
         >
           {theme === 'dark' ? '☀' : '☾'}
-        </button>
+        </span>
         <span className="spacer" />
         <span className="status-dot" title="Server online" />
       </header>

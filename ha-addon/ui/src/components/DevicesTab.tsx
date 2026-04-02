@@ -52,7 +52,18 @@ export function DevicesTab({ targets, devices, onCompile, onEdit, onToast }: Pro
     onCompile(selected);
   }
 
-  const unmanaged = devices.filter(d => !d.compile_target);
+  // Build a set of device names that are already shown as managed targets
+  // to prevent duplicates when compile_target mapping has a race condition
+  const managedDeviceNames = new Set<string>();
+  for (const t of targets) {
+    // The device_name from the target's resolved config (title-cased)
+    if (t.device_name) managedDeviceNames.add(t.device_name.toLowerCase().replace(/ /g, '-').replace(/ /g, '_'));
+    // The filename stem
+    managedDeviceNames.add(stripYaml(t.target).toLowerCase());
+  }
+  const unmanaged = devices.filter(d =>
+    !d.compile_target && !managedDeviceNames.has(d.name.toLowerCase())
+  );
   const defaultSortedTargets = [...targets].sort((a, b) => a.target.localeCompare(b.target));
   const defaultSortedUnmanaged = [...unmanaged].sort((a, b) => a.name.localeCompare(b.name));
 
