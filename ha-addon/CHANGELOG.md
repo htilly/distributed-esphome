@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.69
+- Proactively create device entries from wifi.use_address configs
+  (devices no longer require mDNS discovery to appear in the Devices tab)
+- Devices with use_address now show their configured IP even without mDNS
+- Fixes "Unknown" status for devices that use use_address on different VLANs
+
 ## 0.0.68
 - Use `wifi.use_address` from ESPHome configs for device polling
   (prefers config-specified address over mDNS-discovered IP)

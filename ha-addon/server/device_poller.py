@@ -342,6 +342,24 @@ class DevicePoller:
         for dev in self._devices.values():
             dev.compile_target = self._map_target(dev.name)
 
+        # Proactively create Device entries for targets with use_address
+        # that haven't been discovered via mDNS yet.
+        for device_name, addr in self._address_overrides.items():
+            if device_name not in self._devices:
+                compile_target = self._map_target(device_name)
+                self._devices[device_name] = Device(
+                    name=device_name,
+                    ip_address=addr,
+                    online=False,
+                    compile_target=compile_target,
+                )
+                logger.debug("Created device %s from use_address %s (no mDNS yet)", device_name, addr)
+            else:
+                # Update IP from use_address if not already set from mDNS
+                dev = self._devices[device_name]
+                if not dev.ip_address:
+                    dev.ip_address = addr
+
     def _map_target(self, device_name: str) -> Optional[str]:
         """Return the YAML filename matching *device_name*, or None.
 
