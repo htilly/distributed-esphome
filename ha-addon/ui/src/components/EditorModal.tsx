@@ -1,7 +1,7 @@
 import Editor, { type OnMount } from '@monaco-editor/react';
 import * as yaml from 'js-yaml';
 import { useEffect, useRef, useState } from 'react';
-import { getSecretKeys, getTargetContent, saveTargetContent } from '../api/client';
+import { getEsphomeSchema, getSecretKeys, getTargetContent, saveTargetContent } from '../api/client';
 import type { ToastType } from './Toast';
 
 // ESPHome uses custom YAML tags that standard parsers reject. Register them so
@@ -14,6 +14,15 @@ const ESPHOME_SCHEMA = yaml.DEFAULT_SCHEMA.extend([
   new yaml.Type('!remove', { kind: 'scalar', construct: () => null }),
 ]);
 
+// Common sub-keys that appear under most component blocks.
+// Offered as secondary completions after the user has typed a component name.
+const COMMON_SUB_KEYS = [
+  'platform', 'name', 'id', 'pin', 'internal', 'disabled_by_default',
+  'on_value', 'on_state', 'filters', 'update_interval', 'unit_of_measurement',
+  'device_class', 'state_class', 'accuracy_decimals', 'icon', 'address',
+  'sda', 'scl', 'frequency', 'rx_pin', 'tx_pin', 'baud_rate',
+];
+
 interface Props {
   target: string | null;
   onClose: () => void;
@@ -22,116 +31,22 @@ interface Props {
   monacoTheme?: string;
 }
 
-// Fallback keyword list used when the schema fails to load
-const YAML_KEYWORDS = [
-  'esphome', 'name', 'friendly_name', 'comment', 'platform', 'board',
-  'wifi', 'ssid', 'password', 'ap', 'logger', 'api', 'encryption', 'key',
-  'ota', 'sensor', 'binary_sensor', 'switch', 'light', 'fan', 'climate',
-  'cover', 'output', 'uart', 'i2c', 'spi', 'substitutions', 'packages',
-  'esp32', 'esp8266', 'deep_sleep', 'interval', 'lambda', 'id', 'on_boot', 'on_shutdown',
-];
+// Module-level component list cache — fetched once per page load from the
+// server's /ui/api/esphome-schema endpoint which reflects the actual installed
+// ESPHome package rather than a hardcoded subset.
+let _componentList: string[] = [];
+let _componentListPromise: Promise<string[]> | null = null;
 
-// Module-level schema cache — kept in JS memory (not sessionStorage) because
-// the schema is ~200KB+ and sessionStorage access is synchronous but
-// JSON.parse of that size is slow on repeated opens.
-let esphomeSchema: Record<string, unknown> | null = null;
-let schemaLoadPromise: Promise<Record<string, unknown> | null> | null = null;
-
-async function loadEsphomeSchema(): Promise<Record<string, unknown> | null> {
-  if (esphomeSchema) return esphomeSchema;
-  if (schemaLoadPromise) return schemaLoadPromise;
-  schemaLoadPromise = fetch('https://json.esphome.io/esphome.json')
-    .then(r => r.json())
-    .then((schema: Record<string, unknown>) => {
-      esphomeSchema = schema;
-      return schema;
+function loadComponentList(): Promise<string[]> {
+  if (_componentList.length > 0) return Promise.resolve(_componentList);
+  if (_componentListPromise) return _componentListPromise;
+  _componentListPromise = getEsphomeSchema()
+    .then(components => {
+      _componentList = components;
+      return components;
     })
-    .catch(() => null);
-  return schemaLoadPromise;
-}
-
-// Resolve a $ref string (e.g. "#/definitions/Foo") within the root schema.
-function resolveRef(root: Record<string, unknown>, ref: string): Record<string, unknown> | null {
-  if (!ref.startsWith('#/')) return null;
-  const parts = ref.slice(2).split('/');
-  let node: unknown = root;
-  for (const part of parts) {
-    if (node == null || typeof node !== 'object') return null;
-    node = (node as Record<string, unknown>)[part];
-  }
-  return (node != null && typeof node === 'object') ? node as Record<string, unknown> : null;
-}
-
-// Walk down the schema following the YAML key path, resolving $refs along the way.
-function resolveSchemaPath(
-  root: Record<string, unknown>,
-  path: string[],
-): Record<string, unknown> | null {
-  let current: Record<string, unknown> | null = root;
-  for (const key of path) {
-    if (!current) return null;
-    // Resolve any top-level $ref on the current node
-    while (current && current.$ref && typeof current.$ref === 'string') {
-      current = resolveRef(root, current.$ref);
-    }
-    if (!current) return null;
-    const props = current.properties as Record<string, unknown> | undefined;
-    if (props && key in props) {
-      const child = props[key];
-      current = (child != null && typeof child === 'object')
-        ? child as Record<string, unknown>
-        : null;
-    } else if (current.additionalProperties && typeof current.additionalProperties === 'object') {
-      current = current.additionalProperties as Record<string, unknown>;
-    } else {
-      return null;
-    }
-  }
-  // Resolve a final $ref on the landed node
-  while (current && current.$ref && typeof current.$ref === 'string') {
-    current = resolveRef(root, current.$ref);
-  }
-  return current;
-}
-
-// Determine the logical YAML key-path at a given cursor position by walking
-// upward through the lines and tracking indentation levels.
-function getYamlPath(
-  model: import('monaco-editor').editor.ITextModel,
-  position: import('monaco-editor').Position,
-): string[] {
-  const path: string[] = [];
-  let currentIndent = Infinity;
-
-  for (let lineNum = position.lineNumber; lineNum >= 1; lineNum--) {
-    const lineText = model.getLineContent(lineNum);
-    const trimmed = lineText.trimStart();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-
-    const indent = lineText.length - trimmed.length;
-    if (indent >= currentIndent) continue;
-
-    // Skip list items — they don't contribute a named key to the path
-    if (trimmed.startsWith('- ')) {
-      currentIndent = indent;
-      continue;
-    }
-
-    const colonIdx = trimmed.indexOf(':');
-    if (colonIdx > 0) {
-      const key = trimmed.slice(0, colonIdx).trim();
-      if (key) {
-        path.unshift(key);
-        currentIndent = indent;
-      }
-    }
-
-    if (currentIndent === 0) break;
-  }
-
-  // Remove the key being typed on the current line — we want the parent context
-  path.pop();
-  return path;
+    .catch(() => []);
+  return _componentListPromise;
 }
 
 // Collect YAML syntax error markers by actually parsing the content.
@@ -163,10 +78,9 @@ function collectSyntaxMarkers(
 }
 
 // Build Monaco markers: YAML syntax errors (errors) plus unknown top-level
-// keys (warnings, only when no syntax errors so noise is minimal).
+// keys (warnings, only when no syntax errors and component list is loaded).
 function validateYaml(
   model: import('monaco-editor').editor.ITextModel,
-  schema: Record<string, unknown>,
   monaco: typeof import('monaco-editor'),
 ): void {
   // Always check syntax first — if parsing fails, skip schema warnings since
@@ -177,10 +91,16 @@ function validateYaml(
     return;
   }
 
+  // If the component list hasn't loaded yet, only report syntax errors.
+  if (_componentList.length === 0) {
+    monaco.editor.setModelMarkers(model, 'esphome', []);
+    return;
+  }
+
+  const componentSet = new Set(_componentList);
   const schemaMarkers: import('monaco-editor').editor.IMarkerData[] = [];
   const content = model.getValue();
   const lines = content.split('\n');
-  const topProps = (schema.properties as Record<string, unknown> | undefined) ?? {};
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -198,7 +118,7 @@ function validateYaml(
     if (afterColon.startsWith('!')) continue;
 
     const key = trimmed.slice(0, colonIdx).trim();
-    if (key && !(key in topProps)) {
+    if (key && !componentSet.has(key)) {
       schemaMarkers.push({
         severity: monaco.MarkerSeverity.Warning,
         message: `Unknown component: "${key}"`,
@@ -211,6 +131,17 @@ function validateYaml(
   }
 
   monaco.editor.setModelMarkers(model, 'esphome', schemaMarkers);
+}
+
+// Determine the indent level of the current cursor line, ignoring blank lines.
+function currentLineIndent(
+  model: import('monaco-editor').editor.ITextModel,
+  position: import('monaco-editor').Position,
+): number {
+  const lineText = model.getLineContent(position.lineNumber);
+  const trimmed = lineText.trimStart();
+  if (!trimmed) return Infinity; // blank line — treat as unknown
+  return lineText.length - trimmed.length;
 }
 
 // Guard: only register the completion provider and validation once per page load.
@@ -249,9 +180,9 @@ export function EditorModal({ target, onClose, onToast, onValidate, monacoTheme 
         onCloseRef.current();
       });
 
-    // Start fetching the schema as soon as the editor opens so it's ready
-    // by the time the user begins typing.
-    loadEsphomeSchema().catch(() => null);
+    // Pre-fetch the component list as soon as the editor opens so completions
+    // are available without waiting for the first keypress.
+    loadComponentList().catch(() => null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target]);
 
@@ -280,8 +211,8 @@ export function EditorModal({ target, onClose, onToast, onValidate, monacoTheme 
 
     // --- Completion provider ---
     monaco.languages.registerCompletionItemProvider('yaml', {
-      // triggerCharacters lets us fire on space after "!secret"
-      triggerCharacters: [' '],
+      // Fire on space (for "!secret <cursor>") and colon (sub-key context).
+      triggerCharacters: [' ', ':'],
 
       async provideCompletionItems(
         model: import('monaco-editor').editor.ITextModel,
@@ -315,36 +246,30 @@ export function EditorModal({ target, onClose, onToast, onValidate, monacoTheme 
           }
         }
 
-        // 2. Schema-driven property completions
-        const schema = esphomeSchema;
-        if (schema) {
-          const path = getYamlPath(model, position);
-          const node = resolveSchemaPath(schema, path);
-          const props = node?.properties as Record<string, unknown> | undefined;
-          if (props) {
-            return {
-              suggestions: Object.entries(props).map(([key, prop]) => {
-                const p = (prop != null && typeof prop === 'object')
-                  ? prop as Record<string, unknown>
-                  : {};
-                return {
-                  label: key,
-                  kind: monaco.languages.CompletionItemKind.Property,
-                  insertText: key + ': ',
-                  documentation: typeof p.description === 'string' ? p.description : '',
-                  range,
-                };
-              }),
-            };
-          }
+        // Ensure the component list is loaded before offering completions.
+        const components = await loadComponentList();
+
+        const indent = currentLineIndent(model, position);
+
+        // 2. Top-level (indent 0): suggest all ESPHome component names.
+        if (indent === 0) {
+          return {
+            suggestions: components.map(name => ({
+              label: name,
+              kind: monaco.languages.CompletionItemKind.Module,
+              insertText: name + ':\n  ',
+              documentation: `ESPHome component: ${name}`,
+              range,
+            })),
+          };
         }
 
-        // 3. Fallback: static keyword list
+        // 3. Indented context: suggest common sub-keys.
         return {
-          suggestions: YAML_KEYWORDS.map(k => ({
+          suggestions: COMMON_SUB_KEYS.map(k => ({
             label: k,
-            kind: monaco.languages.CompletionItemKind.Keyword,
-            insertText: k,
+            kind: monaco.languages.CompletionItemKind.Property,
+            insertText: k + ': ',
             range,
           })),
         };
@@ -357,17 +282,17 @@ export function EditorModal({ target, onClose, onToast, onValidate, monacoTheme 
       _validationTimer = setTimeout(() => {
         const model = editor.getModel();
         if (!model) return;
-        // Always run syntax validation. Schema validation (unknown keys) only
-        // runs when the schema has been fetched — syntax errors take priority
-        // anyway and validateYaml skips schema warnings when syntax fails.
-        validateYaml(model, esphomeSchema ?? {}, monaco);
+        validateYaml(model, monaco);
       }, 500);
     });
 
-    // Run an initial validation pass once the schema is available
-    loadEsphomeSchema().then(schema => {
-      const model = editor.getModel();
-      if (model) validateYaml(model, schema ?? {}, monaco);
+    // Run an initial validation pass; re-run once the component list arrives
+    // so unknown-component warnings appear without requiring a keystroke.
+    const model = editor.getModel();
+    if (model) validateYaml(model, monaco);
+    loadComponentList().then(() => {
+      const m = editor.getModel();
+      if (m) validateYaml(m, monaco);
     }).catch(() => null);
   }
 
@@ -377,6 +302,7 @@ export function EditorModal({ target, onClose, onToast, onValidate, monacoTheme 
     try {
       await saveTargetContent(target, value);
       onToast('Saved ' + target, 'success');
+      onClose();
     } catch (err) {
       onToast('Save failed: ' + (err as Error).message, 'error');
     }
@@ -419,6 +345,8 @@ export function EditorModal({ target, onClose, onToast, onValidate, monacoTheme 
                 automaticLayout: true,
                 tabSize: 2,
                 insertSpaces: true,
+                quickSuggestions: true,
+                suggestOnTriggerCharacters: true,
               }}
               onMount={handleEditorDidMount}
             />

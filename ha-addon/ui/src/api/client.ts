@@ -212,3 +212,10 @@ export async function getSecretKeys(): Promise<string[]> {
   const data = await r.json() as { keys?: string[] };
   return data.keys || [];
 }
+
+export async function getEsphomeSchema(): Promise<string[]> {
+  const r = await apiFetch('./ui/api/esphome-schema');
+  if (!r.ok) return [];
+  const data = await r.json() as { components?: string[] };
+  return data.components || [];
+}

@@ -18,9 +18,41 @@ logger = logging.getLogger(__name__)
 
 routes = web.RouteTableDef()
 
+# Module-level cache: populated once per server lifetime (components don't
+# change until ESPHome is upgraded, which restarts the add-on).
+_esphome_components_cache: list[str] | None = None
+
 
 def _cfg(request: web.Request) -> AppConfig:
     return request.app["config"]
+
+
+@routes.get("/ui/api/esphome-schema")
+async def get_esphome_schema(request: web.Request) -> web.Response:
+    """Return ESPHome component names for editor autocomplete.
+
+    Walks the esphome/components directory of the locally installed package so
+    the list reflects exactly what is available, rather than a hardcoded subset.
+    The result is cached in memory for the lifetime of the server process.
+    """
+    global _esphome_components_cache
+    if _esphome_components_cache is None:
+        try:
+            from pathlib import Path as _Path  # noqa: PLC0415
+            import esphome.loader as _loader  # noqa: PLC0415
+            comps_path = _Path(_loader.__file__).parent / "components"
+            names = sorted({
+                p.stem
+                for p in comps_path.iterdir()
+                if (p.is_dir() and (p / "__init__.py").exists())
+                or (p.suffix == ".py" and p.stem != "__init__")
+            })
+            _esphome_components_cache = names
+            logger.debug("ESPHome component list cached: %d components", len(names))
+        except Exception:
+            logger.debug("Could not enumerate ESPHome components", exc_info=True)
+            _esphome_components_cache = []
+    return web.json_response({"components": _esphome_components_cache})
 
 
 @routes.get("/ui/api/server-info")

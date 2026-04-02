@@ -5,3 +5,5 @@
 
 2. Introduce GitHub functionality for the configs
 
+3. Need to manage disk space on clients to make sure we don't run out 
+
