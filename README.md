@@ -313,7 +313,7 @@ distributed-esphome/
 ├── .github/workflows/publish-server.yml # Publish standalone server image to GHCR
 ├── .github/workflows/publish-client.yml # Publish worker image to GHCR
 ├── package-client.sh         # Build + package client Docker image for distribution
-└── REQUIREMENTS.md           # Full design specification
+└── PRD.md                    # Product requirements for ESPHome dashboard replacement
 ```
 
 ## Versioning

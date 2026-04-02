@@ -392,7 +392,7 @@ export function EditorModal({ target, onClose, onToast, onValidate, monacoTheme 
         <div className="editor-header">
           <h3>{target || ''}</h3>
           <button className="btn-primary btn-sm" onClick={handleSave}>Save</button>
-          {onValidate && target && (
+          {onValidate && target && target !== 'secrets.yaml' && (
             <button
               className="btn-secondary btn-sm"
               onClick={() => onValidate(target)}

@@ -206,9 +206,8 @@ export default function App() {
   async function handleValidate(target: string) {
     try {
       await validateConfig(target);
-      addToast(`Validating ${target}`, 'info');
-      setEditorTarget(null);
-      switchTab('queue');
+      addToast(`Validating ${stripYaml(target)}...`, 'info');
+      // Don't close editor or switch tabs — user stays in the editor
       await fetchQueue();
     } catch (err) {
       addToast('Validate failed: ' + (err as Error).message, 'error');

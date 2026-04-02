@@ -119,4 +119,4 @@ Worker config is all via environment: `SERVER_URL`, `SERVER_TOKEN`, `POLL_INTERV
 
 ## Design Specification
 
-`REQUIREMENTS.md` is the authoritative design document covering the full API spec, job state machine behavior, bundle format, device polling details, and acceptance criteria.
+`PRD.md` is the product requirements document for the full ESPHome dashboard replacement. `WORKITEMS.md` tracks implementation progress.
