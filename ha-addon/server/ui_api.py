@@ -974,6 +974,26 @@ async def set_worker_disabled(request: web.Request) -> web.Response:
     return await _set_disabled_handler(request, request.match_info["client_id"])
 
 
+@routes.post("/ui/api/workers/{client_id}/parallel-jobs")
+async def set_worker_parallel_jobs(request: web.Request) -> web.Response:
+    """Set the requested max_parallel_jobs for a worker. Pushed via next heartbeat."""
+    client_id = request.match_info["client_id"]
+    registry = request.app["registry"]
+    worker = registry.get(client_id)
+    if not worker:
+        return web.json_response({"error": "Worker not found"}, status=404)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+    value = body.get("max_parallel_jobs")
+    if not isinstance(value, int) or value < 1 or value > 32:
+        return web.json_response({"error": "max_parallel_jobs must be 1-32"}, status=400)
+    worker.requested_max_parallel_jobs = value
+    logger.info("Worker %s (%s): requested max_parallel_jobs set to %d", client_id, worker.hostname, value)
+    return web.json_response({"ok": True, "max_parallel_jobs": value})
+
+
 # Legacy client routes — kept for backwards compatibility
 
 @routes.delete("/ui/api/clients/{client_id}")

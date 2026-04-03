@@ -1,5 +1,5 @@
-import { useCallback, useRef } from 'react';
-import type { Job, Worker } from '../types';
+import { useCallback, useMemo, useRef } from 'react';
+import type { Job, Target, Worker } from '../types';
 import { fmtDuration, getJobBadge, stripYaml, isJobSuccessful, isJobInProgress, isJobFailed, isJobFinished, isJobRetryable } from '../utils';
 import { useSortable } from '../hooks/useSortable';
 import { SortableHeader } from './SortableHeader';
@@ -13,6 +13,7 @@ function timeAgo(isoString: string): string {
 
 interface Props {
   queue: Job[];
+  targets: Target[];
   workers: Worker[];
   onCancel: (ids: string[]) => void;
   onRetry: (ids: string[]) => void;
@@ -34,6 +35,7 @@ const STATE_ORDER: Record<string, number> = {
 
 export function QueueTab({
   queue,
+  targets,
   workers,
   onCancel,
   onRetry,
@@ -47,6 +49,15 @@ export function QueueTab({
   const tbodyRef = useRef<HTMLTableSectionElement>(null);
   const selectAllRef = useRef<HTMLInputElement>(null);
   const { sort, handleSort, sortedItems } = useSortable();
+
+  // Build target → display name map so queue shows friendly names
+  const targetNameMap = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const t of targets) {
+      map.set(t.target, t.friendly_name || t.device_name || stripYaml(t.target));
+    }
+    return map;
+  }, [targets]);
 
   const getChecked = useCallback((): string[] => {
     if (!tbodyRef.current) return [];
@@ -127,6 +138,7 @@ export function QueueTab({
                   <QueueRow
                     key={job.id}
                     job={job}
+                    displayName={targetNameMap.get(job.target) || stripYaml(job.target)}
                     workers={workers}
                     onCancel={onCancel}
                     onRetry={onRetry}
@@ -146,6 +158,7 @@ export function QueueTab({
 
 function QueueRow({
   job,
+  displayName,
   workers,
   onCancel,
   onRetry,
@@ -154,6 +167,7 @@ function QueueRow({
   onEdit,
 }: {
   job: Job;
+  displayName: string;
   workers: Worker[];
   onCancel: (ids: string[]) => void;
   onRetry: (ids: string[]) => void;
@@ -200,9 +214,8 @@ function QueueRow({
     <tr data-job={job.id}>
       <td><input type="checkbox" className="queue-cb" value={job.id} /></td>
       <td>
-        <strong>{stripYaml(job.target)}</strong>
-        <br />
-        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{timeAgo(job.created_at)}</span>
+        <strong>{displayName}</strong>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{stripYaml(job.target)} &middot; {timeAgo(job.created_at)}</div>
       </td>
       <td><span className={badgeCls}>{badgeLabel}</span></td>
       <td style={{ fontSize: 12 }}>

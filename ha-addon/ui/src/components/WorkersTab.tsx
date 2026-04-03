@@ -9,6 +9,7 @@ interface Props {
   serverClientVersion?: string;
   onDisable: (id: string, disabled: boolean) => void;
   onRemove: (id: string) => void;
+  onSetParallelJobs: (id: string, count: number) => void;
   onConnectWorker: () => void;
 }
 
@@ -54,7 +55,7 @@ function ClientVersionCell({ ver, scv }: { ver?: string; scv?: string }) {
   );
 }
 
-export function WorkersTab({ workers, queue, serverClientVersion, onDisable, onRemove, onConnectWorker }: Props) {
+export function WorkersTab({ workers, queue, serverClientVersion, onDisable, onRemove, onSetParallelJobs, onConnectWorker }: Props) {
   const online = workers.filter(c => c.online).length;
   const countText = online + '/' + workers.length + ' online';
 
@@ -120,7 +121,24 @@ export function WorkersTab({ workers, queue, serverClientVersion, onDisable, onR
             <td>{jobEl}</td>
             <td><ClientVersionCell ver={c.client_version} scv={serverClientVersion} /></td>
             <td>
-              <div style={{ display: 'flex', gap: 4 }}>
+              <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                <span
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 2, fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}
+                  title="Parallel build slots"
+                >
+                  <button
+                    className="btn-secondary btn-sm"
+                    style={{ padding: '1px 6px', fontSize: 11, minWidth: 0 }}
+                    disabled={slots <= 1}
+                    onClick={() => onSetParallelJobs(c.client_id, slots - 1)}
+                  >-</button>
+                  <span style={{ minWidth: 16, textAlign: 'center' }}>{c.requested_max_parallel_jobs != null && c.requested_max_parallel_jobs !== slots ? `${slots}→${c.requested_max_parallel_jobs}` : String(slots)}</span>
+                  <button
+                    className="btn-secondary btn-sm"
+                    style={{ padding: '1px 6px', fontSize: 11, minWidth: 0 }}
+                    onClick={() => onSetParallelJobs(c.client_id, slots + 1)}
+                  >+</button>
+                </span>
                 <button className={disableBtnCls} onClick={() => onDisable(c.client_id, !c.disabled)}>
                   {disableBtnLabel}
                 </button>

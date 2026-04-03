@@ -15,6 +15,7 @@ import {
   getWorkers,
   removeWorker,
   renameTarget,
+  setWorkerParallelJobs,
   retryAllFailed,
   retryJobs,
   setEsphomeVersion,
@@ -319,6 +320,16 @@ export default function App() {
     }
   }
 
+  async function handleSetParallelJobs(id: string, count: number) {
+    try {
+      await setWorkerParallelJobs(id, count);
+      addToast(`Set to ${count} slot${count !== 1 ? 's' : ''} — worker will restart`, 'success');
+      await fetchWorkers();
+    } catch (err) {
+      addToast('Error: ' + (err as Error).message, 'error');
+    }
+  }
+
   async function handleDeleteDevice(target: string, archive: boolean) {
     try {
       await deleteTarget(target, archive);
@@ -439,6 +450,7 @@ export default function App() {
         {activeTab === 'queue' && (
           <QueueTab
             queue={queue}
+            targets={targets}
             workers={workers}
             onCancel={handleCancelJobs}
             onRetry={handleRetryJobs}
@@ -457,6 +469,7 @@ export default function App() {
             serverClientVersion={serverInfo.server_client_version}
             onDisable={handleDisableWorker}
             onRemove={handleRemoveWorker}
+            onSetParallelJobs={handleSetParallelJobs}
             onConnectWorker={() => setConnectModalOpen(true)}
           />
         )}

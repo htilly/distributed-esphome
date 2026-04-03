@@ -182,6 +182,18 @@ export async function disableWorker(id: string, disabled: boolean): Promise<void
   if (!r.ok) throw new Error('Failed to update worker');
 }
 
+export async function setWorkerParallelJobs(id: string, maxParallelJobs: number): Promise<void> {
+  const r = await apiFetch(`./ui/api/workers/${id}/parallel-jobs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ max_parallel_jobs: maxParallelJobs }),
+  });
+  if (!r.ok) {
+    const data = await r.json().catch(() => ({})) as { error?: string };
+    throw new Error(data.error || String(r.status));
+  }
+}
+
 export async function removeWorker(id: string): Promise<void> {
   const r = await apiFetch(`./ui/api/workers/${id}`, { method: 'DELETE' });
   if (!r.ok) {

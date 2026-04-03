@@ -7,3 +7,18 @@
 
 3. Need to manage disk space on clients to make sure we don't run out 
 
+4. Ability to dump firmware off a device. 
+
+5. https://github.com/weirded/distributed-esphome/issues/5 Manually choose a worker
+
+6. https://github.com/weirded/distributed-esphome/issues/4 Worker on server (configurable)
+
+7. Upgrade all should optionally skip offline devices. 
+
+8. DONE (1.2.0-dev.1) - Change parallel job slots from the web UI. Workers tab has +/- controls per worker; value pushed via heartbeat, worker restarts to apply.
+
+9. DONE (1.2.0-dev.1) - Queue now shows friendly device names (matching Devices tab) with filename and timestamp below.
+
+10. Edit yaml files in subfolders 
+
+11. Add DOcker Compose file to repo: https://github.com/weirded/distributed-esphome/issues/8

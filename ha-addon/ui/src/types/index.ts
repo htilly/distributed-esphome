@@ -59,6 +59,7 @@ export interface Worker {
   online: boolean;
   disabled: boolean;
   max_parallel_jobs?: number;
+  requested_max_parallel_jobs?: number | null;
   client_version?: string;
   system_info?: SystemInfo;
   current_job_id?: string;

@@ -29,7 +29,7 @@ from version_manager import VersionManager
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.2.0-dev.0"
+CLIENT_VERSION = "1.2.0-dev.1"
 
 # ---------------------------------------------------------------------------
 # System information gathering (stdlib only — no psutil dependency)
@@ -457,6 +457,12 @@ def register() -> str:
 # Heartbeat thread
 # ---------------------------------------------------------------------------
 
+def _restart_self() -> None:
+    """Restart the worker process in-place (preserving env vars)."""
+    logger.info("Restarting worker process...")
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
 def heartbeat_loop(client_id: str, stop_event: threading.Event) -> None:
     """Send heartbeats to the server until stop_event is set."""
     while not stop_event.is_set():
@@ -483,6 +489,16 @@ def heartbeat_loop(client_id: str, stop_event: threading.Event) -> None:
                         "Worker update available: local=%s server=%s", CLIENT_VERSION, sv
                     )
                     _update_available.set()
+                # Check for max_parallel_jobs config change from UI
+                new_jobs = data.get("set_max_parallel_jobs")
+                if new_jobs is not None and isinstance(new_jobs, int) and new_jobs != MAX_PARALLEL_JOBS:
+                    logger.info(
+                        "Server requested max_parallel_jobs change: %d → %d — restarting",
+                        MAX_PARALLEL_JOBS, new_jobs,
+                    )
+                    # Write new value to env so it persists across restart
+                    os.environ["MAX_PARALLEL_JOBS"] = str(new_jobs)
+                    _restart_self()
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
             _on_server_unreachable(exc)
         except Exception as exc:
