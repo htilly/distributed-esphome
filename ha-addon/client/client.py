@@ -29,7 +29,7 @@ from version_manager import VersionManager
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.1.0-dev.31"
+CLIENT_VERSION = "1.1.0-dev.32"
 
 # ---------------------------------------------------------------------------
 # System information gathering (stdlib only — no psutil dependency)
@@ -744,12 +744,17 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
         logger.info("Using esphome binary override: %s", esphome_bin)
     else:
         _report_status(job_id, f"Downloading ESPHome {esphome_version}")
+        _flush_log_text(job_id, f"Installing ESPHome {esphome_version}...\n")
         try:
             esphome_bin = version_manager.ensure_version(esphome_version)
             logger.info("Using esphome binary: %s", esphome_bin)
+            _flush_log_text(job_id, f"ESPHome {esphome_version} ready.\n")
         except Exception as exc:
-            logger.error("Failed to install esphome==%s: %s", esphome_version, exc)
-            _submit_result(job_id, "failed", log=f"Version install failed: {exc}", ota_result=None)
+            error_detail = str(exc)
+            logger.error("Failed to install esphome==%s: %s", esphome_version, error_detail)
+            # Stream the full error to the job log so the user sees it in the terminal
+            _flush_log_text(job_id, f"\n\033[31mERROR: Failed to install ESPHome {esphome_version}\033[0m\n{error_detail}\n")
+            _submit_result(job_id, "failed", log=None, ota_result=None)
             with _active_jobs_lock:
                 _active_jobs -= 1
             return
