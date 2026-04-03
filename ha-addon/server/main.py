@@ -121,11 +121,28 @@ async def ha_entity_poller(app: web.Application) -> None:
         if not first_poll:
             await asyncio.sleep(30)
         try:
+            import json as _json  # noqa: PLC0415
+
             async with aiohttp.ClientSession() as session:
-                # /api/states is the only REST endpoint that works from an add-on.
-                # The entity registry (platform field) is WebSocket-only.
-                # ESPHome devices always create a binary_sensor.<name>_status entity
-                # with device_class=connectivity — that's our signal.
+                # 1. Use the template API to get ALL ESPHome entity IDs.
+                #    This works even for devices without a _status sensor.
+                esphome_entity_ids: list[str] = []
+                try:
+                    async with session.post(
+                        "http://supervisor/core/api/template",
+                        headers={**headers, "Content-Type": "application/json"},
+                        json={"template": "{{ integration_entities('esphome') | list | tojson }}"},
+                        timeout=timeout,
+                    ) as resp:
+                        if resp.status == 200:
+                            raw = await resp.json()
+                            esphome_entity_ids = _json.loads(raw) if isinstance(raw, str) else []
+                        else:
+                            logger.debug("HA template API returned HTTP %d", resp.status)
+                except Exception:
+                    logger.debug("Template API call failed", exc_info=True)
+
+                # 2. Fetch states for connectivity info
                 async with session.get(
                     "http://supervisor/core/api/states",
                     headers=headers,
@@ -139,47 +156,68 @@ async def ha_entity_poller(app: web.Application) -> None:
                         continue
                     states: list[dict] = await resp.json()
 
-            # Derive both "configured" and "connected" from status entities.
-            # ESPHome creates binary_sensor.<device_name>_status with
-            # device_class=connectivity for each device. state "on" = connected.
-            # Key by the device portion (without _status suffix) so
-            # _ha_status_for_target can match by normalised device name.
-            ha_status: dict[str, dict] = {}
-            # Also collect all binary_sensor.*_status for diagnostics
-            all_status_sensors: list[str] = []
+            # Build connectivity map from binary_sensor.*_status with device_class=connectivity
+            connectivity: dict[str, bool] = {}  # norm_name → connected
             for entity in states:
                 entity_id: str = entity.get("entity_id", "")
                 if not entity_id.startswith("binary_sensor.") or not entity_id.endswith("_status"):
                     continue
                 attrs = entity.get("attributes") or {}
-                device_class = attrs.get("device_class", "")
-                all_status_sensors.append(f"{entity_id} (dc={device_class}, state={entity.get('state')})")
-                if device_class != "connectivity":
+                if attrs.get("device_class") != "connectivity":
                     continue
-                # e.g. "binary_sensor.living_room_sensor_status" → "living_room_sensor"
                 norm_name = entity_id[len("binary_sensor."):-len("_status")]
-                connected = entity.get("state") == "on"
-                ha_status[norm_name] = {
-                    "configured": True,
-                    "connected": connected,
-                }
+                connectivity[norm_name] = entity.get("state") == "on"
+
+            # Build ha_status from ESPHome entity IDs (configured) + connectivity
+            ha_status: dict[str, dict] = {}
+
+            # Extract unique device name prefixes from entity IDs.
+            # ESPHome entities follow the pattern: <domain>.<device_name>_<entity_suffix>
+            # We collect all unique prefixes by stripping the domain and finding the
+            # longest prefix that matches a connectivity key, or the full local part.
+            esphome_device_names: set[str] = set()
+            for eid in esphome_entity_ids:
+                if "." not in eid:
+                    continue
+                local = eid.split(".", 1)[1]  # e.g. "nespresso_machine_temperature"
+                # Check if any connectivity key is a prefix of this entity
+                for conn_name in connectivity:
+                    if local == conn_name or local.startswith(conn_name + "_"):
+                        esphome_device_names.add(conn_name)
+                        break
+                else:
+                    # No connectivity match — try to derive device name from entity ID.
+                    # The _status entity would be the definitive prefix, but it may not
+                    # exist. Store the full local as a candidate; _ha_status_for_target
+                    # will match by prefix.
+                    esphome_device_names.add(local)
+
+            # All connectivity-matched devices get configured=True + connected state
+            for name in connectivity:
+                ha_status[name] = {"configured": True, "connected": connectivity[name]}
+
+            # All other ESPHome entities mark their device as configured (connected unknown)
+            for name in esphome_device_names:
+                if name not in ha_status:
+                    ha_status[name] = {"configured": True, "connected": None}
 
             app["ha_entity_status"].clear()
             app["ha_entity_status"].update(ha_status)
 
             if first_poll:
                 first_poll = False
+                configured_count = len(ha_status)
+                connected_count = sum(1 for v in ha_status.values() if v.get("connected") is not None)
                 logger.info(
-                    "HA entity poller: %d total states, %d binary_sensor.*_status entities, %d matched (connectivity). "
-                    "Status sensors: %s",
-                    len(states),
-                    len(all_status_sensors),
-                    len(ha_status),
-                    "; ".join(all_status_sensors[:20]) if all_status_sensors else "(none found)",
+                    "HA entity poller: %d ESPHome entities from template API, "
+                    "%d devices configured, %d with connectivity status",
+                    len(esphome_entity_ids),
+                    configured_count,
+                    connected_count,
                 )
             else:
                 logger.debug(
-                    "HA entity status updated: %d ESPHome devices found",
+                    "HA entity status updated: %d ESPHome devices",
                     len(ha_status),
                 )
 

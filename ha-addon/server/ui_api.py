@@ -140,10 +140,20 @@ def _ha_status_for_target(
         candidates.append(_normalize_for_ha(raw_name))
     candidates.append(_normalize_for_ha(target.replace(".yaml", "")))
 
+    # First try direct lookup (fastest, works for connectivity-matched names)
     for norm_name in candidates:
         entry = ha_entity_status.get(norm_name)
         if entry:
             return True, entry.get("connected")
+
+    # Fallback: prefix match against entity locals (e.g. "nespresso_machine"
+    # matches "nespresso_machine_temperature" in ha_entity_status)
+    for norm_name in candidates:
+        prefix = norm_name + "_"
+        for key, entry in ha_entity_status.items():
+            if key.startswith(prefix) or key == norm_name:
+                return True, entry.get("connected")
+
     return False, None
 
 

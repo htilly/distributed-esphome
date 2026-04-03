@@ -139,3 +139,5 @@
 70. FIXED (1.1.0-dev.24) - DeprecationWarning on app state. Changed to clear()+update() on existing dict instead of reassigning.
 
 71. FIXED (1.1.0-dev.24) - HA entity matching uses friendly_name (e.g. "Nespresso Machine" → "nespresso_machine") instead of esphome.name.
+
+72. FIXED (1.1.0-dev.25) - HA device detection without _status sensor. Now uses template API (integration_entities('esphome')) to find ALL ESPHome entities, then cross-references with _status sensors for connectivity. Devices without _status show as "Configured" instead of "—". 
