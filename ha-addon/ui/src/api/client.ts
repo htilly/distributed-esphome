@@ -90,11 +90,16 @@ export async function getQueue(): Promise<Job[]> {
   return r.json();
 }
 
-export async function compile(targets: string[] | 'all' | 'outdated'): Promise<{ enqueued: number }> {
+export async function compile(
+  targets: string[] | 'all' | 'outdated',
+  pinnedClientId?: string,
+): Promise<{ enqueued: number }> {
+  const body: Record<string, unknown> = { targets };
+  if (pinnedClientId) body.pinned_client_id = pinnedClientId;
   const r = await apiFetch('./ui/api/compile', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ targets }),
+    body: JSON.stringify(body),
   });
   const data = await r.json();
   if (!r.ok) throw new Error((data as { error?: string }).error || String(r.status));

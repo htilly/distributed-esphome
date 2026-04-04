@@ -175,3 +175,5 @@
 88. FIXED (1.1.0-dev.29) - MAC address matching for HA devices. Device poller now captures MAC from device_info(). HA entity poller queries device identifiers via template API. Matching tries MAC first (most reliable), then name fallback.
 
 89. FIXED (1.1.0-dev.32) - ESPHome install errors now streamed to job log in real time (red ANSI). pip stderr included in error detail. Previously the error was only in the job result text, not visible in the streaming terminal.
+
+90. FIXED (1.2.0-dev.3) - Validate 502 "Cannot save". Made updateDirtyDecorations errors non-fatal (.catch(() => {})) so async diff failures don't bubble up as save errors.

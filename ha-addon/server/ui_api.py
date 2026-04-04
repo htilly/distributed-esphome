@@ -558,6 +558,7 @@ async def start_compile(request: web.Request) -> web.Response:
         return web.json_response({"error": "Invalid JSON"}, status=400)
 
     targets_param = body.get("targets", "all")
+    pinned_client_id = body.get("pinned_client_id")  # optional: pin job to specific worker
     cfg = _cfg(request)
     queue = request.app["queue"]
     device_poller = request.app.get("device_poller")
@@ -610,6 +611,7 @@ async def start_compile(request: web.Request) -> web.Response:
             run_id=run_id,
             timeout_seconds=cfg.job_timeout,
             ota_address=ota_addresses.get(target),
+            pinned_client_id=pinned_client_id,
         )
         if job is not None:
             enqueued += 1

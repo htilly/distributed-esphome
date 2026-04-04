@@ -467,7 +467,7 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, o
         if (!model) return;
         validateYaml(model, monaco);
       }, 500);
-      updateDirtyDecorations(editor);
+      updateDirtyDecorations(editor).catch(() => {});
     });
 
     // Run an initial validation pass; re-run once the component list arrives
@@ -485,7 +485,7 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, o
     try {
       await saveTargetContent(target, value);
       savedContentRef.current = value;
-      if (editorRef.current) updateDirtyDecorations(editorRef.current);
+      if (editorRef.current) updateDirtyDecorations(editorRef.current).catch(() => {});
       onToast('Saved ' + target, 'success');
       onClose();
     } catch (err) {
@@ -535,7 +535,7 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, o
                 try {
                   await saveTargetContent(target, value);
                   savedContentRef.current = value;
-                  updateDirtyDecorations(editorRef.current);
+                  updateDirtyDecorations(editorRef.current).catch(() => {});
                 } catch (err) {
                   onToast('Save failed: ' + (err as Error).message, 'error');
                   return;

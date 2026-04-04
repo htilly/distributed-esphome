@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getApiKey, restartDevice } from '../api/client';
-import type { Device, Target } from '../types';
+import type { Device, Target, Worker } from '../types';
 import { stripYaml } from '../utils';
 import { useSortable } from '../hooks/useSortable';
 import { SortableHeader } from './SortableHeader';
@@ -8,7 +8,9 @@ import { SortableHeader } from './SortableHeader';
 interface Props {
   targets: Target[];
   devices: Device[];
+  workers: Worker[];
   onCompile: (targets: string[] | 'all' | 'outdated') => void;
+  onCompileOnWorker: (target: string, clientId: string) => void;
   onEdit: (target: string) => void;
   onLogs: (target: string) => void;
   onToast: (msg: string, type?: 'info' | 'success' | 'error') => void;
@@ -106,7 +108,7 @@ function DeleteModal({ target, onConfirm, onClose }: {
   );
 }
 
-export function DevicesTab({ targets, devices, onCompile, onEdit, onLogs, onToast, onDelete, onRename }: Props) {
+export function DevicesTab({ targets, devices, workers, onCompile, onCompileOnWorker, onEdit, onLogs, onToast, onDelete, onRename }: Props) {
   const [filter, setFilter] = useState('');
   const { sort, handleSort, sortedItems } = useSortable();
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
@@ -296,7 +298,9 @@ export function DevicesTab({ targets, devices, onCompile, onEdit, onLogs, onToas
                     <TargetRow
                       key={t.target}
                       target={t}
+                      workers={workers}
                       onCompile={onCompile}
+                      onCompileOnWorker={onCompileOnWorker}
                       onEdit={onEdit}
                       onLogs={onLogs}
                       onToast={onToast}
@@ -343,16 +347,20 @@ export function DevicesTab({ targets, devices, onCompile, onEdit, onLogs, onToas
 
 function DeviceMenu({
   target: t,
+  workers,
   onToast,
   onDelete,
   onRename,
   onLogs,
+  onCompileOnWorker,
 }: {
   target: Target;
+  workers: Worker[];
   onToast: (msg: string, type?: 'info' | 'success' | 'error') => void;
   onDelete: (target: string) => void;
   onRename: (target: string) => void;
   onLogs: (target: string) => void;
+  onCompileOnWorker: (target: string, clientId: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -429,6 +437,25 @@ function DeviceMenu({
         >
           Restart Device
         </button>
+        {workers.filter(w => w.online && !w.disabled).length > 0 && (
+          <>
+            <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0' }} />
+            <div style={{ padding: '4px 12px', fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              Upgrade on...
+            </div>
+            {workers.filter(w => w.online && !w.disabled).map(w => (
+              <button
+                key={w.client_id}
+                className="action-menu-item"
+                onClick={() => { setOpen(false); onCompileOnWorker(t.target, w.client_id); }}
+                title={`Compile and OTA via ${w.hostname}`}
+              >
+                {w.hostname}
+              </button>
+            ))}
+            <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0' }} />
+          </>
+        )}
         <button
           className="action-menu-item"
           onClick={handleCopyApiKey}
@@ -459,7 +486,9 @@ function DeviceMenu({
 
 function TargetRow({
   target: t,
+  workers,
   onCompile,
+  onCompileOnWorker,
   onEdit,
   onLogs,
   onToast,
@@ -467,7 +496,9 @@ function TargetRow({
   onRename,
 }: {
   target: Target;
+  workers: Worker[];
   onCompile: (targets: string[]) => void;
+  onCompileOnWorker: (target: string, clientId: string) => void;
   onEdit: (target: string) => void;
   onLogs: (target: string) => void;
   onToast: (msg: string, type?: 'info' | 'success' | 'error') => void;
@@ -528,7 +559,7 @@ function TargetRow({
         <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
           <button className={`${upgradeBtnCls} btn-sm`} onClick={() => onCompile([t.target])}>Upgrade</button>
           <button className="btn-secondary btn-sm" onClick={() => onEdit(t.target)}>Edit</button>
-          <DeviceMenu target={t} onToast={onToast} onDelete={onDelete} onRename={onRename} onLogs={onLogs} />
+          <DeviceMenu target={t} workers={workers} onToast={onToast} onDelete={onDelete} onRename={onRename} onLogs={onLogs} onCompileOnWorker={onCompileOnWorker} />
         </div>
       </td>
     </tr>

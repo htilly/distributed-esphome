@@ -210,6 +210,18 @@ export default function App() {
     }
   }
 
+  async function handleCompileOnWorker(target: string, clientId: string) {
+    try {
+      await compile([target], clientId);
+      const workerName = workers.find(w => w.client_id === clientId)?.hostname || clientId;
+      addToast(`Queued ${stripYaml(target)} on ${workerName}`, 'success');
+      switchTab('queue');
+      await fetchQueue();
+    } catch (err) {
+      addToast('Error: ' + (err as Error).message, 'error');
+    }
+  }
+
   async function handleValidate(target: string) {
     try {
       const result = await validateConfig(target);
@@ -439,7 +451,9 @@ export default function App() {
           <DevicesTab
             targets={targets}
             devices={devices}
+            workers={workers}
             onCompile={handleCompile}
+            onCompileOnWorker={handleCompileOnWorker}
             onEdit={setEditorTarget}
             onLogs={setDeviceLogTarget}
             onToast={addToast}

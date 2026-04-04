@@ -181,6 +181,7 @@ class JobQueue:
         timeout_seconds: int,
         validate_only: bool = False,
         ota_address: Optional[str] = None,
+        pinned_client_id: Optional[str] = None,
     ) -> Optional[Job]:
         """
         Create and enqueue a new job for *target*.
@@ -222,6 +223,7 @@ class JobQueue:
                 timeout_seconds=timeout_seconds,
                 validate_only=validate_only,
                 ota_address=ota_address,
+                pinned_client_id=pinned_client_id,
             )
             self._jobs[job.id] = job
             self._persist()

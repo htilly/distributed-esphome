@@ -9,7 +9,7 @@
 
 4. Ability to dump firmware off a device. 
 
-5. https://github.com/weirded/distributed-esphome/issues/5 Manually choose a worker
+5. DONE (1.2.0-dev.3) - Manually choose a worker. "Upgrade on..." submenu in device hamburger lists online workers. Jobs pinned via pinned_client_id.
 
 6. https://github.com/weirded/distributed-esphome/issues/4 Worker on server (configurable)
 
@@ -21,4 +21,6 @@
 
 10. Edit yaml files in subfolders 
 
-11. Add DOcker Compose file to repo: https://github.com/weirded/distributed-esphome/issues/8
+11. DONE (1.2.0-dev.3) - Docker Compose file added: docker-compose.worker.yml
+
+12. For the devices page, I want to show additional attributes of the configuration, and allow used to select which columns to show/hide (with the name, status and buttons always there). I'm talking name, friendly_name, area, comment, project, number of subdevices (if any), 
