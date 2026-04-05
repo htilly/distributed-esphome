@@ -1069,6 +1069,12 @@ async def set_worker_parallel_jobs(request: web.Request) -> web.Response:
         return web.json_response({"error": "max_parallel_jobs must be 0-32"}, status=400)
     worker.requested_max_parallel_jobs = value
     logger.info("Worker %s (%s): requested max_parallel_jobs set to %d", client_id, worker.hostname, value)
+    # Persist local worker slot count across restarts
+    if worker.hostname == "local-worker":
+        try:
+            Path("/data/local_worker_slots").write_text(str(value))
+        except Exception:
+            pass
     return web.json_response({"ok": True, "max_parallel_jobs": value})
 
 

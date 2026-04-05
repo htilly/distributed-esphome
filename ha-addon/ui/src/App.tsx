@@ -77,32 +77,35 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabName>(
     () => (sessionStorage.getItem('activeTab') as TabName) || 'devices',
   );
+  // Deep compare prevents re-renders when polled data hasn't changed structurally
+  const deepCompare = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
   const { data: serverInfo = { token: '', port: 8765 } } = useSWR(
     'serverInfo',
     getServerInfo,
-    { refreshInterval: 30_000, onError: () => {} },
+    { refreshInterval: 30_000, onError: () => {}, compare: deepCompare },
   );
   const { data: esphomeVersions = { selected: null, detected: null, available: [] }, mutate: mutateEsphomeVersions } = useSWR(
     'versions',
     getEsphomeVersions,
-    { refreshInterval: 15 * 60_000, onError: () => {} },
+    { refreshInterval: 15 * 60_000, onError: () => {}, compare: deepCompare },
   );
   const { data: workers = [], mutate: mutateWorkers } = useSWR(
     'workers',
     getWorkers,
-    { refreshInterval: 5_000, onError: () => {} },
+    { refreshInterval: 5_000, onError: () => {}, compare: deepCompare },
   );
   const { data: devicesAndTargets, mutate: mutateDevices } = useSWR(
     'devices',
     async () => { const [t, d] = await Promise.all([getTargets(), getDevices()]); return { targets: t, devices: d }; },
-    { refreshInterval: 15_000, onError: () => {} },
+    { refreshInterval: 15_000, onError: () => {}, compare: deepCompare },
   );
   const targets = devicesAndTargets?.targets ?? [];
   const devices = devicesAndTargets?.devices ?? [];
   const { data: queue = [], mutate: mutateQueue } = useSWR(
     'queue',
     getQueue,
-    { refreshInterval: 3_000, onError: () => {} },
+    { refreshInterval: 3_000, onError: () => {}, compare: deepCompare },
   );
   // Exclude validation-only jobs from display (they run server-side and auto-prune)
   const displayQueue = useMemo(() => queue.filter(j => !j.validate_only), [queue]);

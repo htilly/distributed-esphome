@@ -518,11 +518,19 @@ def create_app() -> web.Application:
         local_worker_script = Path("/app/client/client.py")
         if local_worker_script.exists():
             import subprocess as sp  # noqa: PLC0415
+            # Restore persisted slot count (default 0 on first run)
+            local_slots_file = Path("/data/local_worker_slots")
+            local_slots = "0"
+            try:
+                if local_slots_file.exists():
+                    local_slots = local_slots_file.read_text().strip() or "0"
+            except Exception:
+                pass
             local_env = {
                 **os.environ,
                 "SERVER_URL": f"http://127.0.0.1:{cfg.port}",
                 "SERVER_TOKEN": cfg.token,
-                "MAX_PARALLEL_JOBS": "0",  # paused by default — increase via UI
+                "MAX_PARALLEL_JOBS": local_slots,
                 "ESPHOME_VERSIONS_DIR": "/data/esphome-versions",
                 "HOSTNAME": "local-worker",
             }
@@ -533,7 +541,7 @@ def create_app() -> web.Application:
                 stderr=sp.DEVNULL,
             )
             app["local_worker_proc"] = proc
-            logger.info("Started local worker (PID %d, 0 slots — increase via Workers tab)", proc.pid)
+            logger.info("Started local worker (PID %d, %s slots)", proc.pid, local_slots)
 
     async def on_shutdown(app: web.Application) -> None:
         logger.info("Shutting down ESPHome Distributed Build Server")

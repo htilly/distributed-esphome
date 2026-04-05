@@ -5,6 +5,9 @@ import { getEsphomeSchema, getSecretKeys, getTargetContent, saveTargetContent } 
 import {
   Dialog,
   DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
 } from './ui/dialog';
 import { Button } from './ui/button';
 type ToastType = 'info' | 'success' | 'error';
@@ -258,6 +261,7 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, o
   const monacoRef = useRef<Parameters<OnMount>[1] | null>(null);
   const savedContentRef = useRef('');
   const [dirtyLineCount, setDirtyLineCount] = useState(0);
+  const [showCloseConfirm, setShowCloseConfirm] = useState(false);
 
   // Keep the module-level version variable in sync so the completion provider
   // (registered once, outside the component lifecycle) always sees the current value.
@@ -504,7 +508,7 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, o
   return (
     <Dialog open onOpenChange={(open) => {
       if (!open) {
-        if (dirtyLineCount > 0 && !window.confirm('You have unsaved changes. Close anyway?')) return;
+        if (dirtyLineCount > 0) { setShowCloseConfirm(true); return; }
         onClose();
       }
     }}>
@@ -576,6 +580,22 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, o
           </div>
         )}
       </DialogContent>
+      {showCloseConfirm && (
+        <Dialog open onOpenChange={(open) => { if (!open) setShowCloseConfirm(false); }}>
+          <DialogContent style={{ zIndex: 600 }}>
+            <DialogHeader>
+              <DialogTitle>Unsaved Changes</DialogTitle>
+            </DialogHeader>
+            <div style={{ padding: 16 }}>
+              <p>You have {dirtyLineCount} unsaved line{dirtyLineCount !== 1 ? 's' : ''}. Close without saving?</p>
+            </div>
+            <DialogFooter>
+              <Button variant="secondary" size="sm" onClick={() => setShowCloseConfirm(false)}>Cancel</Button>
+              <Button variant="destructive" size="sm" onClick={() => { setShowCloseConfirm(false); onClose(); }}>Discard Changes</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </Dialog>
   );
 }

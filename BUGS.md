@@ -128,6 +128,12 @@
 
 153. FIXED (1.2.0-dev.41) - Local worker: xtensa-lx106-elf-g++ not found (ESP8266 cross-compiler). Root cause: PlatformIO downloads glibc-compiled toolchains but Alpine uses musl. Added `gcompat` (glibc compatibility layer) to Dockerfile.
 
+154. FIXED (1.2.0-dev.42) - Hamburger menu still closing on refresh. Root cause: SWR creates new data references on every poll, triggering full re-renders. Fix: added `compare: deepCompare` (JSON.stringify equality) to all 5 SWR hooks so components only re-render when data actually changes.
+
+155. FIXED (1.2.0-dev.42) - Editor unsaved warning uses native window.confirm. Replaced with shadcn Dialog showing "Unsaved Changes" with Cancel/Discard Changes buttons, rendered at z-index 600 above the editor.
+
+156. FIXED (1.2.0-dev.42) - Local worker slot count lost on restart. Persisted to /data/local_worker_slots. Server reads on startup, UI writes on change.
+
 ---
 
 <details>
