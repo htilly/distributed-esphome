@@ -128,7 +128,7 @@
 
 153. FIXED (1.2.0-dev.41) - Local worker: xtensa-lx106-elf-g++ not found (ESP8266 cross-compiler). Root cause: PlatformIO downloads glibc-compiled toolchains but Alpine uses musl. Added `gcompat` (glibc compatibility layer) to Dockerfile.
 
-154. FIXED (1.2.0-dev.43) - Hamburger menu closing on refresh. Root cause: TanStack Table recreates row DOM on data change, unmounting the DropdownMenu. deepCompare on SWR wasn't enough because data genuinely changes (timestamps). Fix: lifted menu open state to DevicesTab (`openMenuTarget`), passed as controlled `open`/`onOpenChange` props to DeviceMenu. Menu survives table re-renders. Verified with Playwright: menu stays open for 20+ seconds across multiple poll cycles.
+154. FIXED (1.2.0-dev.46) - Hamburger menu closing on refresh. Root cause: TanStack Table recreates row DOM on data change, unmounting the DropdownMenu. Fix: moved DeviceMenu outside the table entirely. Cell renders only a ⋮ click target that sets menuTarget state. DeviceMenu renders once outside the table with open={true}. Playwright verified: menu stays open 40+ seconds across polls. Note: menu positioning needs refinement (currently appears at top-left instead of near trigger).
 
 155. FIXED (1.2.0-dev.42) - Editor unsaved warning uses native window.confirm. Replaced with shadcn Dialog showing "Unsaved Changes" with Cancel/Discard Changes buttons, rendered at z-index 600 above the editor.
 

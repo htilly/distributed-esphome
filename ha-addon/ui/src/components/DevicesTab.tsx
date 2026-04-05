@@ -23,9 +23,6 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
-  DropdownMenuSub,
-  DropdownMenuSubTrigger,
-  DropdownMenuSubContent,
 } from './ui/dropdown-menu';
 import {
   Dialog,
@@ -187,7 +184,7 @@ export function DevicesTab({ targets, devices, workers, onCompile, onCompileOnWo
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(loadColumnVisibility);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [menuTarget, setMenuTarget] = useState<Target | null>(null);
-  const menuAnchorRef = useRef<HTMLSpanElement | null>(null);
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
@@ -417,8 +414,12 @@ export function DevicesTab({ targets, devices, workers, onCompile, onCompileOnWo
             <span
               className="action-menu-trigger"
               title="More actions"
-              ref={menuTarget?.target === t.target ? menuAnchorRef : undefined}
-              onClick={(e) => { menuAnchorRef.current = e.currentTarget; setMenuTarget(menuTarget?.target === t.target ? null : t); }}
+              onClick={(e) => {
+                if (menuTarget?.target === t.target) { setMenuTarget(null); setMenuPos(null); return; }
+                const rect = e.currentTarget.getBoundingClientRect();
+                setMenuPos({ top: rect.bottom + 4, left: rect.right });
+                setMenuTarget(t);
+              }}
             >&#8942;</span>
           </div>
         );
@@ -615,16 +616,17 @@ export function DevicesTab({ targets, devices, workers, onCompile, onCompileOnWo
         />
       )}
 
-      {menuTarget && (
+      {menuTarget && menuPos && (
         <DeviceMenu
           target={menuTarget}
           workers={workers}
+          position={menuPos}
           onToast={onToast}
-          onDelete={(t) => { setMenuTarget(null); setDeleteTarget(t); }}
-          onRename={(t) => { setMenuTarget(null); setRenameTarget(t); }}
-          onLogs={(t) => { setMenuTarget(null); onLogs(t); }}
-          onCompileOnWorker={(t, w) => { setMenuTarget(null); onCompileOnWorker(t, w); }}
-          onClose={() => setMenuTarget(null)}
+          onDelete={(t) => { setMenuTarget(null); setMenuPos(null); setDeleteTarget(t); }}
+          onRename={(t) => { setMenuTarget(null); setMenuPos(null); setRenameTarget(t); }}
+          onLogs={(t) => { setMenuTarget(null); setMenuPos(null); onLogs(t); }}
+          onCompileOnWorker={(t, w) => { setMenuTarget(null); setMenuPos(null); onCompileOnWorker(t, w); }}
+          onClose={() => { setMenuTarget(null); setMenuPos(null); }}
         />
       )}
     </div>
@@ -650,6 +652,7 @@ function SortHeader({ label, column }: { label: string; column: { getIsSorted: (
 function DeviceMenu({
   target: t,
   workers,
+  position,
   onToast,
   onDelete,
   onRename,
@@ -659,6 +662,7 @@ function DeviceMenu({
 }: {
   target: Target;
   workers: Worker[];
+  position: { top: number; left: number };
   onToast: (msg: string, type?: 'info' | 'success' | 'error') => void;
   onDelete: (target: string) => void;
   onRename: (target: string) => void;
@@ -666,6 +670,12 @@ function DeviceMenu({
   onCompileOnWorker: (target: string, clientId: string) => void;
   onClose: () => void;
 }) {
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [onClose]);
+
   async function handleCopyApiKey() {
     try {
       const key = await getApiKey(t.target);
@@ -690,61 +700,35 @@ function DeviceMenu({
     .sort((a, b) => a.hostname.localeCompare(b.hostname, undefined, { sensitivity: 'base' }));
 
   return (
-    <DropdownMenu open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DropdownMenuTrigger className="action-menu-trigger" style={{ display: 'none' }}>
-        &#8942;
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
-        {/* Device actions */}
-        <DropdownMenuGroup>
-          <DropdownMenuLabel>Device</DropdownMenuLabel>
-          <DropdownMenuItem onClick={() => onLogs(t.target)}>
-            Live Logs
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={handleRestart}>
-            Restart
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={handleCopyApiKey} disabled={!t.has_api_key}>
-            Copy API Key
-          </DropdownMenuItem>
-        </DropdownMenuGroup>
+    <>
+      {/* Backdrop to close on outside click */}
+      <div className="fixed inset-0 z-50" onClick={onClose} />
+      <div
+        className="fixed z-50 min-w-[160px] rounded-lg border border-[var(--border)] bg-[var(--popover)] p-1 text-[var(--popover-foreground)] shadow-md ring-1 ring-[var(--foreground)]/10"
+        style={{ top: position.top, left: position.left, transform: 'translateX(-100%)' }}
+      >
+        <div className="px-1.5 py-1 text-xs font-medium text-[var(--text-muted)]">Device</div>
+        <button className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-sm cursor-pointer hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]" onClick={() => onLogs(t.target)}>Live Logs</button>
+        <button className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-sm cursor-pointer hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]" onClick={handleRestart}>Restart</button>
+        <button className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-sm ${t.has_api_key ? 'cursor-pointer hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]' : 'opacity-50 pointer-events-none'}`} onClick={handleCopyApiKey}>Copy API Key</button>
 
-        <DropdownMenuSeparator />
+        <div className="-mx-1 my-1 h-px bg-[var(--border)]" />
 
-        {/* Config actions */}
-        <DropdownMenuGroup>
-          <DropdownMenuLabel>Config</DropdownMenuLabel>
-          <DropdownMenuItem onClick={() => onRename(t.target)}>
-            Rename
-          </DropdownMenuItem>
-          <DropdownMenuItem variant="destructive" onClick={() => onDelete(t.target)}>
-            Delete
-          </DropdownMenuItem>
-        </DropdownMenuGroup>
+        <div className="px-1.5 py-1 text-xs font-medium text-[var(--text-muted)]">Config</div>
+        <button className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-sm cursor-pointer hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]" onClick={() => onRename(t.target)}>Rename</button>
+        <button className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-sm cursor-pointer text-[var(--destructive)] hover:bg-[var(--destructive)]/10" onClick={() => onDelete(t.target)}>Delete</button>
 
-        {/* Upgrade on worker submenu */}
         {onlineWorkers.length > 0 && (
           <>
-            <DropdownMenuSeparator />
-            <DropdownMenuGroup>
-              <DropdownMenuSub>
-                <DropdownMenuSubTrigger>Upgrade on...</DropdownMenuSubTrigger>
-                <DropdownMenuSubContent>
-                  {onlineWorkers.map(w => (
-                    <DropdownMenuItem
-                      key={w.client_id}
-                      onClick={() => onCompileOnWorker(t.target, w.client_id)}
-                    >
-                      {w.hostname}
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuSubContent>
-              </DropdownMenuSub>
-            </DropdownMenuGroup>
+            <div className="-mx-1 my-1 h-px bg-[var(--border)]" />
+            <div className="px-1.5 py-1 text-xs font-medium text-[var(--text-muted)]">Upgrade on...</div>
+            {onlineWorkers.map(w => (
+              <button key={w.client_id} className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-sm cursor-pointer hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]" onClick={() => onCompileOnWorker(t.target, w.client_id)}>{w.hostname}</button>
+            ))}
           </>
         )}
-      </DropdownMenuContent>
-    </DropdownMenu>
+      </div>
+    </>
   );
 }
 
