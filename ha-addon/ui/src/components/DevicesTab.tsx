@@ -739,7 +739,8 @@ const DeviceMenu = memo(function DeviceMenu({
   // Only re-render if the fields DeviceMenu actually uses change
   prev.target.target === next.target.target &&
   prev.target.has_api_key === next.target.has_api_key &&
-  prev.workers === next.workers
+  prev.workers.length === next.workers.length &&
+  prev.workers.every((w, i) => w.client_id === next.workers[i]?.client_id && w.online === next.workers[i]?.online && w.hostname === next.workers[i]?.hostname && (w.max_parallel_jobs ?? 0) === (next.workers[i]?.max_parallel_jobs ?? 0))
 );
 
 function UnmanagedRow({ device: d, isVisible }: { device: Device; isVisible: (col: OptionalColumnId) => boolean }) {

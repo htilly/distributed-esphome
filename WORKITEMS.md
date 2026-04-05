@@ -139,6 +139,8 @@ End-to-end testing of the web UI using Playwright.
 - [ ] **PY.2 Client cleanup** — heartbeat helper, run_job() cleanup, env var validation, logging for silent exceptions
 - [ ] **PY.3 Version manager thread safety** — wait timeout, error propagation to waiters
 - [ ] **PY.4 Consistency & polish** — standardize error handling, type hints, CLAUDE.md updates
+- [ ] **PY.5 Extract magic strings to constants** — consolidate hardcoded values (URLs, paths, config keys, status strings, header names, etc.) into named constants in server and client Python code
+- [ ] **PY.6 Extract magic strings to constants (UI)** — consolidate hardcoded API paths, localStorage keys, polling intervals, status strings, etc. into named constants in the TypeScript frontend
 
 ### Client Library Adoption
 
