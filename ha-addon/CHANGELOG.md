@@ -2,58 +2,58 @@
 
 ## 1.2.0
 
-Design system overhaul, TanStack Table, SWR data fetching, and 60+ bug fixes.
+**Built-in Local Worker** ([#4](https://github.com/weirded/distributed-esphome/issues/4))
+- The add-on now includes a built-in build worker — no external Docker container required to get started
+- Starts paused (0 slots); increase via the Workers tab to activate
+- Great for HaOS setups where adding Docker containers is difficult
 
-**shadcn/ui Design System**
-- Full adoption of shadcn/ui with Tailwind CSS v4 and Base UI primitives
-- All modals migrated to shadcn Dialog (Editor, Log, Device Log, Rename, Delete, Connect Worker)
-- All buttons migrated to shadcn Button with warn/success/destructive variants
-- All dropdown menus use shadcn DropdownMenu (column picker, hamburger, upgrade, queue actions, ESPHome version selector)
-- Toast notifications via Sonner
-- Status indicators via shared StatusDot component
-- Badges, tabs, panels, inputs all converted to Tailwind utility classes
-- Consistent dark/light theme via CSS variable mapping
+**Choose Which Worker Compiles** ([#5](https://github.com/weirded/distributed-esphome/issues/5))
+- New "Upgrade on..." submenu in the device menu lets you pin a compile job to a specific worker
+- Useful for debugging or when certain configs only work on specific hardware
 
-**TanStack Table**
-- All three tables (Devices, Queue, Workers) use @tanstack/react-table
-- Built-in column sorting, column visibility, and row selection
-- Removed hand-rolled useSortable hook, SortableHeader component, DOM-query checkbox patterns
+**Docker Compose Support** ([#8](https://github.com/weirded/distributed-esphome/issues/8))
+- Added `docker-compose.worker.yml` for easy worker deployment
 
-**SWR Data Fetching**
-- Replaced 5 manual setInterval polling loops with useSWR hooks
-- Automatic cache, deduplication, and stale-while-revalidate
-- Immediate revalidation after actions (compile, retry, cancel)
+**Configurable Device Columns**
+- New columns: Area, Comment, Project (extracted from your YAML configs)
+- Gear icon column picker to show/hide columns; preferences saved across sessions
 
-**Worker Management**
-- Built-in local worker runs inside the add-on container (0 slots by default, increase via UI)
-- Worker slots adjustable 0-32 (0 = paused); removed separate Disable/Enable toggle
-- Debounced +/- slot controls for rapid adjustment
-- Disk space reporting with color warnings (orange >80%, red >90%)
-- Auto-eviction of unused ESPHome versions when disk is low
-- Local worker highlighted with "built-in" badge, pinned to top of list
-- Docker Compose file for easy worker deployment
-
-**UI Improvements**
-- Configurable device table columns (Area, Comment, Project) with gear icon picker
-- Consolidated device header: search + Upgrade dropdown + column picker in one row
-- Queue buttons grouped into Retry and Clear dropdowns
+**Redesigned UI**
+- Modern design system with consistent buttons, modals, dropdowns, and badges
+- Upgrade options consolidated into a single dropdown (All, All Online, Outdated, Selected)
+- Device menu restructured into Device actions, Config actions, and worker submenu
 - Search boxes on all three tabs (Devices, Queue, Workers)
-- Streamer mode: toggle blurs IPs, tokens, and sensitive data
-- Copy to Clipboard button on log modals with toast feedback
-- Close button on all modals (shadcn Dialog native)
-- "Running" column renamed to "Version"
-- Validation jobs filtered from queue display
-- Empty tabs show "0" badge instead of blank
+- Queue actions grouped into Retry and Clear dropdowns
+- Close button on all modals
+- Copy to Clipboard button on compile and live log modals
 
-**Backend**
-- Archive management: list, restore, and permanently delete archived configs
-- Terminal job auto-pruning (>1 hour old)
-- Pinned worker preserved on retry (not just OTA failures)
-- YAML metadata fallback: permissive loader for configs with git packages, simple substitution resolution
-- Server Dockerfile installs git + build deps for local worker compilation
+**Worker Improvements**
+- Simplified worker management: set slots to 0 to pause (removed separate Disable button)
+- Disk space reporting with color warnings when running low
+- Automatic cleanup of unused ESPHome versions when disk space is low
+- Built-in worker highlighted and pinned to top of list
+
+**Streamer Mode**
+- New toggle in header blurs IPs, tokens, and sensitive data — useful for streams and screenshots
+
+**Device Config Improvements**
+- Better metadata extraction for configs using git packages (area, comment, project)
+- Configs with substitution variables now resolve correctly in the device list
+
+**Other Improvements**
+- Validation output opens directly without cluttering the job queue
+- "Version" column (renamed from "Running") shows firmware version more clearly
+- Archived configs can be restored via new API endpoints
+- Stale queue entries auto-cleaned after 1 hour
+- Pinned worker preserved when retrying failed jobs
 
 **Bug Fixes**
-- 60+ fixes across bugs #90-#150 (see BUGS.md for details)
+- Fixed OTA always using known device IP address
+- Fixed timezone mismatch causing unnecessary recompiles
+- Fixed editor content sometimes being wiped during poll cycles
+- Fixed duplicate devices appearing after rename
+- Fixed HA status not matching devices with non-standard entity names
+- Fixed ESPHome install errors not showing in job log
 
 ## 1.1.0
 Major update: React UI rewrite, ESPHome dashboard-grade features, Home Assistant integration.
