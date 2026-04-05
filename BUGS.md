@@ -136,6 +136,15 @@
 
 157. FIXED (1.2.0-dev.51) - Local worker PlatformIO failures. Root cause: Alpine base image lacks glibc needed by PlatformIO toolchains. Fix: switched add-on base image from Alpine to Debian Bookworm (ghcr.io/home-assistant/*-base-debian:bookworm). Gives native glibc, gcc, Python venv support. Image is larger but local compilation works.
 
+158. Issue on local-worker: 
+
+INFO Version mismatch for tool-esptoolpy: 1.30000.201119 != 5.1.2
+INFO Reinstalling tool-esptoolpy due to version mismatch
+Error: Failed to install Python dependencies (exit code: 1)
+Error: Failed to install Python dependencies into penv
+
+
+
 ---
 
 <details>

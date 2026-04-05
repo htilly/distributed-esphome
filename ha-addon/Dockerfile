@@ -11,10 +11,15 @@ LABEL \
     io.hass.type="addon" \
     io.hass.version="${BUILD_VERSION}"
 
-# Install build deps for local worker — matches ESPHome's docker-base + build-base
+# Match ESPHome's docker-base environment for PlatformIO compatibility
 ENV UV_EXTRA_INDEX_URL=https://wheels.home-assistant.io/musllinux-index/
+ENV UV_SYSTEM_PYTHON=true
+ENV UV_INDEX_STRATEGY=unsafe-best-match
+ENV PIP_ROOT_USER_ACTION=ignore
 # gcompat provides glibc compatibility for PlatformIO's pre-built cross-compiler toolchains
 RUN apk add --no-cache bash git curl openssh-client patch build-base libffi-dev openssl-dev gcompat
+
+RUN pip3 install --no-cache-dir -U pip uv
 
 WORKDIR /app
 COPY server/requirements.txt .
