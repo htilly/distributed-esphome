@@ -186,7 +186,6 @@ export function DevicesTab({ targets, devices, workers, onCompile, onCompileOnWo
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(loadColumnVisibility);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
-  const [openMenuTarget, setOpenMenuTarget] = useState<string | null>(null);
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
@@ -416,8 +415,6 @@ export function DevicesTab({ targets, devices, workers, onCompile, onCompileOnWo
             <DeviceMenu
               target={t}
               workers={workers}
-              isOpen={openMenuTarget === t.target}
-              onOpenChange={(open) => setOpenMenuTarget(open ? t.target : null)}
               onToast={onToast}
               onDelete={setDeleteTarget}
               onRename={setRenameTarget}
@@ -641,8 +638,6 @@ function SortHeader({ label, column }: { label: string; column: { getIsSorted: (
 const DeviceMenu = memo(function DeviceMenu({
   target: t,
   workers,
-  isOpen,
-  onOpenChange,
   onToast,
   onDelete,
   onRename,
@@ -651,8 +646,6 @@ const DeviceMenu = memo(function DeviceMenu({
 }: {
   target: Target;
   workers: Worker[];
-  isOpen: boolean;
-  onOpenChange: (open: boolean) => void;
   onToast: (msg: string, type?: 'info' | 'success' | 'error') => void;
   onDelete: (target: string) => void;
   onRename: (target: string) => void;
@@ -683,7 +676,7 @@ const DeviceMenu = memo(function DeviceMenu({
     .sort((a, b) => a.hostname.localeCompare(b.hostname, undefined, { sensitivity: 'base' }));
 
   return (
-    <DropdownMenu open={isOpen} onOpenChange={onOpenChange}>
+    <DropdownMenu>
       <DropdownMenuTrigger
         className="action-menu-trigger"
         title="More actions"
@@ -742,7 +735,12 @@ const DeviceMenu = memo(function DeviceMenu({
       </DropdownMenuContent>
     </DropdownMenu>
   );
-});
+}, (prev, next) =>
+  // Only re-render if the fields DeviceMenu actually uses change
+  prev.target.target === next.target.target &&
+  prev.target.has_api_key === next.target.has_api_key &&
+  prev.workers === next.workers
+);
 
 function UnmanagedRow({ device: d, isVisible }: { device: Device; isVisible: (col: OptionalColumnId) => boolean }) {
   const statusEl = d.online
