@@ -29,7 +29,7 @@ from version_manager import VersionManager
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.2.0-dev.54"
+CLIENT_VERSION = "1.2.0-dev.55"
 
 # ---------------------------------------------------------------------------
 # System information gathering (stdlib only — no psutil dependency)
@@ -532,7 +532,10 @@ def extract_bundle(bundle_b64: str, dest_dir: str) -> None:
     """Decode and extract the base64 tar.gz bundle into dest_dir."""
     raw = base64.b64decode(bundle_b64)
     with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
-        tar.extractall(path=dest_dir, filter="data")
+        try:
+            tar.extractall(path=dest_dir, filter="data")
+        except TypeError:
+            tar.extractall(path=dest_dir)  # Python < 3.12
     logger.debug("Bundle extracted to %s", dest_dir)
 
 

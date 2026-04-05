@@ -11,25 +11,22 @@ LABEL \
     io.hass.type="addon" \
     io.hass.version="${BUILD_VERSION}"
 
-# Match ESPHome's docker-base environment for PlatformIO compatibility
-ENV UV_EXTRA_INDEX_URL=https://wheels.home-assistant.io/musllinux-index/
-ENV UV_SYSTEM_PYTHON=true
-ENV UV_INDEX_STRATEGY=unsafe-best-match
-ENV PIP_ROOT_USER_ACTION=ignore
-# gcompat provides glibc compatibility for PlatformIO's pre-built cross-compiler toolchains
-RUN apk add --no-cache bash git curl openssh-client patch build-base libffi-dev openssl-dev gcompat
-
-RUN pip3 install --no-cache-dir -U pip uv
+# Debian Bookworm: Python 3 + build deps for local worker compilation
+# Debian provides native glibc — PlatformIO cross-compiler toolchains work out of the box
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-venv python3-dev \
+    git gcc g++ make libffi-dev libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY server/requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 COPY server/ .
 COPY VERSION /app/VERSION
 
 # Bundle client code and install its dependencies for the local worker
 COPY client/ /app/client/
-RUN pip3 install --no-cache-dir -r /app/client/requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r /app/client/requirements.txt
 
 ENTRYPOINT []
 CMD ["python3", "/app/main.py"]
