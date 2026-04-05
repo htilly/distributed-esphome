@@ -122,7 +122,11 @@
 
 150. FIXED (1.2.0-dev.40) - Header icon buttons inconsistent size. Theme and streamer toggles now use fixed 28x28 rounded circles. Streamer toggle shows only icon (👁/🔒) instead of changing text length. Active state highlights with accent color.
 
+151. FIXED (1.2.0-dev.41) - Polling refresh closes open hamburger menu. Wrapped DeviceMenu in React.memo so it doesn't re-render on every poll cycle. Base UI portal keeps dropdown open across parent re-renders.
 
+152. FIXED (1.2.0-dev.41) - Editor closes without warning when there are unsaved changes. Added confirm dialog: "You have unsaved changes. Close anyway?" when dirtyLineCount > 0.
+
+153. FIXED (1.2.0-dev.41) - Local worker: xtensa-lx106-elf-g++ not found (ESP8266 cross-compiler). Root cause: PlatformIO downloads glibc-compiled toolchains but Alpine uses musl. Added `gcompat` (glibc compatibility layer) to Dockerfile.
 
 ---
 

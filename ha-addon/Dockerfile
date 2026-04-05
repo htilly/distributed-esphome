@@ -11,9 +11,11 @@ LABEL \
     io.hass.type="addon" \
     io.hass.version="${BUILD_VERSION}"
 
-# Install build dependencies for the local worker (ESPHome needs git for packages,
-# gcc/libffi for PlatformIO toolchain setup)
-RUN apk add --no-cache git gcc musl-dev libffi-dev openssl-dev
+# Install build dependencies for the local worker:
+# - git: ESPHome packages from GitHub
+# - gcc/musl-dev/libffi-dev/openssl-dev: PlatformIO toolchain compilation
+# - gcompat: glibc compatibility layer for pre-built PlatformIO toolchains (ESP8266/ESP32)
+RUN apk add --no-cache git gcc musl-dev libffi-dev openssl-dev gcompat
 
 WORKDIR /app
 COPY server/requirements.txt .

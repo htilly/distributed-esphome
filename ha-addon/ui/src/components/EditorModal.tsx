@@ -502,7 +502,12 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, o
   if (!isOpen) return null;
 
   return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+    <Dialog open onOpenChange={(open) => {
+      if (!open) {
+        if (dirtyLineCount > 0 && !window.confirm('You have unsaved changes. Close anyway?')) return;
+        onClose();
+      }
+    }}>
       <DialogContent className="dialog-xl" style={{ background: monacoTheme === 'vs' ? '#ffffff' : '#1e1e1e', border: monacoTheme === 'vs' ? '1px solid var(--border)' : '1px solid #3c3c3c' }}>
         <div className="editor-header">
           <h3>{target || ''}</h3>

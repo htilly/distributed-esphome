@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   useReactTable,
   getCoreRowModel,
@@ -635,7 +635,7 @@ function SortHeader({ label, column }: { label: string; column: { getIsSorted: (
   );
 }
 
-function DeviceMenu({
+const DeviceMenu = memo(function DeviceMenu({
   target: t,
   workers,
   onToast,
@@ -735,7 +735,7 @@ function DeviceMenu({
       </DropdownMenuContent>
     </DropdownMenu>
   );
-}
+});
 
 function UnmanagedRow({ device: d, isVisible }: { device: Device; isVisible: (col: OptionalColumnId) => boolean }) {
   const statusEl = d.online
