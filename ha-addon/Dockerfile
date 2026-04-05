@@ -13,7 +13,8 @@ LABEL \
 
 # Install build deps for local worker — matches ESPHome's docker-base + build-base
 ENV UV_EXTRA_INDEX_URL=https://wheels.home-assistant.io/musllinux-index/
-RUN apk add --no-cache bash git curl openssh-client patch build-base libffi-dev openssl-dev
+# gcompat provides glibc compatibility for PlatformIO's pre-built cross-compiler toolchains
+RUN apk add --no-cache bash git curl openssh-client patch build-base libffi-dev openssl-dev gcompat
 
 WORKDIR /app
 COPY server/requirements.txt .
