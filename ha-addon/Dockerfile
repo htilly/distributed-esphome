@@ -11,8 +11,9 @@ LABEL \
     io.hass.type="addon" \
     io.hass.version="${BUILD_VERSION}"
 
-# Install build deps for local worker — same packages ESPHome's docker-base uses
-RUN apk add --no-cache bash git curl openssh-client patch gcc musl-dev libffi-dev openssl-dev
+# Install build deps for local worker — matches ESPHome's docker-base + build-base
+ENV UV_EXTRA_INDEX_URL=https://wheels.home-assistant.io/musllinux-index/
+RUN apk add --no-cache bash git curl openssh-client patch build-base libffi-dev openssl-dev
 
 WORKDIR /app
 COPY server/requirements.txt .
