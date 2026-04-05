@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   useReactTable,
   getCoreRowModel,
@@ -186,6 +186,8 @@ export function DevicesTab({ targets, devices, workers, onCompile, onCompileOnWo
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(loadColumnVisibility);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
+  const [menuTarget, setMenuTarget] = useState<Target | null>(null);
+  const menuAnchorRef = useRef<HTMLSpanElement | null>(null);
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
@@ -412,15 +414,12 @@ export function DevicesTab({ targets, devices, workers, onCompile, onCompileOnWo
           <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
             <Button variant={upgradeVariant as 'success' | 'secondary'} size="sm" onClick={() => onCompile([t.target])}>Upgrade</Button>
             <Button variant="secondary" size="sm" onClick={() => onEdit(t.target)}>Edit</Button>
-            <DeviceMenu
-              target={t}
-              workers={workers}
-              onToast={onToast}
-              onDelete={setDeleteTarget}
-              onRename={setRenameTarget}
-              onLogs={onLogs}
-              onCompileOnWorker={onCompileOnWorker}
-            />
+            <span
+              className="action-menu-trigger"
+              title="More actions"
+              ref={menuTarget?.target === t.target ? menuAnchorRef : undefined}
+              onClick={(e) => { menuAnchorRef.current = e.currentTarget; setMenuTarget(menuTarget?.target === t.target ? null : t); }}
+            >&#8942;</span>
           </div>
         );
       },
@@ -615,6 +614,19 @@ export function DevicesTab({ targets, devices, workers, onCompile, onCompileOnWo
           onClose={() => setDeleteTarget(null)}
         />
       )}
+
+      {menuTarget && (
+        <DeviceMenu
+          target={menuTarget}
+          workers={workers}
+          onToast={onToast}
+          onDelete={(t) => { setMenuTarget(null); setDeleteTarget(t); }}
+          onRename={(t) => { setMenuTarget(null); setRenameTarget(t); }}
+          onLogs={(t) => { setMenuTarget(null); onLogs(t); }}
+          onCompileOnWorker={(t, w) => { setMenuTarget(null); onCompileOnWorker(t, w); }}
+          onClose={() => setMenuTarget(null)}
+        />
+      )}
     </div>
   );
 }
@@ -635,7 +647,7 @@ function SortHeader({ label, column }: { label: string; column: { getIsSorted: (
   );
 }
 
-const DeviceMenu = memo(function DeviceMenu({
+function DeviceMenu({
   target: t,
   workers,
   onToast,
@@ -643,6 +655,7 @@ const DeviceMenu = memo(function DeviceMenu({
   onRename,
   onLogs,
   onCompileOnWorker,
+  onClose,
 }: {
   target: Target;
   workers: Worker[];
@@ -651,6 +664,7 @@ const DeviceMenu = memo(function DeviceMenu({
   onRename: (target: string) => void;
   onLogs: (target: string) => void;
   onCompileOnWorker: (target: string, clientId: string) => void;
+  onClose: () => void;
 }) {
   async function handleCopyApiKey() {
     try {
@@ -676,11 +690,8 @@ const DeviceMenu = memo(function DeviceMenu({
     .sort((a, b) => a.hostname.localeCompare(b.hostname, undefined, { sensitivity: 'base' }));
 
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger
-        className="action-menu-trigger"
-        title="More actions"
-      >
+    <DropdownMenu open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DropdownMenuTrigger className="action-menu-trigger" style={{ display: 'none' }}>
         &#8942;
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
@@ -735,13 +746,7 @@ const DeviceMenu = memo(function DeviceMenu({
       </DropdownMenuContent>
     </DropdownMenu>
   );
-}, (prev, next) =>
-  // Only re-render if the fields DeviceMenu actually uses change
-  prev.target.target === next.target.target &&
-  prev.target.has_api_key === next.target.has_api_key &&
-  prev.workers.length === next.workers.length &&
-  prev.workers.every((w, i) => w.client_id === next.workers[i]?.client_id && w.online === next.workers[i]?.online && w.hostname === next.workers[i]?.hostname && (w.max_parallel_jobs ?? 0) === (next.workers[i]?.max_parallel_jobs ?? 0))
-);
+}
 
 function UnmanagedRow({ device: d, isVisible }: { device: Device; isVisible: (col: OptionalColumnId) => boolean }) {
   const statusEl = d.online
