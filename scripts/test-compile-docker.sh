@@ -32,11 +32,12 @@ run_compile_test() {
   echo ""
 
   docker run --rm \
+    --entrypoint /bin/bash \
     -v "${FIXTURES}:/config:ro" \
     -v esphome-test-cache:/esphome-versions \
     -e ESPHOME_VERSION="${ESPHOME_VERSION}" \
     "${image}" \
-    /bin/bash -c "
+    -c "
       pip install --no-cache-dir 'esphome==${ESPHOME_VERSION}' && \
       cd /config && \
       PASS=0; FAIL=0; FAILED=''; \
