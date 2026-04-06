@@ -67,8 +67,9 @@ async def auth_middleware(request: web.Request, handler):
 
         cfg: AppConfig = request.app["config"]
         if cfg.token:
+            from helpers import constant_time_compare  # noqa: PLC0415
             auth_header = request.headers.get("Authorization", "")
-            if auth_header == f"Bearer {cfg.token}":
+            if auth_header.startswith("Bearer ") and constant_time_compare(auth_header[7:], cfg.token):
                 return await handler(request)
         else:
             # No token configured — allow all (development mode)

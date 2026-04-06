@@ -151,6 +151,12 @@ LIB.1–3 require a new Docker image (`psutil` needs C compilation). LIB.0 adds 
 - [ ] **LIB.2 `tenacity` for client retry logic** — decorator-based retries + exponential backoff
 - [ ] **LIB.3 `pyyaml` for client network diagnostics** — replace fragile regex YAML parsing
 
+### Security Hardening
+
+- [ ] **SEC.1 Timing-safe token comparison** — `api.py` uses `==` for Bearer token check; replace with `secrets.compare_digest()` to prevent timing attacks. ESPHome uses `hmac.compare_digest` — we should match.
+- [ ] **SEC.2 Bounded log storage** — workers can stream unlimited log data via `POST /api/v1/jobs/{id}/log`, risking OOM. Add a max log size (e.g. 512KB per job), truncate with a marker.
+- [ ] **SEC.3 Validate max_parallel_jobs on registration** — UI validates 0-32 but `api.py` worker registration accepts any integer. Add bounds check to match.
+
 ### Bug Fixes
 
 - [ ] **BF.1 Duplicate devices with hyphens** (BUGS #159, GitHub #2) — `_map_target()` does exact string comparison but ESPHome normalizes hyphens to underscores for mDNS. Normalize before comparing.
@@ -191,6 +197,14 @@ Theme: **Full replacement for the stock ESPHome dashboard.** Every feature the b
 ### Build Management
 
 - [ ] **5.1 Clean build artifacts** — dispatch `esphome clean` to worker, per-device and clean-all
+
+### Thread / IPv6 Support
+
+- [ ] **4.6 Thread device IP display** (GitHub #17) — Thread devices use IPv6 and don't show an IP address in the dashboard. Display IPv6 addresses and add a wifi/thread indicator to the device row.
+
+### Queue UX
+
+- [ ] **6.7 Default queue sort by time** (GitHub #16) — sort queue tab by compile time (most recent first) by default, so latest jobs are always on top
 
 ### Device Adoption
 

@@ -46,7 +46,8 @@ def _check_auth(request: web.Request) -> bool:
         if peer_ip == "172.30.32.2":
             return True
     auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer ") and auth_header[7:] == cfg.token:
+    from helpers import constant_time_compare  # noqa: PLC0415
+    if auth_header.startswith("Bearer ") and constant_time_compare(auth_header[7:], cfg.token):
         return True
     return False
 
@@ -67,7 +68,8 @@ async def _register_worker_handler(request: web.Request) -> web.Response:
     platform = body.get("platform", "unknown")
     client_version = body.get("client_version")
     existing_client_id = body.get("client_id")
-    max_parallel_jobs = int(body.get("max_parallel_jobs", 1))
+    from helpers import clamp  # noqa: PLC0415
+    max_parallel_jobs = clamp(int(body.get("max_parallel_jobs", 1)), 0, 32)
     system_info = body.get("system_info") if isinstance(body.get("system_info"), dict) else None
     registry = request.app["registry"]
     client_id = registry.register(

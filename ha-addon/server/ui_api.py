@@ -11,6 +11,7 @@ import aiohttp
 from aiohttp import web
 
 from app_config import AppConfig
+from helpers import safe_resolve, json_error
 from device_poller import Device
 from job_queue import JobState
 from scanner import scan_configs, get_esphome_version, set_esphome_version, get_device_metadata
@@ -629,13 +630,11 @@ async def get_target_content(request: web.Request) -> web.Response:
     filename = request.match_info["filename"]
     cfg = _cfg(request)
     config_dir = Path(cfg.config_dir)
-    path = (config_dir / filename).resolve()
-    try:
-        path.relative_to(config_dir.resolve())
-    except ValueError:
-        return web.json_response({"error": "Invalid filename"}, status=400)
+    path = safe_resolve(config_dir, filename)
+    if path is None:
+        return json_error("Invalid filename")
     if not path.exists():
-        return web.json_response({"error": "File not found"}, status=404)
+        return json_error("File not found", 404)
     try:
         content = path.read_text(encoding="utf-8")
     except Exception as exc:
@@ -649,15 +648,13 @@ async def save_target_content(request: web.Request) -> web.Response:
     filename = request.match_info["filename"]
     cfg = _cfg(request)
     config_dir = Path(cfg.config_dir)
-    path = (config_dir / filename).resolve()
-    try:
-        path.relative_to(config_dir.resolve())
-    except ValueError:
-        return web.json_response({"error": "Invalid filename"}, status=400)
+    path = safe_resolve(config_dir, filename)
+    if path is None:
+        return json_error("Invalid filename")
     try:
         body = await request.json()
     except Exception:
-        return web.json_response({"error": "Invalid JSON"}, status=400)
+        return json_error("Invalid JSON")
     content = body.get("content", "")
     try:
         path.write_text(content, encoding="utf-8")
@@ -676,16 +673,12 @@ async def delete_target(request: web.Request) -> web.Response:
     filename = request.match_info["filename"]
     cfg = _cfg(request)
     config_dir = Path(cfg.config_dir)
-    path = (config_dir / filename).resolve()
-
-    # Security: ensure path is within config_dir
-    try:
-        path.relative_to(config_dir.resolve())
-    except ValueError:
-        return web.json_response({"error": "Invalid filename"}, status=400)
+    path = safe_resolve(config_dir, filename)
+    if path is None:
+        return json_error("Invalid filename")
 
     if not path.exists():
-        return web.json_response({"error": "File not found"}, status=404)
+        return json_error("File not found", 404)
 
     archive = request.rel_url.query.get("archive", "true") == "true"
 
@@ -739,15 +732,12 @@ async def restore_archive(request: web.Request) -> web.Response:
     cfg = _cfg(request)
     config_dir = Path(cfg.config_dir)
     archive_dir = config_dir / ".archive"
-    src = (archive_dir / filename).resolve()
-
-    try:
-        src.relative_to(archive_dir.resolve())
-    except ValueError:
-        return web.json_response({"error": "Invalid filename"}, status=400)
+    src = safe_resolve(archive_dir, filename)
+    if src is None:
+        return json_error("Invalid filename")
 
     if not src.exists():
-        return web.json_response({"error": "Archived file not found"}, status=404)
+        return json_error("Archived file not found", 404)
 
     dest = config_dir / filename
     if dest.exists():
@@ -768,15 +758,12 @@ async def delete_archived(request: web.Request) -> web.Response:
     filename = request.match_info["filename"]
     cfg = _cfg(request)
     archive_dir = Path(cfg.config_dir) / ".archive"
-    path = (archive_dir / filename).resolve()
-
-    try:
-        path.relative_to(archive_dir.resolve())
-    except ValueError:
-        return web.json_response({"error": "Invalid filename"}, status=400)
+    path = safe_resolve(archive_dir, filename)
+    if path is None:
+        return json_error("Invalid filename")
 
     if not path.exists():
-        return web.json_response({"error": "File not found"}, status=404)
+        return json_error("File not found", 404)
 
     try:
         path.unlink()
@@ -794,7 +781,7 @@ async def rename_target(request: web.Request) -> web.Response:
     try:
         body = await request.json()
     except Exception:
-        return web.json_response({"error": "Invalid JSON"}, status=400)
+        return json_error("Invalid JSON")
 
     new_name = body.get("new_name", "").strip()
     if not new_name:
@@ -802,29 +789,21 @@ async def rename_target(request: web.Request) -> web.Response:
 
     cfg = _cfg(request)
     config_dir = Path(cfg.config_dir)
-    old_path = (config_dir / filename).resolve()
-
-    # Security: ensure path is within config_dir
-    try:
-        old_path.relative_to(config_dir.resolve())
-    except ValueError:
-        return web.json_response({"error": "Invalid filename"}, status=400)
+    old_path = safe_resolve(config_dir, filename)
+    if old_path is None:
+        return json_error("Invalid filename")
 
     if not old_path.exists():
-        return web.json_response({"error": "File not found"}, status=404)
+        return json_error("File not found", 404)
 
     # Derive new filename: lowercase, spaces → hyphens, ensure .yaml extension
     new_filename = new_name.replace(" ", "-").lower()
     if not new_filename.endswith(".yaml"):
         new_filename += ".yaml"
 
-    new_path = (config_dir / new_filename).resolve()
-
-    # Security: ensure new path is also within config_dir
-    try:
-        new_path.relative_to(config_dir.resolve())
-    except ValueError:
-        return web.json_response({"error": "Invalid new_name"}, status=400)
+    new_path = safe_resolve(config_dir, new_filename)
+    if new_path is None:
+        return json_error("Invalid new_name")
 
     if new_path.exists() and new_path != old_path:
         return web.json_response({"error": f"{new_filename} already exists"}, status=409)
