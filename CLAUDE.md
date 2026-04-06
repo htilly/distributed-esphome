@@ -59,7 +59,7 @@ The server is an `aiohttp` async application with two authentication tiers:
 
 **Component responsibilities:**
 - `main.py` — App setup, auth middleware, background timeout checker (every 30s), HA Ingress compatibility (X-Ingress-Path header injection)
-- `job_queue.py` — In-memory job queue persisted to `/data/queue.json`. Jobs time out and retry up to 3 times before permanently failing.
+- `job_queue.py` — In-memory job queue persisted to `/data/queue.json`. Job state machine: `PENDING → ASSIGNED → RUNNING → SUCCESS/FAILED`. Jobs time out and retry up to 3 times before permanently failing. On server restart, `ASSIGNED`/`RUNNING` jobs reset to `PENDING`.
 - `scanner.py` — Discovers `.yaml` targets in `/config/esphome/` (excluding `secrets.yaml` from the target list but including it in bundles). `create_bundle()` produces a tar.gz of the full config directory.
 - `registry.py` — In-memory build worker registry (`WorkerRegistry`); workers are considered online if last heartbeat was within 30s.
 - `device_poller.py` — Discovers ESPHome devices via `_esphomelib._tcp` mDNS, polls them every 60s via `aioesphomeapi` for running firmware version and compilation time. Maps devices to YAML targets using a name map built from parsed `esphome.name` fields (handles cases where filename differs from device name).
@@ -81,7 +81,22 @@ When a worker claims a job, the server calls `scanner.create_bundle()` which tar
 
 Server config is loaded from `/data/options.json` (HA add-on) with environment variable fallbacks. Key env vars: `ESPHOME_CONFIG_DIR`, `SERVER_TOKEN`, `JOB_TIMEOUT` (600s), `OTA_TIMEOUT` (120s), `PORT` (8765).
 
-Worker config is all via environment: `SERVER_URL`, `SERVER_TOKEN`, `POLL_INTERVAL` (5s), `JOB_TIMEOUT` (600s), `MAX_ESPHOME_VERSIONS` (3).
+Worker config is all via environment:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SERVER_URL` | required | e.g. `http://homeassistant.local:8765` |
+| `SERVER_TOKEN` | required | Shared auth token |
+| `POLL_INTERVAL` | `5` | Seconds between job polls when idle |
+| `HEARTBEAT_INTERVAL` | `10` | Seconds between heartbeats |
+| `JOB_TIMEOUT` | `600` | Compile timeout in seconds |
+| `OTA_TIMEOUT` | `120` | OTA upload timeout in seconds |
+| `MAX_ESPHOME_VERSIONS` | `3` | Max cached ESPHome versions on disk |
+| `MAX_PARALLEL_JOBS` | `2` | Concurrent build jobs per worker (0 = paused) |
+| `HOSTNAME` | system hostname | Worker name shown in UI |
+| `ESPHOME_SEED_VERSION` | — | Pre-install this ESPHome version at startup |
+| `ESPHOME_BIN` | — | Use this binary instead of the version-manager venvs |
+| `HOST_PLATFORM` | — | Override detected OS in UI (e.g. `macOS 15.3 (Apple M1 Pro)`) |
 
 ## Test Setup
 
