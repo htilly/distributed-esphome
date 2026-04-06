@@ -6,7 +6,6 @@ import base64
 import io
 import logging
 import os
-import platform
 import shutil
 import socket
 import subprocess
@@ -22,6 +21,7 @@ import requests
 
 
 from version_manager import VersionManager
+from sysinfo import collect_system_info
 
 # ---------------------------------------------------------------------------
 # Client version — must match the add-on VERSION file; bumped on each release.
@@ -30,227 +30,6 @@ from version_manager import VersionManager
 # ---------------------------------------------------------------------------
 
 CLIENT_VERSION = "1.3.0-dev.1"
-
-# ---------------------------------------------------------------------------
-# System information gathering (stdlib only — no psutil dependency)
-# ---------------------------------------------------------------------------
-
-# Captured at process start so uptime can be computed on each heartbeat.
-_PROCESS_START_TIME: float = time.monotonic()
-
-
-def _benchmark_cpu() -> int:
-    """Run a quick CPU benchmark. Returns a relative performance score (SHA256 ops/sec / 1000)."""
-    import hashlib  # noqa: PLC0415
-    data = b"benchmark" * 1000
-    count = 0
-    deadline = time.monotonic() + 1.0  # run for 1 second
-    while time.monotonic() < deadline:
-        hashlib.sha256(data).digest()
-        count += 1
-    return count
-
-
-# Computed once at startup; included in every heartbeat as a relative CPU score.
-_CPU_PERF_SCORE: int = _benchmark_cpu()
-
-
-def _get_os_version() -> str:
-    """Return a human-readable OS version string using only stdlib."""
-    system = platform.system()
-
-    if system == "Darwin":
-        # e.g. "macOS 15.3"
-        mac_ver = platform.mac_ver()[0]
-        return f"macOS {mac_ver}" if mac_ver else "macOS"
-
-    if system == "Linux":
-        # Parse /etc/os-release for NAME and VERSION_ID (most distros)
-        os_release: dict[str, str] = {}
-        try:
-            with open("/etc/os-release", encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    line = line.strip()
-                    if "=" in line:
-                        key, _, val = line.partition("=")
-                        os_release[key.strip()] = val.strip().strip('"')
-        except OSError:
-            pass
-
-        name = os_release.get("NAME") or os_release.get("ID", "")
-        version = os_release.get("VERSION_ID", "")
-        if name and version:
-            return f"{name} {version}"
-        if name:
-            return name
-
-        # Fallback for minimal containers without /etc/os-release
-        kernel = platform.release()
-        return f"Linux {kernel}" if kernel else "Linux"
-
-    # Windows or other
-    return platform.platform()
-
-
-def _get_cpu_model() -> str:
-    """Return CPU model string using stdlib and /proc/cpuinfo or sysctl."""
-    system = platform.system()
-
-    if system == "Darwin":
-        try:
-            result = subprocess.run(
-                ["sysctl", "-n", "machdep.cpu.brand_string"],
-                capture_output=True, text=True, timeout=3,
-            )
-            model = result.stdout.strip()
-            if model:
-                return model
-        except Exception:
-            pass
-        # Apple Silicon reports via hw.model (e.g. "Apple M1 Pro")
-        try:
-            result = subprocess.run(
-                ["sysctl", "-n", "hw.model"],
-                capture_output=True, text=True, timeout=3,
-            )
-            model = result.stdout.strip()
-            if model:
-                return model
-        except Exception:
-            pass
-
-    if system == "Linux":
-        # Try /proc/cpuinfo — "model name" on x86, "Model name" or "Hardware" on ARM
-        try:
-            with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    if ":" in line:
-                        key, _, val = line.partition(":")
-                        key = key.strip().lower()
-                        if key in ("model name", "hardware", "cpu model"):
-                            val = val.strip()
-                            if val:
-                                return val
-        except OSError:
-            pass
-
-    # Generic fallback
-    machine = platform.machine()
-    processor = platform.processor()
-    return processor or machine or "Unknown"
-
-
-def _get_total_memory_bytes() -> Optional[int]:
-    """Return total physical memory in bytes using stdlib only."""
-    system = platform.system()
-
-    if system == "Linux":
-        # Parse /proc/meminfo
-        try:
-            with open("/proc/meminfo", encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    if line.startswith("MemTotal:"):
-                        # Format: "MemTotal:     16384000 kB"
-                        parts = line.split()
-                        if len(parts) >= 2:
-                            kb = int(parts[1])
-                            return kb * 1024
-        except (OSError, ValueError):
-            pass
-
-    if system == "Darwin":
-        try:
-            result = subprocess.run(
-                ["sysctl", "-n", "hw.memsize"],
-                capture_output=True, text=True, timeout=3,
-            )
-            return int(result.stdout.strip())
-        except Exception:
-            pass
-
-    return None
-
-
-def _format_memory(bytes_: int) -> str:
-    """Return a human-readable memory string, e.g. '16 GB' or '512 MB'."""
-    gb = bytes_ / (1024 ** 3)
-    if gb >= 1:
-        # Round to nearest whole GB for clean display
-        return f"{round(gb)} GB"
-    mb = bytes_ / (1024 ** 2)
-    return f"{round(mb)} MB"
-
-
-def _format_uptime(seconds: float) -> str:
-    """Return uptime as a compact human-readable string, e.g. '2d 3h' or '45m'."""
-    total = int(seconds)
-    days, rem = divmod(total, 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes, secs = divmod(rem, 60)
-    if days:
-        return f"{days}d {hours}h"
-    if hours:
-        return f"{hours}h {minutes}m"
-    if minutes:
-        return f"{minutes}m"
-    return f"{secs}s"
-
-
-def _get_cpu_usage() -> Optional[float]:
-    """Return CPU usage as a percentage (0-100) using load average.
-
-    Uses os.getloadavg() (1-minute average) divided by core count.
-    Works in Docker on both Linux and macOS without /proc/stat sampling.
-    """
-    try:
-        load1, _, _ = os.getloadavg()
-        cores = os.cpu_count() or 1
-        return round(min(load1 / cores * 100, 100.0), 1)
-    except Exception:
-        return None
-
-
-def collect_system_info() -> dict:
-    """Gather hardware/OS details using stdlib only. All fields are best-effort.
-
-    When running in Docker on a non-Linux host, the container sees the VM's
-    Linux.  Set ``HOST_PLATFORM`` to override ``os_version`` with the actual
-    host OS (e.g. ``macOS 15.3 (Apple M1 Pro)``).
-    """
-    cpu_count = os.cpu_count()
-    mem_bytes = _get_total_memory_bytes()
-
-    os_version = os.environ.get("HOST_PLATFORM") or _get_os_version()
-
-    # Disk space on the build volume
-    disk_total: Optional[str] = None
-    disk_free: Optional[str] = None
-    disk_pct: Optional[int] = None
-    try:
-        st = os.statvfs(_ESPHOME_VERSIONS_DIR)
-        total = st.f_frsize * st.f_blocks
-        free = st.f_frsize * st.f_bavail
-        used_pct = round((1 - free / total) * 100) if total > 0 else None
-        disk_total = _format_memory(total)
-        disk_free = _format_memory(free)
-        disk_pct = used_pct
-    except Exception:
-        pass
-
-    info: dict = {
-        "cpu_arch": platform.machine(),
-        "os_version": os_version,
-        "cpu_cores": cpu_count,
-        "cpu_model": _get_cpu_model(),
-        "total_memory": _format_memory(mem_bytes) if mem_bytes is not None else None,
-        "uptime": _format_uptime(time.monotonic() - _PROCESS_START_TIME),
-        "perf_score": _CPU_PERF_SCORE,
-        "cpu_usage": _get_cpu_usage(),
-        "disk_total": disk_total,
-        "disk_free": disk_free,
-        "disk_used_pct": disk_pct,
-    }
-    return info
 
 
 # ---------------------------------------------------------------------------
@@ -398,7 +177,7 @@ def _load_client_id() -> Optional[str]:
                 if cid:
                     return cid
     except OSError:
-        pass
+        logger.debug("Could not read client_id file: %s", _CLIENT_ID_FILE, exc_info=True)
     return None
 
 
@@ -418,7 +197,7 @@ def _clear_client_id() -> None:
         if os.path.exists(_CLIENT_ID_FILE):
             os.remove(_CLIENT_ID_FILE)
     except OSError:
-        pass
+        logger.debug("Could not remove client_id file: %s", _CLIENT_ID_FILE, exc_info=True)
 
 
 def deregister(client_id: str) -> None:
@@ -442,7 +221,7 @@ def register() -> str:
     existing_id = _load_client_id()
     while True:
         try:
-            sysinfo = collect_system_info()
+            sysinfo = collect_system_info(_ESPHOME_VERSIONS_DIR)
             payload: dict = {
                 "hostname": HOSTNAME,
                 "platform": PLATFORM,
@@ -487,7 +266,7 @@ def heartbeat_loop(client_id: str, stop_event: threading.Event) -> None:
         try:
             resp = post("/api/v1/workers/heartbeat", {
                 "client_id": client_id,
-                "system_info": collect_system_info(),
+                "system_info": collect_system_info(_ESPHOME_VERSIONS_DIR),
             })
             if resp.status_code == 401:
                 _on_auth_failed()
@@ -624,7 +403,7 @@ def _ota_network_diagnostics(target_path: str, cwd: str, env: dict) -> str:
         if port_match:
             ota_port = int(port_match.group(1))
     except Exception:
-        pass
+        logger.debug("Could not parse device address/port from YAML %s", target_path, exc_info=True)
 
     # Extract device name for DNS fallback
     device_name = None
@@ -636,7 +415,7 @@ def _ota_network_diagnostics(target_path: str, cwd: str, env: dict) -> str:
                     device_name = m.group(1)
                     break
     except Exception:
-        pass
+        logger.debug("Could not extract device name from YAML %s", target_path, exc_info=True)
 
     # If use_address is a hostname (not IP), try to resolve it
     if device_addr and not _re.match(r'\d+\.\d+\.\d+\.\d+$', device_addr):
@@ -716,7 +495,7 @@ def _ota_network_diagnostics(target_path: str, cwd: str, env: dict) -> str:
         sock.close()
         lines.append(f"Worker IP: {our_ip} (source for reaching {device_addr})")
     except Exception:
-        pass
+        logger.debug("Could not determine worker IP for OTA diagnostics", exc_info=True)
 
     # Docker network check
     try:
@@ -729,9 +508,9 @@ def _ota_network_diagnostics(target_path: str, cwd: str, env: dict) -> str:
                 if "docker" in cgroup:
                     lines.append("Network mode: bridge (NAT) — consider --network host if OTA fails consistently")
             except Exception:
-                pass
+                logger.debug("Could not read /proc/1/cgroup for Docker network check", exc_info=True)
     except Exception:
-        pass
+        logger.debug("Docker environment check failed", exc_info=True)
 
     diag_text = "\n".join(lines)
     logger.info("OTA diagnostics for %s:\n%s", device_addr, diag_text)
@@ -892,7 +671,7 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
             shutil.rmtree(tmp_dir, ignore_errors=True)
             logger.debug("Cleaned up temp dir %s", tmp_dir)
         except Exception:
-            pass
+            logger.debug("Failed to clean up temp dir %s", tmp_dir, exc_info=True)
 
 
 def _colorize_log_line(line: str) -> str:
@@ -941,7 +720,7 @@ def _run_subprocess(
         try:
             post(f"/api/v1/jobs/{job_id}/log", {"lines": text}, timeout=5)
         except Exception:
-            pass  # non-critical
+            logger.debug("Log flush to server failed for job %s", job_id, exc_info=True)
 
     try:
         proc = subprocess.Popen(
@@ -959,7 +738,7 @@ def _run_subprocess(
         try:
             proc.kill()
         except Exception:
-            pass
+            logger.debug("Failed to kill timed-out subprocess for %s", label, exc_info=True)
 
     timer = threading.Timer(timeout, _kill_on_timeout)
     timer.start()
@@ -1001,7 +780,7 @@ def _flush_log_text(job_id: str, text: str) -> None:
     try:
         post(f"/api/v1/jobs/{job_id}/log", {"lines": text}, timeout=5)
     except Exception:
-        pass
+        logger.debug("Log text flush failed for job %s", job_id, exc_info=True)
 
 
 def _report_status(job_id: str, status_text: str) -> None:
@@ -1009,7 +788,7 @@ def _report_status(job_id: str, status_text: str) -> None:
     try:
         post(f"/api/v1/jobs/{job_id}/status", {"status_text": status_text}, timeout=5)
     except Exception:
-        pass  # Non-critical; never block job execution on a status update failure
+        logger.debug("Status update failed for job %s (%s)", job_id, status_text, exc_info=True)
 
 
 def _submit_result(
@@ -1130,7 +909,7 @@ def _initial_version_check(client_id: str) -> None:
     try:
         resp = post("/api/v1/workers/heartbeat", {
             "client_id": client_id,
-            "system_info": collect_system_info(),
+            "system_info": collect_system_info(_ESPHOME_VERSIONS_DIR),
         }, timeout=10)
         if resp.ok:
             sv = resp.json().get("server_client_version")
