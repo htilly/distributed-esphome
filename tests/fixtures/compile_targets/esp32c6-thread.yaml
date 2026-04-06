@@ -9,6 +9,6 @@ esp32:
     type: esp-idf
 
 openthread:
-  network_key: !secret openthread_network_key
+  tlv: !secret openthread_tlv
 
 logger:
