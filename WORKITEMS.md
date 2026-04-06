@@ -96,7 +96,7 @@ Fixture YAML configs that cover every supported ESPHome platform/framework combi
 
 117 existing tests. Main gaps: api.py, ui_api.py, main.py have low coverage.
 
-- [ ] **T.0 Fix test anti-patterns** — redundant sys.path, hardcoded /tmp, sync async wrappers, module-level mocking
+- [x] **T.0 Fix test anti-patterns** *(1.3.0-dev)* — removed redundant sys.path from 7 files, replaced hardcoded /tmp with tmp_path, converted test_queue.py to native async tests (167 tests total)
 - [x] **T.1 Auth middleware tests** *(1.3.0-dev)* — 13 tests in `tests/test_auth.py`: Bearer token, Ingress trust, dev bypass
 - [x] **T.2 Worker API tests** *(1.3.0-dev)* — 37 tests in `tests/test_api.py`: registration, heartbeat, scheduling, pinned jobs, result submission
 - [ ] **T.3 UI API tests** (~23) — targets, compile, config CRUD, rename, queue management
@@ -106,11 +106,11 @@ Fixture YAML configs that cover every supported ESPHome platform/framework combi
 
 End-to-end testing of the web UI using Playwright.
 
-- [ ] **PW.1 Playwright setup** — install Playwright, configure test runner, add to CI. Test against a mock server or the real server with fixture data.
-- [ ] **PW.2 Smoke tests** — page loads, all three tabs render, header elements present
-- [ ] **PW.3 Device tab interactions** — search/filter, column picker, sort, multi-select, upgrade button states
-- [ ] **PW.4 Queue tab interactions** — job badges, retry/cancel/clear actions, log modal opens
-- [ ] **PW.5 Workers tab interactions** — slot controls, enable/disable, connect worker modal
+- [x] **PW.1 Playwright setup** *(1.3.0-dev)* — `@playwright/test`, Vite preview server, route-intercepted mock API
+- [x] **PW.2 Smoke tests** *(1.3.0-dev)* — 10 tests: page load, header, all tabs, tab counts, version badge
+- [x] **PW.3 Device tab interactions** *(1.3.0-dev)* — 5 tests: search/filter, editor modal, theme toggle, upgrade button
+- [x] **PW.4 Queue tab interactions** *(1.3.0-dev)* — 4 tests: state badges, search, log modal, worker hostname
+- [x] **PW.5 Workers tab interactions** *(1.3.0-dev)* — 5 tests: hostnames, connect modal, system info
 - [ ] **PW.6 Editor modal** — open, edit YAML, save, validate, dirty state warning
 - [ ] **PW.7 Theme and responsiveness** — dark/light toggle, narrow viewport behavior
 
