@@ -124,13 +124,13 @@ Worker config is all via environment:
 Follow `RELEASE_CHECKLIST.md` for the full step-by-step process. Key steps:
 - Use `bash scripts/bump-version.sh X.Y.Z` for the stable version
 - Finalize `ha-addon/CHANGELOG.md` — consolidate dev changes into a clean release entry
-  (use `WORKITEMS.md` and `BUGS.md` as source material, group by category)
+  (use `dev-plans/WORKITEMS-X.Y.md` as source material — it has both the work items and the bug fixes for the release; group by category)
 - Update `README.md` and `ha-addon/DOCS.md` — ensure they accurately describe the current feature set, configuration options, and setup instructions
 - The pre-push hook enforces a changelog entry when pushing to `main`
 - Tag the release: `git tag vX.Y.Z && git push origin vX.Y.Z`
 - GHCR images are published automatically on push to `main`
 
-**Changelog is NOT updated during development on `develop`.** The WORKITEMS.md and BUGS.md files track progress with version numbers. The changelog is written once at release time.
+**Changelog is NOT updated during development on `develop`.** The `dev-plans/WORKITEMS-X.Y.md` files track progress with version numbers (work items + bug fixes for each release). The changelog is written once at release time.
 
 ## Documentation
 
@@ -176,12 +176,15 @@ cd ha-addon/ui && npx vite         # dev server
 
 ## Project Tracking
 
-- `WORKITEMS.md` — feature roadmap organized by release, with checkboxes
-- `BUGS.md` — numbered bug log with status (FIXED/IN PROGRESS/INVESTIGATING) and version tags
+All roadmap and bug tracking lives in `dev-plans/`:
+
+- `dev-plans/README.md` — index of all the files
+- `dev-plans/WORKITEMS-X.Y.md` — one file per release. Each file mixes feature work items (with checkboxes) and bug fixes (numbered, with FIXED/WONTFIX/etc. status). Bug numbers are global and monotonic across releases.
+- `dev-plans/WORKITEMS-1.3.md` — **current release.** Open bugs go at the bottom under "Open Bugs", folded into the Bug Fixes list as they land.
+- `dev-plans/PRD.md` — product requirements document for the full ESPHome dashboard replacement
 - `RELEASE_CHECKLIST.md` — step-by-step release process (what Claude does vs. what the human does)
-- `PRD.md` — product requirements document for the full ESPHome dashboard replacement
 
 **Always update tracking files when completing work:**
-- When a work item from `WORKITEMS.md` is done, mark it `[x]` and add the version tag (e.g. `*(1.3.0-dev)*`)
-- When a bug from `BUGS.md` is fixed, update its status to `FIXED` and add the version (e.g. `FIXED in 1.2.0`)
+- When a work item is done, mark it `[x]` and add the specific version tag (e.g. `*(1.3.0-dev.7)*` — use the actual dev.N, not the generic `dev`)
+- When a bug is fixed, update its status to `FIXED (X.Y.Z-dev.N)` and move it from "Open Bugs" into the Bug Fixes list
 - Do this immediately after the work is complete, not deferred to later
