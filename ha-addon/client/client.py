@@ -29,7 +29,7 @@ from sysinfo import collect_system_info
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.3.0-dev.6"
+CLIENT_VERSION = "1.3.0-dev.7"
 
 
 # ---------------------------------------------------------------------------
@@ -479,7 +479,7 @@ def _ota_network_diagnostics(target_path: str, cwd: str, env: dict) -> str:
             ["ping", "-c", "3", "-W", "2", device_addr],
             capture_output=True, text=True, timeout=10,
         )
-        ping_summary = [l for l in ping_result.stdout.splitlines() if "packet" in l.lower() or "rtt" in l.lower() or "round-trip" in l.lower()]
+        ping_summary = [ln for ln in ping_result.stdout.splitlines() if "packet" in ln.lower() or "rtt" in ln.lower() or "round-trip" in ln.lower()]
         for line in ping_summary:
             lines.append(f"Ping: {line.strip()}")
         if ping_result.returncode != 0 and not ping_summary:
@@ -753,7 +753,7 @@ def _run_subprocess(
                 break
             text = chunk.decode("utf-8", errors="replace")
             # Colorize log lines for xterm.js display
-            colored = "\n".join(_colorize_log_line(l) for l in text.split("\n"))
+            colored = "\n".join(_colorize_log_line(ln) for ln in text.split("\n"))
             log_chunks.append(colored)
             flush_buffer.append(colored)
             now = time.monotonic()

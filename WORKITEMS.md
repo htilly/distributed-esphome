@@ -117,10 +117,10 @@ End-to-end testing of the web UI using Playwright.
 ### CI / GitHub Actions
 
 - [x] **CI.1 Run E2E tests in CI** *(1.3.0-dev)* — `.github/workflows/ci.yml` runs full test suite (removed `--ignore` filters)
-- [ ] **CI.2 Add test coverage reporting** — `pytest-cov`
-- [ ] **CI.3 Add ruff linting**
+- [x] **CI.2 Add test coverage reporting** *(1.3.0-dev)* — `pytest-cov` with term-missing + HTML artifact upload (42% baseline)
+- [x] **CI.3 Add ruff linting** *(1.3.0-dev)* — `ruff check` on server + client code in CI; fixed 6 lint errors (unused imports, ambiguous vars)
 - [x] **CI.4 Add frontend build+lint job** *(1.3.0-dev)* — `frontend` job in CI: `npm ci && npm run build`
-- [ ] **CI.5 Run Playwright tests in CI** — headless browser in GitHub Actions
+- [x] **CI.5 Run Playwright tests in CI** *(1.3.0-dev)* — Chromium install + `playwright test` in frontend job, failure artifacts uploaded
 
 ### Python Codebase Cleanup
 

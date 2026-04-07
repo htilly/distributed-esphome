@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Optional
 logger = logging.getLogger(__name__)
 
 try:
-    from zeroconf import ServiceBrowser, ServiceStateChange, Zeroconf
+    from zeroconf import ServiceBrowser, Zeroconf
     from zeroconf.asyncio import AsyncZeroconf
     ZEROCONF_AVAILABLE = True
 except ImportError:
