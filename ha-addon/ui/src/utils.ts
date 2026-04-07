@@ -9,13 +9,6 @@ export function stripYaml(s: string | undefined | null): string {
   return s ? s.replace(/\.ya?ml$/i, '') : (s ?? '');
 }
 
-/** Mask an IP address (IPv4 or IPv6) for streamer/privacy mode. */
-export function maskIp(ip: string | undefined | null): string {
-  if (!ip) return '—';
-  if (ip.includes(':')) return '****:****:****:****';
-  return '***.***.***.***';
-}
-
 export function fmtDuration(secs: number | null | undefined): string {
   if (secs == null) return '—';
   const s = Math.round(secs);

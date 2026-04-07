@@ -11,7 +11,7 @@ import {
 } from '@tanstack/react-table';
 import { getApiKey, restartDevice } from '../api/client';
 import type { Device, Target, Worker } from '../types';
-import { maskIp, stripYaml, timeAgo } from '../utils';
+import { stripYaml, timeAgo } from '../utils';
 import { StatusDot } from './StatusDot';
 import { Button } from './ui/button';
 import {
@@ -338,10 +338,11 @@ export function DevicesTab({ targets, devices, workers, streamerMode, onCompile,
       id: 'ip',
       header: ({ column }) => <SortHeader label="IP" column={column} />,
       cell: ({ row: { original: t } }) => {
+        // In streamer mode: still blur via .sensitive CSS, but disable the
+        // link so screenshots can't be click-through targets.
         const showIpLink = !streamerMode && t.has_web_server && t.online && t.ip_address;
-        const ipText = streamerMode ? maskIp(t.ip_address) : (t.ip_address || '—');
         return (
-          <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
+          <span style={{ fontFamily: 'monospace', fontSize: 12 }} className="sensitive">
             {showIpLink
               ? (
                 <a
@@ -350,10 +351,10 @@ export function DevicesTab({ targets, devices, workers, streamerMode, onCompile,
                   rel="noopener"
                   className="ip-link"
                 >
-                  {ipText}<span style={{ fontSize: 10 }}>&#8599;</span>
+                  {t.ip_address}<span style={{ fontSize: 10 }}>&#8599;</span>
                 </a>
               )
-              : <span style={{ color: 'var(--text-muted)' }}>{ipText}</span>}
+              : <span style={{ color: 'var(--text-muted)' }}>{t.ip_address || '—'}</span>}
           </span>
         );
       },
@@ -596,7 +597,7 @@ export function DevicesTab({ targets, devices, workers, streamerMode, onCompile,
                     </tr>
                   ))}
                   {showUnmanaged && filteredUnmanaged.map(d => (
-                    <UnmanagedRow key={d.name} device={d} isVisible={isVisible} streamerMode={streamerMode} />
+                    <UnmanagedRow key={d.name} device={d} isVisible={isVisible} />
                   ))}
                 </>
               )}
@@ -790,13 +791,12 @@ function DeviceMenu({
   );
 }
 
-function UnmanagedRow({ device: d, isVisible, streamerMode }: { device: Device; isVisible: (col: OptionalColumnId) => boolean; streamerMode: boolean }) {
+function UnmanagedRow({ device: d, isVisible }: { device: Device; isVisible: (col: OptionalColumnId) => boolean }) {
   const statusEl = d.online
     ? <StatusDot status="online" />
     : <StatusDot status="offline" />;
 
   const dash = <span style={{ color: 'var(--text-muted)' }}>—</span>;
-  const ipText = streamerMode ? maskIp(d.ip_address) : (d.ip_address || '—');
 
   // Unmanaged devices (no config) don't have web_server info — never link their IP
   return (
@@ -809,8 +809,8 @@ function UnmanagedRow({ device: d, isVisible, streamerMode }: { device: Device; 
       {isVisible('status') && <td>{statusEl}</td>}
       {isVisible('ha') && <td style={{ fontSize: 12 }}>{dash}</td>}
       {isVisible('ip') && (
-        <td style={{ fontFamily: 'monospace', fontSize: 12 }}>
-          <span style={{ color: 'var(--text-muted)' }}>{ipText}</span>
+        <td style={{ fontFamily: 'monospace', fontSize: 12 }} className="sensitive">
+          <span style={{ color: 'var(--text-muted)' }}>{d.ip_address || '—'}</span>
         </td>
       )}
       {isVisible('running') && <td style={{ fontSize: 12 }}>{d.running_version || '—'}</td>}
