@@ -40,6 +40,7 @@ End-to-end testing of the web UI using Playwright.
 - [x] **CI.3 Add ruff linting** *(1.3.0-dev.7)* — `ruff check` on server + client code in CI; fixed 6 lint errors (unused imports, ambiguous vars)
 - [x] **CI.4 Add frontend build+lint job** *(1.3.0-dev.1)* — `frontend` job in CI: `npm ci && npm run build`
 - [x] **CI.5 Run Playwright tests in CI** *(1.3.0-dev.7)* — Chromium install + `playwright test` in frontend job, failure artifacts uploaded
+- [x] **CI.6 Publish Docker images from `develop`** *(1.3.0-dev.22)* — `publish-client.yml` and `publish-server.yml` now also trigger on pushes to `develop`. Added a rolling `develop` tag (enabled only on develop-branch pushes) alongside the existing version tag (e.g. `1.3.0-dev.22`) and sha tag. `latest` stays pinned to `main` via `enable={{is_default_branch}}`. Lets users point worker containers at `ghcr.io/weirded/esphome-dist-client:develop` to test unreleased changes without rebuilding locally.
 
 ## Python Codebase Cleanup
 
