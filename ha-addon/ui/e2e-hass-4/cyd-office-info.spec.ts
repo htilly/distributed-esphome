@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
- * Production smoke test against a real distributed-esphome instance.
+ * Smoke test against the author's hass-4 distributed-esphome instance.
  *
  * Compiles a real device end-to-end:
  *   1. Devices tab loads with the target row
@@ -17,14 +17,14 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  *   6. Open Live Logs from the device row and verify the device API stream
  *
  * The target device defaults to `cyd-office-info.yaml` and can be overridden
- * with the PROD_TARGET env var. The base URL is set in playwright.config.ts
- * via PROD_URL (default http://192.168.225.112:8765, the hass-4 instance).
+ * with the HASS4_TARGET env var. The base URL is set in playwright.config.ts
+ * via HASS4_URL (default http://192.168.225.112:8765).
  *
  * Run with:
- *   npm run test:e2e:prod
+ *   npm run test:e2e:hass-4
  */
 
-const TARGET_FILENAME = process.env.PROD_TARGET || 'cyd-office-info.yaml';
+const TARGET_FILENAME = process.env.HASS4_TARGET || 'cyd-office-info.yaml';
 const TARGET_STEM = TARGET_FILENAME.replace(/\.ya?ml$/, '');
 
 // Read the expected add-on version from ha-addon/VERSION at test startup so
@@ -48,7 +48,7 @@ const DEVICE_LOG_TIMEOUT_MS = 30_000;
 // across the serial tests in this file.
 let enqueuedJobId: string | null = null;
 
-test.describe.serial('cyd-office-info production smoke', () => {
+test.describe.serial('cyd-office-info hass-4 smoke', () => {
   // Confirm we're talking to the expected add-on version before doing anything
   // else. If the deploy is stale, the rest of the tests are meaningless.
   test.beforeAll(async ({ request }) => {

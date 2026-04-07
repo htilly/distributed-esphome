@@ -1,14 +1,13 @@
 import { defineConfig } from '@playwright/test';
 
 /**
- * Playwright config for production smoke tests against a real running
- * distributed-esphome instance (e.g. hass-4).
+ * Playwright config for smoke tests against the author's hass-4 instance.
  *
  * Run with:
- *   npm run test:e2e:prod
+ *   npm run test:e2e:hass-4
  *
- * Defaults to http://192.168.225.112:8765 (hass-4). Override with:
- *   PROD_URL=http://other-host:8765 npm run test:e2e:prod
+ * Defaults to http://192.168.225.112:8765. Override with:
+ *   HASS4_URL=http://other-host:8765 npm run test:e2e:hass-4
  */
 export default defineConfig({
   testDir: '.',
@@ -16,12 +15,12 @@ export default defineConfig({
   timeout: 10 * 60_000,
   expect: { timeout: 30_000 },
   retries: 0,
-  // Run prod tests serially — they touch real state, so don't parallelize
+  // Run serially — they touch real state, so don't parallelize
   workers: 1,
   fullyParallel: false,
-  reporter: [['list'], ['html', { outputFolder: 'playwright-report-prod', open: 'never' }]],
+  reporter: [['list'], ['html', { outputFolder: 'playwright-report', open: 'never' }]],
   use: {
-    baseURL: process.env.PROD_URL || 'http://192.168.225.112:8765',
+    baseURL: process.env.HASS4_URL || 'http://192.168.225.112:8765',
     headless: true,
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
