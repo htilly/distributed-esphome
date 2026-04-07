@@ -338,7 +338,7 @@ export function WorkersTab({ workers, queue, serverClientVersion, onRemove, onSe
           </div>
           <div className="actions">
             <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{countText}</span>
-            <Button variant="secondary" size="sm" onClick={onCleanAllCaches} disabled={!workers.some(w => w.online)}>Clean All Caches</Button>
+            <Button variant="outline" size="sm" onClick={onCleanAllCaches} disabled={!workers.some(w => w.online)}>Clean All Caches</Button>
             <Button size="sm" onClick={onConnectWorker}>+ Connect Worker</Button>
           </div>
         </div>
