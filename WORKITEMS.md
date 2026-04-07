@@ -133,12 +133,10 @@ End-to-end testing of the web UI using Playwright.
 
 ### Client Library Adoption
 
-LIB.1–3 require a new Docker image (`psutil` needs C compilation). LIB.0 adds detection so the server/UI warns when the worker image is too old.
+LIB.1 requires a new Docker image (`psutil` needs C compilation). LIB.0 adds detection so the server/UI warns when the worker image is too old.
 
 - [ ] **LIB.0 Client image version detection** — `IMAGE_VERSION` baked into Docker image, `MIN_IMAGE_VERSION` on server, heartbeat gates auto-update, UI warning badge
 - [ ] **LIB.1 `psutil` for client system info** — replace ~200 lines of /proc/cpuinfo parsing with cross-platform API
-- [ ] **LIB.2 `tenacity` for client retry logic** — decorator-based retries + exponential backoff
-- [ ] **LIB.3 `pyyaml` for client network diagnostics** — replace fragile regex YAML parsing
 
 ### Security Hardening
 
