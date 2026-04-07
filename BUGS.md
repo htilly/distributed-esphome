@@ -150,6 +150,14 @@
 
 165. FIXED (1.3.0-dev.9) - Clean Cache button layout broken (flex on td) and missing global button. Fix: removed flex from td, added "Clean All Caches" button in Workers tab header.
 
+166. STALE — #163 marked WONTFIX, #164 fixed in 1.3.0-dev.9.
+
+167. FIXED (1.3.0-dev.10) - Queue showed enqueue time twice (Device column + Time column). Removed timeAgo from Device column, added absolute HH:MM:SS with relative time below in Time column. Uses browser locale (inherits HA timezone).
+
+168. FIXED (1.3.0-dev.10) - Retry button now shown for successful jobs too. Changed `isJobRetryable` to include all finished jobs (not just failed).
+
+
+
 
 
 ---

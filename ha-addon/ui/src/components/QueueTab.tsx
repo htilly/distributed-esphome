@@ -144,7 +144,7 @@ export function QueueTab({
       cell: ({ row: { original: job } }) => (
         <>
           <span className="device-name">{targetNameMap.get(job.target) || stripYaml(job.target)}</span>
-          <div className="device-filename">{stripYaml(job.target)} &middot; {timeAgo(job.created_at)}</div>
+          <div className="device-filename">{stripYaml(job.target)}</div>
         </>
       ),
       sortingFn: 'alphanumeric',
@@ -198,9 +198,16 @@ export function QueueTab({
     columnHelper.accessor(row => row.created_at, {
       id: 'created_at',
       header: ({ column }) => <SortHeader label="Time" column={column} />,
-      cell: ({ row: { original: job } }) => (
-        <span style={{ fontSize: 12 }}>{timeAgo(job.created_at)}</span>
-      ),
+      cell: ({ row: { original: job } }) => {
+        const d = new Date(job.created_at);
+        const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        return (
+          <span style={{ fontSize: 12 }} title={d.toLocaleString()}>
+            {time}
+            <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{timeAgo(job.created_at)}</div>
+          </span>
+        );
+      },
       sortingFn: 'datetime',
     }),
     columnHelper.accessor(row => row.duration_seconds ?? 0, {
