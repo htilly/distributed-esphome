@@ -85,19 +85,6 @@ Capstone for the 1.3 release: codify the standards established by all the above 
 
 ## Open Bugs
 
-- [ ] **#171 Queue duration is wrong** — Three jobs all started at 10:40:47, finished at 10:54:18 / 10:53:51 / 10:53:46, but durations show 26s / 3s / 1s. The QueueTab uses `duration_seconds` from the server (which is the worker-side compile/OTA time), but it should display `finished_at - created_at` (wall clock time from enqueue to completion).
-- [ ] **#172 Revert `--no-logs` removal from 1.3.0-dev.12** — it breaks our output capture. The original `esphome run --no-logs` flag is needed; need a different approach for the version-compatibility issue (e.g. fallback to `compile` + `upload` if `--no-logs` is rejected).
-
-## Open Issues (carry over for triage)
-
-- **#163 (WONTFIX)** When the UI is open and a new upgrade is deployed, HA shows an "add-on is offline" dialog instead of the app reloading gracefully. This is HA Ingress behavior — the proxy intercepts the connection before our app can handle it. SWR already retries and the version-change detector triggers a reload once the server is back.
-
----
-
-## Bug Fixes (159–170)
-
-<details>
-<summary>Expand 12 bug fixes from 1.3.0</summary>
 
 159. FIXED (1.3.0-dev.4) - Duplicate device rows for configs with hyphens in esphome.name. (GitHub issue #2) Root cause: ESPHome normalizes device names for mDNS — hyphens become underscores. `_map_target()` did exact string comparison. Fix: added hyphen/underscore normalization in `_map_target()` (tries normalized lookup on both name_to_target map and filename stems) and `build_name_to_target_map()` (adds underscore-normalized variant of hyphenated names to the map).
 160. FIXED (1.3.0-dev.4) - OTA diagnostics reports wrong device name. (GitHub issue #15) Root cause: `_ota_network_diagnostics()` used a naive regex matching the first `name:` in the YAML (e.g. a neopixel light). Fix: replaced regex with yaml.safe_load to extract esphome.name properly, with a fallback that only looks under the esphome: block.
@@ -111,5 +98,7 @@ Capstone for the 1.3 release: codify the standards established by all the above 
 168. FIXED (1.3.0-dev.10) - Retry button now shown for successful jobs too. Changed `isJobRetryable` to include all finished jobs (not just failed).
 169. FIXED (1.3.0-dev.10) - Clean All Caches was generating one toast per worker. Fix: dedicated `handleCleanAllCaches` in App.tsx uses Promise.all with a single summary toast. Added CLAUDE.md guidelines about batching toasts and thinking about UX.
 170. FIXED (1.3.0-dev.10) - Time column renamed to "Start Time". Added "Finish Time" column showing HH:MM:SS + duration for finished jobs, elapsed time for in-progress jobs. Added `finished_at` to Job type.
+171. FIXED (1.3.0-dev.15) - Queue duration was wrong — used worker-side `duration_seconds` instead of wall-clock time. Fix: compute `finished_at - created_at` for finished jobs and `now - created_at` for in-progress jobs in the Finish Time cell.
+172. FIXED (1.3.0-dev.15) - `--no-logs` removal from dev.12 broke output capture. Fix: replaced `esphome run` with separate `esphome compile` + `esphome upload` calls. Works on all ESPHome versions (no `--no-logs` flag needed), gives clean compile-vs-OTA failure detection without log string parsing.
 
-</details>
+

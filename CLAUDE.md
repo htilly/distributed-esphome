@@ -121,7 +121,7 @@ Worker config is all via environment:
 - Deploy to hass-4 for testing: `./push-to-hass-4.sh`
 
 **Stable releases (merge to `main`):**
-Follow `RELEASE_CHECKLIST.md` for the full step-by-step process. Key steps:
+Follow `dev-plans/RELEASE_CHECKLIST.md` for the full step-by-step process. Key steps:
 - Use `bash scripts/bump-version.sh X.Y.Z` for the stable version
 - Finalize `ha-addon/CHANGELOG.md` — consolidate dev changes into a clean release entry
   (use `dev-plans/WORKITEMS-X.Y.md` as source material — it has both the work items and the bug fixes for the release; group by category)
@@ -176,13 +176,14 @@ cd ha-addon/ui && npx vite         # dev server
 
 ## Project Tracking
 
-All roadmap and bug tracking lives in `dev-plans/`:
+All roadmap, release process, and bug tracking lives in `dev-plans/`:
 
 - `dev-plans/README.md` — index of all the files
 - `dev-plans/WORKITEMS-X.Y.md` — one file per release. Each file mixes feature work items (with checkboxes) and bug fixes (numbered, with FIXED/WONTFIX/etc. status). Bug numbers are global and monotonic across releases.
 - `dev-plans/WORKITEMS-1.3.md` — **current release.** Open bugs go at the bottom under "Open Bugs", folded into the Bug Fixes list as they land.
 - `dev-plans/PRD.md` — product requirements document for the full ESPHome dashboard replacement
-- `RELEASE_CHECKLIST.md` — step-by-step release process (what Claude does vs. what the human does)
+- `dev-plans/SECURITY_AUDIT.md` — security audit findings (refer when making security-relevant changes)
+- `dev-plans/RELEASE_CHECKLIST.md` — step-by-step release process (what Claude does vs. what the human does)
 
 **Always update tracking files when completing work:**
 - When a work item is done, mark it `[x]` and add the specific version tag (e.g. `*(1.3.0-dev.7)*` — use the actual dev.N, not the generic `dev`)

@@ -5,7 +5,10 @@ Roadmap and bug tracking for distributed-esphome, organized by release.
 ## Files
 
 - **[PRD.md](PRD.md)** — Product requirements document for the full ESPHome dashboard replacement
-- **[WORKITEMS-1.0-1.1.md](WORKITEMS-1.0-1.1.md)** — Foundation: React migration, editor, validation, device lifecycle, HA integration (89 bug fixes)
+- **[SECURITY_AUDIT.md](SECURITY_AUDIT.md)** — Security audit findings (2026-03-29)
+- **[RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)** — Step-by-step release process
+- **[WORKITEMS-1.0.md](WORKITEMS-1.0.md)** — First stable release: distributed compile, vanilla JS UI, mDNS discovery
+- **[WORKITEMS-1.1.md](WORKITEMS-1.1.md)** — React UI rewrite, Monaco editor, HA integration, device lifecycle (89 bug fixes)
 - **[WORKITEMS-1.2.md](WORKITEMS-1.2.md)** — shadcn/ui design system, TanStack Table, SWR, local worker (69 bug fixes)
 - **[WORKITEMS-1.3.md](WORKITEMS-1.3.md)** — **Current release.** Quality + Testing: CI, Playwright, ruff, coverage, security hardening
 - **[WORKITEMS-1.4.md](WORKITEMS-1.4.md)** — Planned: ESPHome Dashboard parity (create device, firmware download, web serial)

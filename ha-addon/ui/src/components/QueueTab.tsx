@@ -216,17 +216,18 @@ export function QueueTab({
       cell: ({ row: { original: job } }) => {
         const inProgress = isJobInProgress(job);
         if (inProgress) {
-          const elapsed = job.assigned_at
-            ? fmtDuration((Date.now() - new Date(job.assigned_at).getTime()) / 1000)
-            : '—';
+          // Wall-clock elapsed since enqueue (not since worker pickup)
+          const elapsed = fmtDuration((Date.now() - new Date(job.created_at).getTime()) / 1000);
           return <span style={{ fontSize: 12, color: 'var(--text-muted)', fontStyle: 'italic' }}>{elapsed}</span>;
         }
         if (!job.finished_at) return <span style={{ fontSize: 12 }}>—</span>;
-        const d = new Date(job.finished_at);
-        const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        const dur = job.duration_seconds != null ? fmtDuration(job.duration_seconds) : null;
+        const finished = new Date(job.finished_at);
+        const time = finished.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        // Duration = wall clock from enqueue to finish, not just worker compile time
+        const wallSeconds = (finished.getTime() - new Date(job.created_at).getTime()) / 1000;
+        const dur = wallSeconds >= 0 ? fmtDuration(wallSeconds) : null;
         return (
-          <span style={{ fontSize: 12 }} title={d.toLocaleString()}>
+          <span style={{ fontSize: 12 }} title={finished.toLocaleString()}>
             {time}
             {dur && <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{dur}</div>}
           </span>

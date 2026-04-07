@@ -1,35 +1,89 @@
-# Work Items — 1.0.0 + 1.1.0
+# Work Items — 1.1.0
 
-Foundation: React migration, quick wins, editor, validation, device lifecycle, live logs, HA integration.
+Major update: React UI rewrite, ESPHome dashboard-grade features, Home Assistant integration.
 
-## Features
+## React UI Rewrite
 
-- [x] React + Vite + TypeScript scaffolding
+- [x] Complete rewrite from vanilla JS to React + Vite + TypeScript
 - [x] Port existing UI to React components (Devices, Queue, Workers tabs)
 - [x] Port all modals (Log, Editor, Connect Worker)
 - [x] Port polling, WebSocket log streaming, toast notifications
-- [x] Fix polling interval explosion bug
-- [x] Fix queue state handling (success = compile + OTA both done)
-- [x] Fix button disabled states
-- [x] **6.1 Device search/filter bar** — client-side filter across all columns
-- [x] **4.3 Device web server links** — make IP clickable when device is online
-- [x] **4.4 Show API encryption key** — copy-to-clipboard button per device
-- [x] **6.4 Export logs** — download button in log modal saves terminal content as .txt
+- [x] **1.1a–d Monaco YAML autocomplete** — ESPHome schema (697 components from installed package), per-component config var suggestions from schema.esphome.io, `!include`/`!secret`/`!lambda` support, inline syntax validation
 - [x] **1.3 Secrets editor** — "Secrets" button in header opens secrets.yaml in Monaco editor
+- [x] **6.1 Device search/filter bar** — client-side filter across all columns
 - [x] **6.2 Dark/light theme toggle** — CSS variables for both themes, persist in localStorage
-- [x] **1.1a–d Monaco YAML autocomplete** — ESPHome schema, completions, inline validation, !include/!secret/!lambda
-- [x] **1.2a–c Config validation** — server endpoint, validate_only job type, Validate button in editor
-- [x] **2.2 Rename device** — `POST /ui/api/targets/{f}/rename`, updates esphome.name + filename
-- [x] **2.3 Delete device** — `DELETE /ui/api/targets/{f}` with archive, confirmation dialog
-- [x] **4.1a–c Live device logs** — WebSocket endpoint, encryption handling, DeviceLogModal with xterm.js
-- [x] **4.2a–c HA integration** — poll entity registry, status badges, connected state as online signal
+- [x] **6.4 Export logs** — download button in log modal saves terminal content as .txt
+
+## Device Lifecycle
+
+- [x] **2.2 Rename device** — `POST /ui/api/targets/{f}/rename`, updates esphome.name + filename, triggers compile+OTA to flash new name
+- [x] **2.3 Delete device** — `DELETE /ui/api/targets/{f}` with archive (`.archive/`) or permanent delete, confirmation dialog
+- [x] Restart device via native ESPHome API (aioesphomeapi `button_command`) with HA REST fallback
+
+## Live Device Logs
+
+- [x] **4.1a–c Live device logs** — WebSocket endpoint, encryption (noise_psk) handling, DeviceLogModal with xterm.js
+- [x] Boot log included (`dump_config=True`)
+- [x] Timestamps on each log line `[HH:MM:SS]`
+- [x] Full ANSI color support
+
+## Compile Improvements
+
+- [x] Switched to `esphome run --no-logs` (single process compile+OTA, matches native ESPHome UI)
+- [x] Colorized compile logs: INFO=green, WARNING=yellow, ERROR=red
+- [x] OTA retry with 5s delay on failure (keeps job in WORKING state for proper re-queuing)
+- [x] Server timezone passed to workers (prevents config_hash mismatch and unnecessary clean rebuilds)
+- [x] OTA always uses explicit `--device` with known IP address
+- [x] ESPHome install errors visible in streaming job log
+
+## Home Assistant Integration
+
+- [x] **4.2a–c HA integration** — background poller detects ESPHome devices via template API + /api/states
+- [x] MAC-based device matching (queries HA device connections) — most reliable method
+- [x] Name-based fallback: friendly_name, esphome.name, filename stem, MAC fragment matching
+- [x] HA column in Devices tab shows configured status (Yes/—)
+- [x] HA connectivity (`_status` binary_sensor) feeds into online/offline column
+- [x] Device restart via HA REST API as fallback when native API unavailable
+
+## Config Validation
+
+- [x] **1.2a–c Config validation** — server endpoint, `validate_only` job type, Validate button in editor
+- [x] Validate button saves editor content first, then runs `esphome config`
+- [x] Validation opens streaming log modal directly (no toast intermediary)
+- [x] Badge shows Validating/Valid/Failed status in queue
+
+## Performance
+
+- [x] Concurrent device polling via `asyncio.gather` (all devices checked in parallel)
+- [x] HA entity poller runs immediately on startup (no 30s delay)
+- [x] Config resolution caches git clones (`skip_update=True` after first resolution)
+- [x] PyPI version list increased from 10 to 50
+
+## UI Polish
+
+- [x] **4.3 Device web server links** — make IP clickable when device has `web_server` and is online
+- [x] **4.4 Show API encryption key** — copy-to-clipboard button per device
+- [x] Per-row Clear button in queue tab
+- [x] Edit buttons in queue rows and log modal header
+- [x] Hamburger menu redesigned: vertical ellipsis icon, plain text styling
+- [x] Live Logs and Restart moved to hamburger menu (never grayed out)
+- [x] Light mode: dark header for ESPHome logo readability, themed form inputs
+- [x] "Checking..." state with pulsing dot on startup (instead of showing offline)
+- [x] Copy API Key, Rename, Delete in device hamburger menu
+
+## Operations
+
+- [x] Suppressed `aioesphomeapi.connection` warnings (expected when devices offline)
+- [x] ESPHome add-on version detection at DEBUG level (no log spam)
+- [x] Debug endpoint `GET /ui/api/debug/ha-status` for HA matching troubleshooting
+- [x] Queue remove-by-ID endpoint for per-job clearing
 
 ---
 
 ## Bug Fixes (1–89)
 
 <details>
-<summary>Expand 89 bug fixes from 1.0.0 + 1.1.0</summary>
+<summary>Expand 89 bug fixes from 1.1.0</summary>
 
 1. FIXED (1.1.0-dev.4) - In the queue, we aren't correctly handling some of the states.
 2. FIXED (1.1.0-dev.4) - Colors - Upgrade Outdated should be green.
