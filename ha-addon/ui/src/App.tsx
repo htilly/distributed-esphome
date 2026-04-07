@@ -427,6 +427,7 @@ export default function App() {
             targets={targets}
             devices={devices}
             workers={workers}
+            streamerMode={streamerMode}
             onCompile={handleCompile}
             onCompileOnWorker={handleCompileOnWorker}
             onEdit={setEditorTarget}

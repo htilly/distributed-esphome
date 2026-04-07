@@ -11,7 +11,7 @@ import {
 } from '@tanstack/react-table';
 import { getApiKey, restartDevice } from '../api/client';
 import type { Device, Target, Worker } from '../types';
-import { stripYaml, timeAgo } from '../utils';
+import { maskIp, stripYaml, timeAgo } from '../utils';
 import { StatusDot } from './StatusDot';
 import { Button } from './ui/button';
 import {
@@ -73,6 +73,7 @@ interface Props {
   targets: Target[];
   devices: Device[];
   workers: Worker[];
+  streamerMode: boolean;
   onCompile: (targets: string[] | 'all' | 'outdated') => void;
   onCompileOnWorker: (target: string, clientId: string) => void;
   onEdit: (target: string) => void;
@@ -178,7 +179,7 @@ function DeleteModal({ target, onConfirm, onClose }: {
   );
 }
 
-export function DevicesTab({ targets, devices, workers, onCompile, onCompileOnWorker, onEdit, onLogs, onToast, onDelete, onRename }: Props) {
+export function DevicesTab({ targets, devices, workers, streamerMode, onCompile, onCompileOnWorker, onEdit, onLogs, onToast, onDelete, onRename }: Props) {
   const [filter, setFilter] = useState('');
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(loadColumnVisibility);
@@ -337,9 +338,10 @@ export function DevicesTab({ targets, devices, workers, onCompile, onCompileOnWo
       id: 'ip',
       header: ({ column }) => <SortHeader label="IP" column={column} />,
       cell: ({ row: { original: t } }) => {
-        const showIpLink = t.has_web_server && t.online && t.ip_address;
+        const showIpLink = !streamerMode && t.has_web_server && t.online && t.ip_address;
+        const ipText = streamerMode ? maskIp(t.ip_address) : (t.ip_address || '—');
         return (
-          <span style={{ fontFamily: 'monospace', fontSize: 12 }} className="sensitive">
+          <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
             {showIpLink
               ? (
                 <a
@@ -348,10 +350,10 @@ export function DevicesTab({ targets, devices, workers, onCompile, onCompileOnWo
                   rel="noopener"
                   className="ip-link"
                 >
-                  {t.ip_address}<span style={{ fontSize: 10 }}>&#8599;</span>
+                  {ipText}<span style={{ fontSize: 10 }}>&#8599;</span>
                 </a>
               )
-              : <span style={{ color: 'var(--text-muted)' }}>{t.ip_address || '—'}</span>}
+              : <span style={{ color: 'var(--text-muted)' }}>{ipText}</span>}
           </span>
         );
       },
@@ -594,7 +596,7 @@ export function DevicesTab({ targets, devices, workers, onCompile, onCompileOnWo
                     </tr>
                   ))}
                   {showUnmanaged && filteredUnmanaged.map(d => (
-                    <UnmanagedRow key={d.name} device={d} isVisible={isVisible} />
+                    <UnmanagedRow key={d.name} device={d} isVisible={isVisible} streamerMode={streamerMode} />
                   ))}
                 </>
               )}
@@ -788,12 +790,13 @@ function DeviceMenu({
   );
 }
 
-function UnmanagedRow({ device: d, isVisible }: { device: Device; isVisible: (col: OptionalColumnId) => boolean }) {
+function UnmanagedRow({ device: d, isVisible, streamerMode }: { device: Device; isVisible: (col: OptionalColumnId) => boolean; streamerMode: boolean }) {
   const statusEl = d.online
     ? <StatusDot status="online" />
     : <StatusDot status="offline" />;
 
   const dash = <span style={{ color: 'var(--text-muted)' }}>—</span>;
+  const ipText = streamerMode ? maskIp(d.ip_address) : (d.ip_address || '—');
 
   // Unmanaged devices (no config) don't have web_server info — never link their IP
   return (
@@ -807,7 +810,7 @@ function UnmanagedRow({ device: d, isVisible }: { device: Device; isVisible: (co
       {isVisible('ha') && <td style={{ fontSize: 12 }}>{dash}</td>}
       {isVisible('ip') && (
         <td style={{ fontFamily: 'monospace', fontSize: 12 }}>
-          <span style={{ color: 'var(--text-muted)' }}>{d.ip_address || '—'}</span>
+          <span style={{ color: 'var(--text-muted)' }}>{ipText}</span>
         </td>
       )}
       {isVisible('running') && <td style={{ fontSize: 12 }}>{d.running_version || '—'}</td>}
