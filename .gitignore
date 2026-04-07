@@ -49,6 +49,7 @@ node_modules/
 # Playwright
 test-results/
 playwright-report/
+playwright-report-prod/
 
 # HA add-on local build
 ha-addon/dist/
