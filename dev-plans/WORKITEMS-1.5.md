@@ -31,6 +31,17 @@ Browse and edit any file in the ESPHome config directory, including subdirectori
 
 - [ ] **2.1c Create device: import from URL** — fetch config from GitHub/project URL
 
+## Scheduled Upgrades ([#30](https://github.com/weirded/distributed-esphome/issues/30))
+
+Cron-style scheduler for automatic device upgrades — e.g. "every 8th of the month at 10am, upgrade all outdated devices".
+
+- [ ] **SU.1 Schedule storage** — persist schedules to `/data/schedules.json`: `[{id, name, cron, target: "all" | "outdated" | [device names], enabled, last_run, next_run}]`
+- [ ] **SU.2 Cron parser + scheduler loop** — stdlib-only (avoid new deps); background task wakes on next_run and enqueues the same compile jobs the "Upgrade Outdated" button uses today
+- [ ] **SU.3 `GET/POST/DELETE /ui/api/schedules`** — list, create, update, delete
+- [ ] **SU.4 Schedules tab (or section in Workers tab)** — list schedules, enable/disable toggle, "run now" button, show last/next run timestamps
+- [ ] **SU.5 Schedule create modal** — friendly cron builder (daily/weekly/monthly presets + raw cron expression), target picker (all / outdated / specific devices)
+- [ ] **SU.6 History** — last N runs per schedule with success/fail counts linking back to queue entries
+
 ## AI/LLM Editor
 
 - [ ] **1.4a Server config** — add-on options for LLM provider, API key, model, endpoint

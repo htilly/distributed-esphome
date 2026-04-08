@@ -38,6 +38,13 @@ Not "raise coverage to 80%." Pick the places where a silent break is catastrophi
   - Move `https://schema.esphome.io/` `fetch()` out of `EditorModal.tsx` into `api/client.ts` (or new `api/esphomeSchema.ts`).
   - Replace hand-rolled `<input>`/`<select>` in `ConnectWorkerModal.tsx` with shadcn `Input`/`Select`.
   - Remove inline `style={{ padding: 18 }}` in `ConnectWorkerModal.tsx`.
+- [ ] **C.7 Consolidate worker auth** — `ha-addon/server/api.py:55` duplicates the Bearer-token check from `auth_middleware` (`main.py:74`). The middleware already gates every `/api/v1/*` request, so the in-handler check is dead code that drifts (e.g. the middleware now uses `constant_time_compare`; a future fix applied to one site won't reach the other). Remove the duplicated check from `api.py` and leave the middleware as the single source of truth. Add a regression test asserting that an unauthenticated `/api/v1/workers/register` is rejected by the middleware layer, not the handler.
+- [ ] **C.8 Replace deprecated asyncio APIs** — four call sites use `asyncio.get_event_loop()` / `ensure_future(..., loop=loop)`, both scheduled for removal in future Python versions:
+  - `ha-addon/server/ui_api.py:357` — `loop = _asyncio.get_event_loop()`
+  - `ha-addon/server/ui_api.py:367` — `_asyncio.ensure_future(ws.send_str(...), loop=loop)`
+  - `ha-addon/server/device_poller.py:175` — `asyncio.get_event_loop().run_in_executor(...)`
+  - `ha-addon/server/device_poller.py:247` — `asyncio.ensure_future(self._query_device(...))`
+  Replace with `asyncio.get_running_loop()` (or use the running loop implicitly via `asyncio.create_task(...)`) and `asyncio.create_task(...)`. No behavior change expected; existing tests cover the paths.
 - [ ] **C.6 Playwright contract fixtures** — `ha-addon/ui/e2e/fixtures.ts`: derive mock shapes from the actual TS types in `api/client.ts` so a field rename breaks tests. Add the missing job states (`pending`, `timed_out`) to the fixtures so the queue tab is exercised on the full state space.
 
 ## Workstream D — CLAUDE.md rewrite (this is QG.1)
