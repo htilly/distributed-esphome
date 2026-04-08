@@ -88,6 +88,7 @@ export const workers = [
     max_parallel_jobs: 1,
     client_version: '1.3.0-dev.3',
     image_version: null, // pre-LIB.0 worker
+    last_seen: new Date(Date.now() - 15 * 60_000).toISOString(), // 15 min ago
   },
 ];
 

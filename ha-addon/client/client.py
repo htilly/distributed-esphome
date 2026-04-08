@@ -29,7 +29,7 @@ from sysinfo import collect_system_info
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.3.0-dev.23"
+CLIENT_VERSION = "1.3.0-dev.24"
 
 
 def _read_image_version() -> Optional[str]:
@@ -677,7 +677,7 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
         if validate_only:
             _report_status(job_id, "Validating")
             validate_cmd = [esphome_bin, "config", target_path]
-            logger.info("Invoking: %s", " ".join(validate_cmd))
+            _log_invocation(job_id, validate_cmd)
             _compile_log, compile_ok = _run_subprocess(
                 validate_cmd,
                 cwd=tmp_dir,
@@ -713,7 +713,7 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
             "--no-logs",
             "--device", ota_address,
         ]
-        logger.info("Invoking: %s", " ".join(run_cmd))
+        _log_invocation(job_id, run_cmd)
 
         # Total timeout covers both compile + OTA
         total_timeout = timeout_seconds + OTA_TIMEOUT
@@ -747,7 +747,7 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
                     esphome_bin, "upload", target_path,
                     "--device", ota_address,
                 ]
-                logger.info("Invoking: %s", " ".join(upload_cmd))
+                _log_invocation(job_id, upload_cmd)
                 retry_log, retry_ok = _run_subprocess(
                     upload_cmd,
                     cwd=tmp_dir,
@@ -885,6 +885,19 @@ def _flush_log_text(job_id: str, text: str) -> None:
         post(f"/api/v1/jobs/{job_id}/log", {"lines": text}, timeout=5)
     except Exception:
         logger.debug("Log text flush failed for job %s", job_id, exc_info=True)
+
+
+def _log_invocation(job_id: str, cmd: list[str]) -> None:
+    """Log an esphome invocation to BOTH the Python logger and the user-visible
+    job log stream.
+
+    Bug reports are much easier to triage when the exact command line is in
+    the log the user copy-pastes from the UI.
+    """
+    line = "Invoking: " + " ".join(cmd)
+    logger.info(line)
+    # Blue-ish ANSI so it stands out in the xterm viewer without looking alarming.
+    _flush_log_text(job_id, f"\033[36m{line}\033[0m\n")
 
 
 def _report_status(job_id: str, status_text: str) -> None:

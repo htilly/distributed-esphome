@@ -71,6 +71,7 @@ export interface Worker {
   image_version?: string | null;
   system_info?: SystemInfo;
   current_job_id?: string;
+  last_seen?: string;
 }
 
 export interface Job {

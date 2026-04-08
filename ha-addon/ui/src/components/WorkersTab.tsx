@@ -9,7 +9,7 @@ import {
 } from '@tanstack/react-table';
 import type { Job, SystemInfo, Worker } from '../types';
 import { Button } from './ui/button';
-import { stripYaml } from '../utils';
+import { stripYaml, timeAgo } from '../utils';
 import { StatusDot } from './StatusDot';
 
 interface Props {
@@ -309,9 +309,19 @@ export function WorkersTab({ workers, queue, serverClientVersion, minImageVersio
             </>
           : <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>Idle</span>;
 
-      const uptimeEl = c.system_info?.uptime
-        ? <><br /><span style={{ fontSize: 10, color: 'var(--text-muted)' }} title="Worker process uptime">up {c.system_info.uptime}</span></>
-        : null;
+      // When offline, show how long it's been gone instead of stale process uptime.
+      // When online, show worker process uptime from the last heartbeat.
+      let uptimeEl: React.ReactNode = null;
+      if (!c.online && c.last_seen) {
+        const duration = timeAgo(c.last_seen).replace(/ ago$/, '');
+        uptimeEl = (
+          <><br /><span style={{ fontSize: 10, color: 'var(--text-muted)' }} title={`Last heartbeat: ${new Date(c.last_seen).toLocaleString()}`}>offline for {duration}</span></>
+        );
+      } else if (c.online && c.system_info?.uptime) {
+        uptimeEl = (
+          <><br /><span style={{ fontSize: 10, color: 'var(--text-muted)' }} title="Worker process uptime">up {c.system_info.uptime}</span></>
+        );
+      }
 
       if (slot === 1) {
         rows.push(
