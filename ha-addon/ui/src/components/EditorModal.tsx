@@ -31,33 +31,9 @@ const COMMON_SUB_KEYS = [
   'sda', 'scl', 'frequency', 'rx_pin', 'tx_pin', 'baud_rate',
 ];
 
-// ---- Per-component schema fetching from schema.esphome.io ----
-
-// Module-level cache: key is "<version>/<component>", value is raw JSON response.
-const _schemaCache: Record<string, unknown> = {};
-
-async function fetchComponentSchema(component: string, esphomeVersion: string): Promise<unknown> {
-  const key = `${esphomeVersion}/${component}`;
-  if (_schemaCache[key] !== undefined) return _schemaCache[key];
-
-  // Try version-specific first, fall back to 'dev' which always exists.
-  for (const ver of [esphomeVersion, 'dev']) {
-    try {
-      const r = await fetch(`https://schema.esphome.io/${ver}/${component}.json`);
-      if (r.ok) {
-        const data: unknown = await r.json();
-        _schemaCache[key] = data;
-        return data;
-      }
-    } catch {
-      // Network error — try next version or give up.
-    }
-  }
-
-  // Cache negative result so we don't retry on every keystroke.
-  _schemaCache[key] = null;
-  return null;
-}
+// Per-component schema fetching lives in api/esphomeSchema.ts (C.5 — all
+// HTTP calls must live in the api/ layer, never in components).
+import { fetchComponentSchema } from '../api/esphomeSchema';
 
 interface ConfigVar {
   name: string;
@@ -320,7 +296,7 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, o
     try {
       let changes: { modifiedStartLineNumber: number; modifiedEndLineNumber: number }[] = [];
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const editorWorker = (monaco.editor as any).getEditorWorkerService?.();
+      const editorWorker = (monaco.editor as any) /* ALLOW_ANY: monaco internal */.getEditorWorkerService?.();
       if (editorWorker?.computeDiff) {
         const diff = await editorWorker.computeDiff(savedModel.uri, model.uri, false, 100000);
         changes = (diff?.changes ?? []).map((c: { modified: { startLineNumber: number; endLineNumberExclusive: number } }) => ({

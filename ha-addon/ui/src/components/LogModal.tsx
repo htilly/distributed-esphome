@@ -130,7 +130,7 @@ export function LogModal({ jobId, queue, workers, onClose, onRetry, onEdit, stac
       try {
         // Access internal render dimensions for precise cell size
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const core = (term as any)._core;
+        const core = (term as any)._core; // ALLOW_ANY: xterm internal
         const cellW = core?._renderService?.dimensions?.css?.cell?.width;
         const cellH = core?._renderService?.dimensions?.css?.cell?.height;
         if (cellW > 0 && cellH > 0 && containerRef.current) {

@@ -43,6 +43,9 @@ jobs:
       - name: Ruff lint
         run: ruff check ha-addon/server/ ha-addon/client/
 
+      - name: CLAUDE.md invariants (grep-based linter)
+        run: bash scripts/check-invariants.sh
+
       - name: mypy — server
         run: mypy ha-addon/server/ --ignore-missing-imports
 

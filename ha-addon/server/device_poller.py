@@ -172,7 +172,10 @@ class DevicePoller:
     ) -> None:
         try:
             from zeroconf import ServiceStateChange  # noqa: PLC0415
-            info = await asyncio.get_event_loop().run_in_executor(
+            # C.8: get_running_loop is the modern equivalent of get_event_loop
+            # when we're already inside a coroutine — and is the only one that
+            # works in 3.12+.
+            info = await asyncio.get_running_loop().run_in_executor(
                 None, zeroconf.get_service_info, service_type, name
             )
             if info is None:
@@ -244,7 +247,9 @@ class DevicePoller:
                 or ip
             )
             if query_addr:
-                asyncio.ensure_future(self._query_device(existing_key, query_addr))
+                # C.8: create_task is the modern equivalent of ensure_future
+                # when we're scheduling a coroutine on the running loop.
+                asyncio.create_task(self._query_device(existing_key, query_addr))
 
         except Exception:
             logger.exception("Error handling mDNS service change for %s", name)

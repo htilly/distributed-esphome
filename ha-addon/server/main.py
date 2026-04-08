@@ -48,6 +48,31 @@ async def version_header_middleware(request: web.Request, handler):
     return response
 
 
+def _normalize_peer_ip(raw: str) -> str:
+    """Canonicalize a peer IP string for comparison against HA_SUPERVISOR_IP.
+
+    Strips IPv4-mapped IPv6 prefixes (``::ffff:172.30.32.2`` → ``172.30.32.2``)
+    and zone identifiers (``fe80::1%eth0`` → ``fe80::1``), so an IPv4 string
+    in HA_SUPERVISOR_IP still matches the same supervisor coming in over a
+    dual-stack socket. Falls back to the raw string if parsing fails — that
+    way an unparseable address simply won't match the supervisor (which is
+    safer than crashing the request).
+    """
+    if not raw:
+        return ""
+    # Strip IPv6 zone id (e.g. ``fe80::1%eth0``)
+    raw = raw.split("%", 1)[0]
+    try:
+        import ipaddress  # noqa: PLC0415
+        addr = ipaddress.ip_address(raw)
+        # IPv4-mapped IPv6 → unwrap to plain IPv4 string
+        if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+            return str(addr.ipv4_mapped)
+        return str(addr)
+    except (ValueError, ImportError):
+        return raw
+
+
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
     path = request.path
@@ -58,13 +83,24 @@ async def auth_middleware(request: web.Request, handler):
 
     # /api/v1/* — require Bearer token UNLESS from HA supervisor address
     if path.startswith("/api/v1/"):
-        peer = request.transport and request.transport.get_extra_info("peername")
+        # ``transport`` may be None during tests or for some edge-case
+        # transports; ``peername`` may also be None even on a real transport
+        # (e.g. unix-socket connections, closed streams). Handle both without
+        # crashing — fall through to token auth in either case. C.2.
         peer_ip = ""
+        try:
+            peer = request.transport.get_extra_info("peername") if request.transport else None
+        except Exception:
+            peer = None
         if peer:
-            peer_ip = peer[0] if isinstance(peer, tuple) else str(peer)
+            raw_ip = peer[0] if isinstance(peer, tuple) else str(peer)
+            peer_ip = _normalize_peer_ip(raw_ip)
 
         from constants import HA_SUPERVISOR_IP, HEADER_AUTHORIZATION  # noqa: PLC0415
-        if peer_ip == HA_SUPERVISOR_IP:
+        # Normalize the configured Supervisor IP too so an IPv6-mapped form
+        # like ``::ffff:172.30.32.2`` from a dual-stack Docker network still
+        # matches the canonical IPv4 string. Compare canonicalized forms.
+        if peer_ip and peer_ip == _normalize_peer_ip(HA_SUPERVISOR_IP):
             return await handler(request)
 
         cfg: AppConfig = request.app["config"]
@@ -73,6 +109,20 @@ async def auth_middleware(request: web.Request, handler):
             auth_header = request.headers.get(HEADER_AUTHORIZATION, "")
             if auth_header.startswith("Bearer ") and constant_time_compare(auth_header[7:], cfg.token):
                 return await handler(request)
+
+            # Diagnose the refusal. Each branch logs a distinct structured
+            # reason so operators can tell "wrong token" from "missing header"
+            # from "non-supervisor peer IP" without enabling debug logging.
+            if not auth_header:
+                reason = "missing_authorization_header"
+            elif not auth_header.startswith("Bearer "):
+                reason = "authorization_not_bearer_scheme"
+            else:
+                reason = "bearer_token_mismatch"
+            logger.warning(
+                "401 on %s: reason=%s peer_ip=%s (expected supervisor=%s)",
+                path, reason, peer_ip or "<unknown>", HA_SUPERVISOR_IP,
+            )
         else:
             # No token configured — allow all (development mode)
             logger.warning("No auth token configured; allowing unauthenticated request to %s", path)
@@ -130,6 +180,30 @@ async def ha_entity_poller(app: web.Application) -> None:
     timeout = aiohttp.ClientTimeout(total=10)
     first_poll = True
 
+    # Repeated identical failures are demoted to DEBUG after the second
+    # occurrence of the same fingerprint, so a persistent outage (HA down,
+    # network blip) doesn't drown the log and mask unrelated problems. A
+    # single iteration can emit multiple warnings with different fingerprints
+    # (e.g. both "template_exception" and "poll_exception") and each is
+    # counted independently. Any successful poll clears all counts.
+    warning_counts: dict[str, int] = {}
+
+    def _log_poll_warning(fingerprint: str, message: str, *args: object, exc_info: bool = False) -> None:
+        count = warning_counts.get(fingerprint, 0) + 1
+        warning_counts[fingerprint] = count
+        if count <= 2:
+            logger.warning(message, *args, exc_info=exc_info)
+            if count == 2:
+                logger.warning(
+                    "Above warning is repeating; further identical failures "
+                    "will be logged at DEBUG level until the next success."
+                )
+        else:
+            logger.debug(message, *args, exc_info=exc_info)
+
+    def _reset_poll_warnings() -> None:
+        warning_counts.clear()
+
     while True:
         # Poll immediately on first iteration, then every 30s
         if not first_poll:
@@ -154,12 +228,21 @@ async def ha_entity_poller(app: web.Application) -> None:
                                 parsed = _json.loads(raw)
                                 esphome_entity_ids = parsed if isinstance(parsed, list) else []
                             except (_json.JSONDecodeError, TypeError):
-                                logger.warning("HA template API returned unparseable response: %.200s", raw)
+                                _log_poll_warning(
+                                    "template_unparseable",
+                                    "HA template API returned unparseable response: %.200s", raw,
+                                )
                         else:
                             body = await resp.text()
-                            logger.warning("HA template API returned HTTP %d: %.200s", resp.status, body)
+                            _log_poll_warning(
+                                f"template_http_{resp.status}",
+                                "HA template API returned HTTP %d: %.200s", resp.status, body,
+                            )
                 except Exception:
-                    logger.warning("Template API call failed", exc_info=True)
+                    _log_poll_warning(
+                        "template_exception",
+                        "Template API call failed", exc_info=True,
+                    )
 
                 # 1b. Get MAC addresses for ESPHome devices via template API.
                 # ESPHome devices store MACs in device connections (not identifiers):
@@ -209,7 +292,8 @@ async def ha_entity_poller(app: web.Application) -> None:
                     timeout=timeout,
                 ) as resp:
                     if resp.status != 200:
-                        logger.warning(
+                        _log_poll_warning(
+                            f"states_http_{resp.status}",
                             "HA states returned HTTP %d — check homeassistant_api: true in config.yaml",
                             resp.status,
                         )
@@ -265,6 +349,10 @@ async def ha_entity_poller(app: web.Application) -> None:
             app["ha_entity_status"].update(ha_status)
             app["ha_mac_set"] = ha_mac_set
 
+            # A full successful poll resets the suppression state so the next
+            # transient failure gets its warning re-promoted.
+            _reset_poll_warnings()
+
             if first_poll:
                 first_poll = False
                 configured_count = len(ha_status)
@@ -283,7 +371,10 @@ async def ha_entity_poller(app: web.Application) -> None:
                 )
 
         except Exception:
-            logger.warning("Error polling HA entity status", exc_info=True)
+            _log_poll_warning(
+                "poll_exception",
+                "Error polling HA entity status", exc_info=True,
+            )
         finally:
             # Always clear first_poll so subsequent retries sleep 30s,
             # even when the first attempt fails with an exception or a
@@ -331,25 +422,97 @@ async def _fetch_ha_esphome_version(session: aiohttp.ClientSession) -> Optional[
     if not token:
         return None
 
-    for slug in ("5c53de3b_esphome", "core_esphome", "local_esphome"):
+    # Two-tier discovery:
+    #
+    # 1. Preferred: list all installed add-ons via ``GET /addons`` and pick
+    #    the ESPHome one. This works for any slug, including the hashed forms
+    #    that confused the original hardcoded list. BUT it requires
+    #    ``hassio_role: manager`` — plain ``hassio_api: true`` only grants
+    #    access to ``/addons/<slug>/info``, and the listing returns 403.
+    #    We do NOT escalate the role just for version detection; instead we
+    #    silently fall back to step 2 on any non-200.
+    #
+    # 2. Fallback: probe a known list of slug patterns against
+    #    ``/addons/<slug>/info``. This is the pre-1.3.1 mechanism plus the
+    #    community-repo hash ``a0d7b954_esphome`` (added per bug #4 triage).
+    #    It still misses fully-custom hashed slugs but covers ~all real
+    #    installs without requiring an elevated role.
+    auth = {"Authorization": f"Bearer {token}"}
+
+    # --- Tier 1: listing
+    listing_failed = False
+    try:
+        async with session.get(
+            "http://supervisor/addons",
+            headers=auth,
+            timeout=aiohttp.ClientTimeout(total=5),
+        ) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                addons: list[dict] = data.get("data", {}).get("addons", []) or []
+
+                def _is_esphome_addon(a: dict) -> bool:
+                    slug = str(a.get("slug", "")).lower()
+                    name = str(a.get("name", "")).lower()
+                    if slug in ("core_esphome", "local_esphome") or slug.endswith("_esphome"):
+                        return True
+                    return name == "esphome" or name.startswith("esphome ")
+
+                matches = [a for a in addons if _is_esphome_addon(a)]
+                for addon in matches:
+                    version = addon.get("version")
+                    slug = addon.get("slug", "")
+                    if version:
+                        logger.debug(
+                            "Detected HA ESPHome add-on version %s (slug: %s, via /addons listing)",
+                            version, slug,
+                        )
+                        return str(version)
+                # Listing succeeded but no match — try the fallback anyway in
+                # case the name heuristic missed it.
+                listing_failed = not matches
+            else:
+                # 403 is the common case (we don't have hassio_role: manager).
+                # Drop to the per-slug fallback silently.
+                listing_failed = True
+    except Exception as exc:
+        logger.debug("Supervisor /addons listing failed (%s); using slug fallback", exc)
+        listing_failed = True
+
+    if not listing_failed:
+        # Listing worked but the matched add-ons had no ``version`` field —
+        # fall through to the per-slug probe to fill it in.
+        pass
+
+    # --- Tier 2: per-slug probe over known patterns.
+    candidate_slugs = (
+        "core_esphome",
+        "local_esphome",
+        "a0d7b954_esphome",  # community repo (default for most users)
+        "5c53de3b_esphome",  # alternate community repo hash
+    )
+    for slug in candidate_slugs:
         try:
             async with session.get(
                 f"http://supervisor/addons/{slug}/info",
-                headers={"Authorization": f"Bearer {token}"},
+                headers=auth,
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
                 if resp.status == 200:
-                    data = await resp.json()
-                    version = data.get("data", {}).get("version")
+                    info = await resp.json()
+                    version = info.get("data", {}).get("version")
                     if version:
-                        logger.debug("Detected HA ESPHome add-on version %s (slug: %s)", version, slug)
+                        logger.debug(
+                            "Detected HA ESPHome add-on version %s (slug: %s, via /info probe)",
+                            version, slug,
+                        )
                         return str(version)
-                else:
-                    logger.warning("Supervisor query for %s returned HTTP %d (need hassio_api: true in config.yaml?)", slug, resp.status)
+                # 404 is the expected "not this slug" outcome — keep probing
+                # silently. Anything else is unexpected but also not worth
+                # spamming the log every 30s.
         except Exception as exc:
-            logger.warning("Supervisor query failed for slug %s: %s", slug, exc)
+            logger.debug("Supervisor /addons/%s/info query failed: %s", slug, exc)
 
-    logger.warning("Could not detect ESPHome add-on version from Supervisor API")
     return None
 
 

@@ -9,6 +9,11 @@ Copy the checklist into a GitHub issue or scratch file and check items off as yo
 
 ### Claude can do
 
+- [ ] **Refresh pinned dependencies** (once E.1 lands): `bash scripts/refresh-deps.sh` — regenerates `ha-addon/server/requirements.lock` and `ha-addon/client/requirements.lock` via `pip-compile --generate-hashes`. Review the diff, commit it as its own commit (`chore: refresh pinned deps for X.Y.Z`), and re-run the full test suite after. Never release with stale locks.
+- [ ] **Supply-chain audit gate** (once E.5 + E.6 land) — must be clean before tagging:
+  - [ ] `pip-audit --requirement ha-addon/server/requirements.lock --requirement ha-addon/client/requirements.lock` — zero high/critical findings (document any ignored advisories inline)
+  - [ ] `cd ha-addon/ui && npm audit --audit-level=high` — zero high/critical findings
+  - [ ] Check Dependabot for open high/critical alerts: `gh api repos/:owner/:repo/dependabot/alerts --jq '.[] | select(.state=="open" and (.security_advisory.severity=="high" or .security_advisory.severity=="critical"))'` — must return empty. If any alert is open, either upgrade the dep (preferred) or explicitly accept the risk with a WORKITEMS entry before proceeding.
 - [ ] Run full test suite, fix any failures: `pytest tests/`
 - [ ] Run mypy on server and client:
   ```

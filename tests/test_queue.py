@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from job_queue import JobQueue, JobState, MAX_LOG_BYTES, LOG_TRUNCATED_MARKER
+from job_queue import JobQueue, JobState, MAX_LOG_BYTES, LOG_TRUNCATED_MARKER, MAX_RETRIES
 
 
 # ---------------------------------------------------------------------------
@@ -615,3 +615,126 @@ async def test_finished_at_unset_on_pending(queue):
     assert job is None
     stored = queue.get_all()[0]
     assert stored.finished_at is None
+
+
+# ---------------------------------------------------------------------------
+# B.3 — timeout_checker frozen-clock behavior documentation
+# ---------------------------------------------------------------------------
+
+async def test_check_timeouts_behavior_is_purely_deadline_based(tmp_queue_file):
+    """Frozen-clock test documenting the three B.3 cases in one place:
+
+    (a) WORKING job past deadline → PENDING, retry_count++.
+    (b) After MAX_RETRIES (3) timeouts → FAILED permanently.
+    (c) Heartbeats do NOT affect job timeout — the check is purely a
+        comparison against ``job.assigned_at + timeout_seconds``. A heartbeat
+        arriving during the timeout window does not reset the deadline;
+        worker liveness is the registry's concern, not the queue's. This test
+        pins that contract so nobody "fixes" it by coupling the two.
+    """
+    q = JobQueue(queue_file=tmp_queue_file)
+    await q.enqueue("dev.yaml", "2024.3.1", "run1", timeout_seconds=1)
+    claimed = await q.claim_next("worker-a")
+    assert claimed is not None
+
+    # (a) Backdate deadline into the past → expect requeue.
+    claimed.assigned_at = _utcnow() - timedelta(seconds=10)
+    affected = await q.check_timeouts()
+    assert [j.id for j in affected] == [claimed.id]
+    job = q.get(claimed.id)
+    assert job.state == JobState.PENDING
+    assert job.retry_count == 1
+    assert job.assigned_client_id is None
+
+    # (b) Drive it to the failure cap.
+    for _ in range(MAX_RETRIES + 1):
+        await q.check_timeouts()
+        if q.get(claimed.id).state == JobState.FAILED:
+            break
+        rec = await q.claim_next("worker-a")
+        if rec is not None:
+            rec.assigned_at = _utcnow() - timedelta(seconds=10)
+    job = q.get(claimed.id)
+    assert job.state == JobState.FAILED
+    assert "Permanently failed" in (job.log or "")
+
+    # (c) A fresh assignment with a future deadline must not be touched even
+    # though there is no heartbeat tracking in the queue at all.
+    await q.enqueue("other.yaml", "2024.3.1", "run1", timeout_seconds=9999)
+    fresh = await q.claim_next("worker-b")
+    affected = await q.check_timeouts()
+    assert fresh.id not in [j.id for j in affected]
+
+
+# ---------------------------------------------------------------------------
+# B.6 — queue.json corruption tests
+#
+# The queue MUST recover gracefully from a corrupt persistence file rather
+# than crashing the whole server at startup. Both a truncated file (invalid
+# JSON) and a structurally-valid-but-semantically-broken file should be
+# detected, logged at ERROR level, and fall back to an empty queue.
+# ---------------------------------------------------------------------------
+
+async def test_load_malformed_json_logs_error_and_starts_empty(tmp_queue_file, caplog):
+    """Invalid JSON in queue.json must not crash the server — it must log an
+    error and start with an empty in-memory queue."""
+    import logging
+
+    # Write non-JSON garbage.
+    Path(tmp_queue_file).write_text("not valid json {[")
+
+    q = JobQueue(queue_file=Path(tmp_queue_file))
+    with caplog.at_level(logging.ERROR, logger="job_queue"):
+        q.load()
+
+    assert q.get_all() == []
+    errors = [r for r in caplog.records if r.name == "job_queue" and r.levelno >= logging.ERROR]
+    assert errors, f"expected ERROR-level log record, got: {[r.getMessage() for r in caplog.records]}"
+    assert any("load queue" in r.getMessage().lower() for r in errors)
+
+
+async def test_load_truncated_json_logs_error_and_starts_empty(tmp_queue_file, caplog):
+    """A truncated persistence file (e.g. crash mid-write) must not crash."""
+    import logging
+
+    # Simulate a truncated write: valid prefix, cut off mid-object.
+    Path(tmp_queue_file).write_text('[{"id": "abc", "target": "dev.yaml"')
+
+    q = JobQueue(queue_file=Path(tmp_queue_file))
+    with caplog.at_level(logging.ERROR, logger="job_queue"):
+        q.load()
+
+    assert q.get_all() == []
+    assert any(r.levelno >= logging.ERROR for r in caplog.records if r.name == "job_queue")
+
+
+async def test_load_recovers_from_partial_corruption(tmp_queue_file, caplog):
+    """If the JSON parses but one job entry is missing required fields, the
+    load must skip the bad entry and preserve valid entries (rather than
+    dropping the whole file or crashing the server).
+    """
+    import logging
+
+    good = {
+        "id": "good-1",
+        "target": "dev.yaml",
+        "esphome_version": "2024.3.1",
+        "state": "pending",
+        "run_id": "run1",
+        "retry_count": 0,
+        "timeout_seconds": 600,
+        "created_at": _utcnow().isoformat(),
+    }
+    bad = {"id": "bad", "not_a_job": True}  # missing required fields
+    Path(tmp_queue_file).write_text(json.dumps([good, bad, good]))
+
+    q = JobQueue(queue_file=Path(tmp_queue_file))
+    with caplog.at_level(logging.ERROR, logger="job_queue"):
+        q.load()
+
+    loaded = {j.id for j in q.get_all()}
+    assert "good-1" in loaded, (
+        f"valid jobs must survive a partially-corrupt file; loaded={loaded}"
+    )
+    # An error should be logged for the bad entry.
+    assert any(r.levelno >= logging.ERROR for r in caplog.records if r.name == "job_queue")

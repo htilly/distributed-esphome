@@ -70,6 +70,17 @@ export interface SystemInfo {
   disk_used_pct?: number;
 }
 
+/**
+ * Fields used to pre-populate the Connect Worker modal when re-connecting
+ * an existing worker (e.g. from the "Image Stale" badge). All optional —
+ * missing fields fall back to the modal's default state.
+ */
+export interface WorkerPreset {
+  hostname?: string;
+  max_parallel_jobs?: number;
+  host_platform?: string;
+}
+
 export interface Worker {
   client_id: string;
   hostname: string;

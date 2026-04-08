@@ -192,3 +192,198 @@ async def test_on_startup_does_not_block_on_supervisor_api(tmp_path):
         "on_startup called _fetch_ha_esphome_version — this blocks startup for "
         "up to 15 s when the HA Supervisor API is slow or unreachable"
     )
+
+
+# ---------------------------------------------------------------------------
+# _fetch_ha_esphome_version – add-on slug discovery (bug #4)
+# ---------------------------------------------------------------------------
+
+class _FakeResponse:
+    def __init__(self, status: int, payload: dict | None = None) -> None:
+        self.status = status
+        self._payload = payload or {}
+
+    async def json(self) -> dict:
+        return self._payload
+
+    async def __aenter__(self) -> "_FakeResponse":
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+
+class _FakeSession:
+    """Minimal aiohttp.ClientSession stand-in that replays scripted responses."""
+
+    def __init__(self, routes: dict[str, _FakeResponse]) -> None:
+        self._routes = routes
+        self.calls: list[str] = []
+
+    def get(self, url: str, headers=None, timeout=None):  # type: ignore[no-untyped-def]
+        self.calls.append(url)
+        if url in self._routes:
+            return self._routes[url]
+        return _FakeResponse(404)
+
+
+async def test_fetch_ha_esphome_version_finds_hashed_slug(monkeypatch):
+    """A user-hashed slug like ``a0d7b954_esphome`` must be discovered via
+    /addons listing (regression for bug #4 — previously hardcoded to three
+    well-known slugs and silently failed for custom installs)."""
+    from main import _fetch_ha_esphome_version
+
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "fake-token")
+    routes = {
+        "http://supervisor/addons": _FakeResponse(200, {
+            "data": {
+                "addons": [
+                    {"slug": "core_configurator", "name": "File editor", "version": "5.6.0"},
+                    {"slug": "a0d7b954_esphome", "name": "ESPHome Device Builder", "version": "2026.3.3"},
+                    {"slug": "core_mosquitto", "name": "Mosquitto broker", "version": "6.4.1"},
+                ],
+            },
+        }),
+    }
+    session = _FakeSession(routes)
+
+    version = await _fetch_ha_esphome_version(session)  # type: ignore[arg-type]
+    assert version == "2026.3.3"
+    # The listing alone was enough — no per-slug /info round-trip needed.
+    assert session.calls == ["http://supervisor/addons"]
+
+
+async def test_fetch_ha_esphome_version_returns_none_when_not_installed(monkeypatch):
+    """ESPHome add-on not installed — returns None cleanly, no guessing."""
+    from main import _fetch_ha_esphome_version
+
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "fake-token")
+    routes = {
+        "http://supervisor/addons": _FakeResponse(200, {
+            "data": {
+                "addons": [
+                    {"slug": "core_mosquitto", "name": "Mosquitto broker", "version": "6.4.1"},
+                ],
+            },
+        }),
+    }
+    session = _FakeSession(routes)
+
+    version = await _fetch_ha_esphome_version(session)  # type: ignore[arg-type]
+    assert version is None
+
+
+async def test_fetch_ha_esphome_version_falls_back_to_info_probe_on_listing_403(monkeypatch):
+    """When /addons returns 403 (the common case — we don't have
+    hassio_role: manager), the per-slug /info probe over the known slug list
+    must take over silently. Regression for bug introduced after the
+    initial bug #4 fix: probing /addons-only spammed 403 every 30s and
+    never recovered.
+    """
+    from main import _fetch_ha_esphome_version
+
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "fake-token")
+    routes = {
+        "http://supervisor/addons": _FakeResponse(403),
+        "http://supervisor/addons/a0d7b954_esphome/info": _FakeResponse(
+            200, {"data": {"version": "2026.4.0"}},
+        ),
+    }
+    session = _FakeSession(routes)
+
+    version = await _fetch_ha_esphome_version(session)  # type: ignore[arg-type]
+    assert version == "2026.4.0"
+    assert "http://supervisor/addons/a0d7b954_esphome/info" in session.calls
+
+
+async def test_fetch_ha_esphome_version_probes_core_slug(monkeypatch):
+    """Built-in core_esphome installs (no listing access) still resolve."""
+    from main import _fetch_ha_esphome_version
+
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "fake-token")
+    routes = {
+        "http://supervisor/addons": _FakeResponse(403),
+        "http://supervisor/addons/core_esphome/info": _FakeResponse(
+            200, {"data": {"version": "2026.3.3"}},
+        ),
+    }
+    session = _FakeSession(routes)
+    version = await _fetch_ha_esphome_version(session)  # type: ignore[arg-type]
+    assert version == "2026.3.3"
+
+
+# ---------------------------------------------------------------------------
+# ha_entity_poller – repeated-warning suppression (bug #5)
+# ---------------------------------------------------------------------------
+
+async def test_ha_entity_poller_demotes_repeated_warnings_to_debug(monkeypatch, caplog):
+    """After the second identical failure in a row, the warning must drop to
+    DEBUG so a persistent outage doesn't drown the log (bug #5).
+
+    The first two failures log at WARNING (with a one-time "above warning is
+    repeating" notice on the second), the third+ log at DEBUG, and a
+    successful poll resets the suppression counter.
+    """
+    import logging
+    from main import ha_entity_poller
+
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "fake-token")
+
+    # Swap asyncio.sleep for a fake that lets us run exactly N iterations.
+    iteration_count = {"n": 0}
+
+    async def fake_sleep(_seconds: float) -> None:
+        iteration_count["n"] += 1
+        if iteration_count["n"] >= 5:
+            raise asyncio.CancelledError()
+
+    # Force every poll to fail identically by making aiohttp.ClientSession()
+    # return a context manager whose get() always raises.
+    class _AlwaysFailSession:
+        async def __aenter__(self) -> "_AlwaysFailSession":
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+        def get(self, *a, **k):  # type: ignore[no-untyped-def]
+            raise RuntimeError("simulated HA down")
+
+        def post(self, *a, **k):  # type: ignore[no-untyped-def]
+            raise RuntimeError("simulated HA down")
+
+    app = {"ha_entity_status": {}, "ha_mac_set": set()}
+
+    with patch("asyncio.sleep", side_effect=fake_sleep), \
+         patch("aiohttp.ClientSession", return_value=_AlwaysFailSession()), \
+         caplog.at_level(logging.DEBUG, logger="main"):
+        try:
+            await ha_entity_poller(app)  # type: ignore[arg-type]
+        except asyncio.CancelledError:
+            pass
+
+    # Collect ha_entity_poller records by level
+    main_records = [r for r in caplog.records if r.name == "main"]
+    warnings = [r for r in main_records if r.levelno == logging.WARNING]
+    debugs = [r for r in main_records if r.levelno == logging.DEBUG]
+
+    # Each iteration emits two distinct fingerprints (``template_exception``
+    # from the inner try and ``poll_exception`` from the outer except). Each
+    # fingerprint is tracked independently: occurrences 1 and 2 log at
+    # WARNING (with a one-time "repeating" notice on the second), and
+    # occurrences 3+ drop to DEBUG.
+    #
+    # Over 5 iterations: 2 fingerprints × (2 warnings + 1 notice) = 6
+    # warning records, and 2 × 3 = 6 suppressed-to-DEBUG records.
+    warning_messages = [r.getMessage() for r in warnings]
+    assert len(warnings) == 6, (
+        f"expected 6 warning records, got {len(warnings)}: {warning_messages}"
+    )
+    repeating_notices = [m for m in warning_messages if "repeating" in m]
+    assert len(repeating_notices) == 2, (
+        f"expected 2 'repeating' notices (one per fingerprint), got: {repeating_notices}"
+    )
+    debug_messages = [r.getMessage() for r in debugs]
+    assert any("Error polling" in m or "Template API" in m for m in debug_messages), (
+        f"expected suppressed DEBUG records for the repeating failures, got: {debug_messages}"
+    )

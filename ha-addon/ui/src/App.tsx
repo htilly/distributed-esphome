@@ -91,22 +91,26 @@ export default function App() {
     getEsphomeVersions,
     { refreshInterval: 15 * 60_000, onError: () => {}, compare: deepCompare },
   );
+  // Poll at 1 Hz for live-feeling updates. Server-side state for all three of
+  // these endpoints is maintained in background threads (device_poller,
+  // registry heartbeats, JobQueue in-memory state), so a per-second GET is
+  // effectively a dict serialisation — no DB hits, no filesystem scans.
   const { data: workers = [], mutate: mutateWorkers } = useSWR(
     'workers',
     getWorkers,
-    { refreshInterval: 5_000, onError: () => {}, compare: deepCompare },
+    { refreshInterval: 1_000, onError: () => {}, compare: deepCompare },
   );
   const { data: devicesAndTargets, mutate: mutateDevices } = useSWR(
     'devices',
     async () => { const [t, d] = await Promise.all([getTargets(), getDevices()]); return { targets: t, devices: d }; },
-    { refreshInterval: 15_000, onError: () => {}, compare: deepCompare },
+    { refreshInterval: 1_000, onError: () => {}, compare: deepCompare },
   );
   const targets = devicesAndTargets?.targets ?? [];
   const devices = devicesAndTargets?.devices ?? [];
   const { data: queue = [], mutate: mutateQueue } = useSWR(
     'queue',
     getQueue,
-    { refreshInterval: 3_000, onError: () => {}, compare: deepCompare },
+    { refreshInterval: 1_000, onError: () => {}, compare: deepCompare },
   );
   // Exclude validation-only jobs from display (they run server-side and auto-prune)
   const displayQueue = useMemo(() => queue.filter(j => !j.validate_only), [queue]);
@@ -123,6 +127,7 @@ export default function App() {
   const [deviceLogTarget, setDeviceLogTarget] = useState<string | null>(null);
   const [editorTarget, setEditorTarget] = useState<string | null>(null);
   const [connectModalOpen, setConnectModalOpen] = useState(false);
+  const [connectModalPreset, setConnectModalPreset] = useState<import('./types').WorkerPreset | null>(null);
   const [renameModalTarget, setRenameModalTarget] = useState<string | null>(null);
 
   // Apply theme to <html> element on mount and on change
@@ -462,7 +467,7 @@ export default function App() {
             onSetParallelJobs={handleSetParallelJobs}
             onCleanCache={handleCleanWorkerCache}
             onCleanAllCaches={handleCleanAllCaches}
-            onConnectWorker={() => setConnectModalOpen(true)}
+            onConnectWorker={(preset) => { setConnectModalPreset(preset ?? null); setConnectModalOpen(true); }}
           />
         )}
       </main>
@@ -503,7 +508,8 @@ export default function App() {
         <ConnectWorkerModal
           serverInfo={serverInfo}
           esphomeVersion={seedVersion}
-          onClose={() => setConnectModalOpen(false)}
+          preset={connectModalPreset}
+          onClose={() => { setConnectModalOpen(false); setConnectModalPreset(null); }}
         />
       )}
 

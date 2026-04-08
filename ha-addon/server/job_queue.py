@@ -160,10 +160,34 @@ class JobQueue:
             logger.exception("Failed to load queue from %s; starting fresh", self._queue_file)
             return
 
+        if not isinstance(data, list):
+            logger.error(
+                "Queue file %s is not a JSON array (got %s); starting fresh",
+                self._queue_file, type(data).__name__,
+            )
+            return
+
         pruned = 0
+        skipped = 0
         cutoff = datetime.now(timezone.utc)
         for d in data:
-            job = Job.from_dict(d)
+            if not isinstance(d, dict):
+                logger.error("Skipping non-dict entry in queue file: %r", d)
+                skipped += 1
+                continue
+            try:
+                job = Job.from_dict(d)
+            except Exception:
+                # A single bad entry must not take down the whole queue —
+                # log the failure at ERROR (so it's visible in production logs)
+                # and continue with the rest of the file. B.6 regression guard.
+                logger.error(
+                    "Failed to parse job entry %r from queue file; skipping",
+                    d.get("id", "<no id>"),
+                    exc_info=True,
+                )
+                skipped += 1
+                continue
             # Restart recovery: working jobs reset to pending (worker is gone)
             if job.state == JobState.WORKING:
                 job.state = JobState.PENDING
@@ -186,6 +210,8 @@ class JobQueue:
         if pruned:
             logger.info("Pruned %d old terminal jobs on startup", pruned)
             self._persist()
+        if skipped:
+            logger.warning("Skipped %d unparseable job entries on startup", skipped)
         logger.info("Loaded %d jobs from %s", len(self._jobs), self._queue_file)
 
     # ------------------------------------------------------------------

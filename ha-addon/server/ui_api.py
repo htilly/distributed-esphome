@@ -354,7 +354,10 @@ async def ws_device_log(request: web.Request) -> web.WebSocketResponse:
         await client.connect(login=True)
         await ws.send_str("Connected. Streaming logs...\n\n")
 
-        loop = _asyncio.get_event_loop()
+        # C.8: capture the running loop while we're inside the async context.
+        # The log_callback fires from a different thread (aioesphomeapi worker
+        # thread), so we cannot call asyncio.get_running_loop() from inside it.
+        loop = _asyncio.get_running_loop()
 
         def log_callback(msg: Any) -> None:
             if ws.closed:
@@ -364,7 +367,11 @@ async def ws_device_log(request: web.Request) -> web.WebSocketResponse:
             if not text.endswith("\n"):
                 text += "\n"
             ts = _dt.now().strftime("[%H:%M:%S] ")
-            _asyncio.ensure_future(ws.send_str(ts + text), loop=loop)
+            # ``run_coroutine_threadsafe`` is the cross-thread analogue of
+            # create_task — required because log_callback runs in a worker
+            # thread, not on the event loop thread. ``ensure_future(..., loop=)``
+            # was the legacy way and is removed in 3.12.
+            _asyncio.run_coroutine_threadsafe(ws.send_str(ts + text), loop)
 
         # subscribe_logs is synchronous and returns an unsubscribe callable.
         unsub = client.subscribe_logs(log_callback, log_level=LogLevel.LOG_LEVEL_VERY_VERBOSE, dump_config=True)
