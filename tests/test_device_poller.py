@@ -333,3 +333,103 @@ async def test_query_device_encryption_error_skips_ping(poller):
 
     mock_ping.assert_not_called()
     assert poller._devices["living_room"].online is True
+
+
+# ---------------------------------------------------------------------------
+# bug #179 — IPv6 address parsing and merge-by-normalized-name
+# ---------------------------------------------------------------------------
+
+def test_extract_address_prefers_parsed_addresses(poller):
+    """When ServiceInfo.parsed_addresses() returns strings, use them directly."""
+    info = MagicMock()
+    info.addresses = [b"\xc0\xa8\x01\x10"]  # 192.168.1.16 (4 bytes)
+    info.parsed_addresses.return_value = ["192.168.1.16"]
+    assert poller._extract_address(info) == "192.168.1.16"
+
+
+def test_extract_address_prefers_ipv4_when_both_present(poller):
+    info = MagicMock()
+    info.addresses = []
+    info.parsed_addresses.return_value = ["fd00::1", "192.168.1.20"]
+    assert poller._extract_address(info) == "192.168.1.20"
+
+
+def test_extract_address_handles_ipv6_only(poller):
+    """Thread devices advertise via mDNS with only IPv6 AAAA records."""
+    info = MagicMock()
+    info.addresses = []
+    info.parsed_addresses.return_value = ["fd00::1234:5678"]
+    assert poller._extract_address(info) == "fd00::1234:5678"
+
+
+def test_extract_address_falls_back_to_packed_ipv4(poller):
+    """When parsed_addresses isn't available, parse 4-byte packed IPv4."""
+    info = MagicMock()
+    info.addresses = [b"\x0a\x00\x00\x05"]  # 10.0.0.5
+    info.parsed_addresses.side_effect = AttributeError()
+    assert poller._extract_address(info) == "10.0.0.5"
+
+
+def test_extract_address_falls_back_to_packed_ipv6(poller):
+    """When parsed_addresses isn't available, parse 16-byte packed IPv6."""
+    info = MagicMock()
+    # ::1 (loopback) packed = 16 bytes, last byte = 1
+    info.addresses = [b"\x00" * 15 + b"\x01"]
+    info.parsed_addresses.side_effect = AttributeError()
+    assert poller._extract_address(info) == "::1"
+
+
+def test_extract_address_returns_none_for_empty(poller):
+    info = MagicMock()
+    info.addresses = []
+    info.parsed_addresses.return_value = []
+    assert poller._extract_address(info) is None
+
+
+def test_find_existing_device_key_exact_match(poller):
+    poller._devices["my-device"] = Device(name="my-device", ip_address="")
+    assert poller._find_existing_device_key("my-device") == "my-device"
+
+
+def test_find_existing_device_key_normalized_match(poller):
+    """mDNS-discovered name (underscores) matches the YAML row (hyphens)."""
+    poller._devices["my-device"] = Device(name="my-device", ip_address="")
+    # mDNS would deliver "my_device" — should match the existing hyphen row
+    assert poller._find_existing_device_key("my_device") == "my-device"
+
+
+def test_find_existing_device_key_no_match(poller):
+    poller._devices["my-device"] = Device(name="my-device", ip_address="")
+    assert poller._find_existing_device_key("other-device") is None
+
+
+def test_update_compile_targets_creates_proactive_row_for_thread_target(poller):
+    """A Thread-only target with no wifi block now gets a proactive Device row,
+    so an mDNS-discovered entry merges into it instead of duplicating (#179)."""
+    poller.update_compile_targets(
+        ["thread-dev.yaml"],
+        name_to_target={"thread-dev": "thread-dev.yaml", "thread-dev.yaml": "thread-dev.yaml"},
+        address_overrides={"thread-dev": "thread-dev.local"},
+    )
+    assert "thread-dev" in poller._devices
+    dev = poller._devices["thread-dev"]
+    assert dev.compile_target == "thread-dev.yaml"
+    assert dev.online is False  # not yet seen via mDNS
+
+
+def test_update_compile_targets_does_not_duplicate_when_yaml_and_mdns_both_present(poller):
+    """If a YAML row already exists and mDNS rediscovery happens for the
+    underscore-normalized variant, _find_existing_device_key keeps it as one row."""
+    # Simulate the proactive YAML-side row
+    poller.update_compile_targets(
+        ["my-thread.yaml"],
+        name_to_target={"my-thread": "my-thread.yaml", "my-thread.yaml": "my-thread.yaml"},
+        address_overrides={"my-thread": "my-thread.local"},
+    )
+    assert "my-thread" in poller._devices
+
+    # Now simulate mDNS arriving with the underscore variant
+    existing = poller._find_existing_device_key("my_thread")
+    assert existing == "my-thread"
+    # Only one row total
+    assert len([k for k in poller._devices if k in ("my-thread", "my_thread")]) == 1

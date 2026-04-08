@@ -175,10 +175,7 @@ class DevicePoller:
             if "." in device_name:
                 device_name = device_name.split(".")[0]
 
-            ip = None
-            if info.addresses:
-                import socket  # noqa: PLC0415
-                ip = socket.inet_ntoa(info.addresses[0])
+            ip = self._extract_address(info)
 
             # Extract version from TXT record
             txt_version: Optional[str] = None
@@ -191,19 +188,27 @@ class DevicePoller:
 
             async with self._lock:
                 if state_change == ServiceStateChange.Removed:
-                    if device_name in self._devices:
-                        self._devices[device_name].online = False
+                    existing_key = self._find_existing_device_key(device_name)
+                    if existing_key:
+                        self._devices[existing_key].online = False
                     return
 
-                if device_name not in self._devices:
+                # Look up an existing device by normalized name (handles
+                # hyphen/underscore differences between YAML's esphome.name
+                # and the mDNS-advertised name) so mDNS discovery merges
+                # into the YAML-derived row instead of creating a duplicate
+                # (bug #179).
+                existing_key = self._find_existing_device_key(device_name)
+                if existing_key is None:
                     compile_target = self._map_target(device_name)
                     self._devices[device_name] = Device(
                         name=device_name,
                         ip_address=ip or "",
                         compile_target=compile_target,
                     )
+                    existing_key = device_name
 
-                dev = self._devices[device_name]
+                dev = self._devices[existing_key]
                 dev.online = True
                 dev.last_seen = _utcnow()
                 if ip:
@@ -212,14 +217,76 @@ class DevicePoller:
                     dev.running_version = txt_version
                 self._save_cache()
 
-            # Trigger an immediate API query for the full version
-            # Prefer use_address from config over mDNS IP
-            query_addr = self._address_overrides.get(device_name) or ip
+            # Trigger an immediate API query for the full version.
+            # Prefer use_address from config over mDNS IP. The address override
+            # may be keyed under either the normalized or original name; check
+            # both. Use existing_key (the merged-into device) for the query so
+            # ping/API results land on the right Device row.
+            query_addr = (
+                self._address_overrides.get(existing_key)
+                or self._address_overrides.get(device_name)
+                or ip
+            )
             if query_addr:
-                asyncio.ensure_future(self._query_device(device_name, query_addr))
+                asyncio.ensure_future(self._query_device(existing_key, query_addr))
 
         except Exception:
             logger.exception("Error handling mDNS service change for %s", name)
+
+    @staticmethod
+    def _extract_address(info: object) -> Optional[str]:
+        """Extract a single human-readable IP address from a zeroconf ServiceInfo.
+
+        Handles both IPv4 (4-byte) and IPv6 (16-byte) packed addresses, which
+        is required for Thread devices that advertise via SRP/mDNS over IPv6
+        AAAA records (bug #179). Prefers IPv4 when both are present.
+        """
+        # python-zeroconf provides parsed_addresses() in modern versions —
+        # try it first since it handles both families.
+        try:
+            parsed = info.parsed_addresses()  # type: ignore[attr-defined]
+        except Exception:
+            parsed = None
+
+        if parsed:
+            v4 = [a for a in parsed if "." in a]
+            if v4:
+                return v4[0]
+            return parsed[0]
+
+        # Fall back to manual parsing of the packed bytes
+        addrs = getattr(info, "addresses", None) or []
+        if not addrs:
+            return None
+        import socket  # noqa: PLC0415
+        v4 = [a for a in addrs if len(a) == 4]
+        if v4:
+            try:
+                return socket.inet_ntoa(v4[0])
+            except OSError:
+                pass
+        v6 = [a for a in addrs if len(a) == 16]
+        if v6:
+            try:
+                return socket.inet_ntop(socket.AF_INET6, v6[0])
+            except (OSError, ValueError):
+                pass
+        return None
+
+    def _find_existing_device_key(self, device_name: str) -> Optional[str]:
+        """Return the key under which *device_name* is already stored, or None.
+
+        Matches by hyphen/underscore-normalized name so an mDNS-discovered
+        ``my_device`` (mDNS replaces hyphens) merges with a YAML-derived
+        ``my-device`` row instead of creating a duplicate (bug #179).
+        """
+        if device_name in self._devices:
+            return device_name
+        norm = self._normalize(device_name)
+        for key in self._devices:
+            if self._normalize(key) == norm:
+                return key
+        return None
 
     # ------------------------------------------------------------------
     # Ping liveness check
@@ -392,10 +459,14 @@ class DevicePoller:
         for dev in self._devices.values():
             dev.compile_target = self._map_target(dev.name)
 
-        # Proactively create Device entries for targets with use_address
-        # that haven't been discovered via mDNS yet.
+        # Proactively create Device entries for every YAML target. Now that
+        # build_name_to_target_map populates address_overrides for ALL targets
+        # (via get_device_address, which falls back to {name}.local), every
+        # YAML row exists before mDNS discovery — so the mDNS handler merges
+        # into it instead of creating a duplicate (bug #179).
         for device_name, addr in self._address_overrides.items():
-            if device_name not in self._devices:
+            existing_key = self._find_existing_device_key(device_name)
+            if existing_key is None:
                 compile_target = self._map_target(device_name)
                 self._devices[device_name] = Device(
                     name=device_name,
@@ -403,10 +474,10 @@ class DevicePoller:
                     online=False,
                     compile_target=compile_target,
                 )
-                logger.debug("Created device %s from use_address %s (no mDNS yet)", device_name, addr)
+                logger.debug("Created device %s from address %s (no mDNS yet)", device_name, addr)
             else:
-                # Update IP from use_address if not already set from mDNS
-                dev = self._devices[device_name]
+                # Update IP from address override if not already set from mDNS
+                dev = self._devices[existing_key]
                 if not dev.ip_address:
                     dev.ip_address = addr
 
