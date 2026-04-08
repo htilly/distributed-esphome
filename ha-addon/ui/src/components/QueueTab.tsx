@@ -195,7 +195,7 @@ export function QueueTab({
       },
       sortingFn: 'alphanumeric',
     }),
-    columnHelper.accessor(row => row.created_at, {
+    columnHelper.accessor(row => new Date(row.created_at), {
       id: 'created_at',
       header: ({ column }) => <SortHeader label="Start Time" column={column} />,
       cell: ({ row: { original: job } }) => {
@@ -210,7 +210,7 @@ export function QueueTab({
       },
       sortingFn: 'datetime',
     }),
-    columnHelper.accessor(row => row.finished_at ?? '', {
+    columnHelper.accessor(row => (row.finished_at ? new Date(row.finished_at) : null), {
       id: 'finished_at',
       header: ({ column }) => <SortHeader label="Finish Time" column={column} />,
       cell: ({ row: { original: job } }) => {

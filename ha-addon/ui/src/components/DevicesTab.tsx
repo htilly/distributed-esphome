@@ -102,7 +102,7 @@ function formatAddressSource(source: string | null | undefined): string | null {
     case 'openthread_use_address': return 'openthread.use_address';
     case 'wifi_static_ip': return 'wifi static_ip';
     case 'ethernet_static_ip': return 'ethernet static_ip';
-    case 'mdns_default': return '{name}.local';
+    case 'mdns_default': return null;
     default: return null;
   }
 }

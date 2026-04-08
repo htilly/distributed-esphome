@@ -473,8 +473,8 @@ async def test_append_log_truncates_at_max(queue):
 
     log = queue.get(job.id)._streaming_log
     assert log.endswith(LOG_TRUNCATED_MARKER)
-    # Total should be capped content + marker
-    assert len(log) == MAX_LOG_BYTES + len(LOG_TRUNCATED_MARKER)
+    # Total never exceeds the configured cap (marker is reserved within it)
+    assert len(log) == MAX_LOG_BYTES
 
 
 async def test_append_log_drops_after_truncation(queue):

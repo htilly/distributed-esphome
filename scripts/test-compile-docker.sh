@@ -38,6 +38,7 @@ run_compile_test() {
     -e ESPHOME_VERSION="${ESPHOME_VERSION}" \
     "${image}" \
     -c "
+      set -uo pipefail; \
       pip install --no-cache-dir 'esphome==${ESPHOME_VERSION}' && \
       cd /config && \
       PASS=0; FAIL=0; FAILED=''; \

@@ -468,11 +468,24 @@ class JobQueue:
             job = self._jobs.get(job_id)
             if job is None:
                 return False
-            if len(job._streaming_log) >= MAX_LOG_BYTES:
+            current_len = len(job._streaming_log)
+            if current_len >= MAX_LOG_BYTES:
                 return True  # silently drop — already truncated
-            job._streaming_log += text
-            if len(job._streaming_log) > MAX_LOG_BYTES:
-                job._streaming_log = job._streaming_log[:MAX_LOG_BYTES] + LOG_TRUNCATED_MARKER
+            # Reserve space for the truncation marker so the final log
+            # never exceeds MAX_LOG_BYTES, and never concatenate the full
+            # incoming text first (which would itself risk OOM).
+            budget = MAX_LOG_BYTES - current_len
+            if len(text) <= budget:
+                job._streaming_log += text
+            else:
+                # Truncating. Final log must not exceed MAX_LOG_BYTES,
+                # including the marker — trim the existing log if needed.
+                marker_len = len(LOG_TRUNCATED_MARKER)
+                if budget >= marker_len:
+                    job._streaming_log += text[: budget - marker_len] + LOG_TRUNCATED_MARKER
+                else:
+                    trim_to = max(0, MAX_LOG_BYTES - marker_len)
+                    job._streaming_log = job._streaming_log[:trim_to] + LOG_TRUNCATED_MARKER
             return True
 
     def get_all(self) -> list[Job]:
