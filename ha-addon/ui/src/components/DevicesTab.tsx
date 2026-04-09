@@ -33,7 +33,7 @@ import {
 } from './ui/dialog';
 
 /* ---- Column configuration ---- */
-type OptionalColumnId = 'status' | 'ha' | 'ip' | 'running' | 'area' | 'comment' | 'project' | 'net' | 'ipmode' | 'ipv6' | 'ap';
+type OptionalColumnId = 'status' | 'ha' | 'ip' | 'running' | 'area' | 'comment' | 'project' | 'net' | 'ipconfig' | 'ap';
 
 interface OptionalColumnDef {
   id: OptionalColumnId;
@@ -47,8 +47,7 @@ const OPTIONAL_COLUMNS: OptionalColumnDef[] = [
   { id: 'ip', label: 'IP', defaultVisible: true },
   { id: 'net', label: 'Net', defaultVisible: true },
   { id: 'running', label: 'Version', defaultVisible: true },
-  { id: 'ipmode', label: 'IP Mode', defaultVisible: false },
-  { id: 'ipv6', label: 'IPv6', defaultVisible: false },
+  { id: 'ipconfig', label: 'IP Config', defaultVisible: false },
   { id: 'ap', label: 'AP', defaultVisible: false },
   { id: 'area', label: 'Area', defaultVisible: false },
   { id: 'comment', label: 'Comment', defaultVisible: false },
@@ -477,36 +476,33 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
         sortingFn: 'alphanumeric',
       },
     ),
+    // #19: combined IP Mode + IPv6 column. Sorts by mode then by ipv6 so an
+    // ascending sort groups all "Static + IPv6" together. Renders as e.g.
+    // "Static · IPv6" or just "DHCP" or "—" for unmanaged-network targets.
     columnHelper.accessor(
-      row => row.network_type
-        ? (row.network_static_ip ? 'Static' : 'DHCP')
-        : '',
+      row => {
+        if (!row.network_type) return '';
+        const mode = row.network_static_ip ? 'static' : 'dhcp';
+        return `${mode}-${row.network_ipv6 ? '6' : '4'}`;
+      },
       {
-        id: 'ipmode',
-        header: ({ column }) => <SortHeader label="IP Mode" column={column} />,
+        id: 'ipconfig',
+        header: ({ column }) => <SortHeader label="IP Config" column={column} />,
         cell: ({ row: { original: t } }) => {
           if (!t.network_type) return <span style={{ color: 'var(--text-muted)' }}>—</span>;
+          const mode = t.network_static_ip ? 'Static' : 'DHCP';
           return (
-            <span style={{ fontSize: 12 }}>
-              {t.network_static_ip ? 'Static' : 'DHCP'}
+            <span style={{ fontSize: 12 }} title={`${mode}${t.network_ipv6 ? ' · IPv6' : ''}`}>
+              {mode}
+              {t.network_ipv6 && (
+                <span style={{ color: 'var(--success)', marginLeft: 4 }}>· IPv6</span>
+              )}
             </span>
           );
         },
         sortingFn: 'alphanumeric',
       },
     ),
-    columnHelper.accessor(row => row.network_ipv6 ? 'yes' : '', {
-      id: 'ipv6',
-      header: ({ column }) => <SortHeader label="IPv6" column={column} />,
-      cell: ({ row: { original: t } }) => (
-        <span style={{ fontSize: 12 }}>
-          {t.network_ipv6
-            ? <span style={{ color: 'var(--success)' }}>Yes</span>
-            : <span style={{ color: 'var(--text-muted)' }}>—</span>}
-        </span>
-      ),
-      sortingFn: 'alphanumeric',
-    }),
     columnHelper.accessor(row => row.network_ap_fallback ? 'yes' : '', {
       id: 'ap',
       header: ({ column }) => <SortHeader label="AP" column={column} />,
@@ -983,13 +979,12 @@ function UnmanagedRow({ device: d, isVisible }: { device: Device; isVisible: (co
           )}
         </td>
       )}
-      {/* #10 — Net/IP Mode/IPv6/AP columns. Unmanaged devices have no YAML so
-          we can't know any of this; render dashes. The cell order MUST match
-          the columns array order in the columns memo above:
-            status → ha → ip → net → ipmode → ipv6 → ap → running → area → comment → project */}
+      {/* #10/#19 — Net/IP Config/AP columns. Unmanaged devices have no YAML
+          so we can't know any of this; render dashes. The cell order MUST
+          match the columns array order in the columns memo above:
+            status → ha → ip → net → ipconfig → ap → running → area → comment → project */}
       {isVisible('net') && <td style={{ fontSize: 12 }}>{dash}</td>}
-      {isVisible('ipmode') && <td style={{ fontSize: 12 }}>{dash}</td>}
-      {isVisible('ipv6') && <td style={{ fontSize: 12 }}>{dash}</td>}
+      {isVisible('ipconfig') && <td style={{ fontSize: 12 }}>{dash}</td>}
       {isVisible('ap') && <td style={{ fontSize: 12 }}>{dash}</td>}
       {isVisible('running') && <td style={{ fontSize: 12 }}>{d.running_version || '—'}</td>}
       {isVisible('area') && <td style={{ fontSize: 12 }}>{dash}</td>}

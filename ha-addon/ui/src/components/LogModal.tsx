@@ -200,13 +200,17 @@ export function LogModal({ jobId, queue, workers, onClose, onRetry, onEdit, stac
     }
 
     if (!job.validate_only && ['failed', 'timed_out', 'success'].includes(job.state)) {
+      // #20: successful jobs use "Rerun" (green) — re-running a successful
+      // job isn't a retry, it's a fresh re-compile. Failed/timed-out keep
+      // "Retry" (warn / amber). Same convention as the queue table.
+      const isSuccess = job.state === 'success';
       retryEl = (
         <Button
-          variant="warn"
+          variant={isSuccess ? 'success' : 'warn'}
           size="sm"
           onClick={() => { onRetry([job.id]); onClose(); }}
         >
-          Retry
+          {isSuccess ? 'Rerun' : 'Retry'}
         </Button>
       );
     }

@@ -539,7 +539,12 @@ export default function App() {
           onClose={() => { setEditorTarget(null); mutateDevices(); }}
           onToast={addToast}
           onValidate={handleValidate}
-          onCompile={(target) => { handleCompile([target]); switchTab('queue'); }}
+          // #18: Save & Upgrade now goes through the same UpgradeModal as
+          // the per-row Upgrade button, so the user can pick a worker and
+          // ESPHome version before triggering the build. The editor still
+          // saves first (in handleSaveAndUpgrade) — this just changes what
+          // happens AFTER the save.
+          onCompile={(target) => handleOpenUpgradeModal(target)}
           onRename={(target) => { setEditorTarget(null); setRenameModalTarget(target); }}
           monacoTheme={theme === 'light' ? 'vs' : 'vs-dark'}
           esphomeVersion={esphomeVersions.selected ?? esphomeVersions.detected ?? undefined}

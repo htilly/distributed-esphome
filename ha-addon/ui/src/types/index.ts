@@ -139,6 +139,8 @@ export interface Job {
   id: string;
   target: string;
   state: string;
+  /** ESPHome version this job will compile against. */
+  esphome_version?: string;
   assigned_client_id?: string;
   assigned_hostname?: string;
   worker_id?: number | null;

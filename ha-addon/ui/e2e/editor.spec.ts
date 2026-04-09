@@ -77,7 +77,11 @@ test('clicking Validate fires the validate API', async ({ page }) => {
   await expect.poll(() => validateHits).toBeGreaterThan(0);
 });
 
-test('clicking Save & Upgrade fires save then compile', async ({ page }) => {
+test('clicking Save & Upgrade fires save then opens the Upgrade modal', async ({ page }) => {
+  // #18: Save & Upgrade in the editor saves the file and then opens the
+  // UpgradeModal (same one as the per-row Upgrade button), so the user can
+  // pick a worker and ESPHome version. The compile fires when the user
+  // clicks Upgrade inside the modal — not immediately after save.
   let saveHits = 0;
   let compileHits = 0;
   await page.route('**/ui/api/targets/*/content', route => {
@@ -95,7 +99,16 @@ test('clicking Save & Upgrade fires save then compile', async ({ page }) => {
   await openEditor(page);
   await page.getByRole('button', { name: /save & upgrade/i }).click();
 
+  // Save fires immediately.
   await expect.poll(() => saveHits).toBeGreaterThan(0);
+
+  // The Upgrade modal should now be open. Compile has NOT been called yet.
+  expect(compileHits, 'compile should not fire until the user confirms in the modal').toBe(0);
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: /^upgrade$/i }).click();
+
+  // Now compile fires.
   await expect.poll(() => compileHits).toBeGreaterThan(0);
 });
 
