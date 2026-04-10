@@ -92,10 +92,11 @@ export default function App() {
     getEsphomeVersions,
     { refreshInterval: 15 * 60_000, onError: () => {}, compare: deepCompare },
   );
-  // Poll at 1 Hz for live-feeling updates. Server-side state for all three of
-  // these endpoints is maintained in background threads (device_poller,
-  // registry heartbeats, JobQueue in-memory state), so a per-second GET is
-  // effectively a dict serialisation — no DB hits, no filesystem scans.
+  // Poll at 1 Hz for live-feeling updates. Workers + queue are pure in-memory
+  // reads. Targets/devices does a readdir + per-target stat() for mtime cache
+  // checks (metadata resolution is cached and only re-fires when a file
+  // changes), which is cheap on Linux but not free — if this becomes a
+  // concern on large config dirs, add a server-side snapshot cache.
   const { data: workers = [], mutate: mutateWorkers } = useSWR(
     'workers',
     getWorkers,
@@ -229,21 +230,14 @@ export default function App() {
     }
   }
 
-  async function handleValidate(target: string) {
+  // #25/#26: validation result returned directly to the caller (the editor)
+  // so it can show the output inline.
+  async function handleValidate(target: string): Promise<{ success: boolean; output: string } | null> {
     try {
-      // Bug #25: validation now runs directly on the server via
-      // ``esphome config`` — no queue, no worker, immediate result.
-      const result = await validateConfig(target);
-      if (result.success) {
-        addToast(`Validation passed for ${stripYaml(target)}`, 'success');
-      } else {
-        addToast(`Validation failed for ${stripYaml(target)}`, 'error');
-        // Show the output in the console for debugging — the toast is
-        // too small for multi-line esphome error output.
-        console.error('[validate]', result.output);
-      }
+      return await validateConfig(target);
     } catch (err) {
       addToast('Validate failed: ' + (err as Error).message, 'error');
+      return null;
     }
   }
 

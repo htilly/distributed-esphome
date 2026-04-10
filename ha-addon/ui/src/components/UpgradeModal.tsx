@@ -63,7 +63,9 @@ export function UpgradeModal({
     .sort((a, b) => a.hostname.localeCompare(b.hostname, undefined, { sensitivity: 'base' }));
 
   const [selectedWorker, setSelectedWorker] = useState<string>('');  // '' = <any>
-  const [selectedVersion, setSelectedVersion] = useState<string>(defaultEsphomeVersion ?? '');
+  const [selectedVersion, setSelectedVersion] = useState<string>(
+    defaultEsphomeVersion ?? esphomeVersions[0] ?? '',
+  );
 
   // Build the version dropdown list. Always include the default at the top
   // (even if it's not in the available list, e.g. when the global default

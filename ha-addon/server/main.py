@@ -54,10 +54,10 @@ async def version_header_middleware(request: web.Request, handler):
 # consumed programmatically by build workers and the headers add no value.
 #
 # CSP design notes:
-# - script-src 'self' is enough for the bundled Vite output (no inline
-#   scripts in the React build, no eval).
-# - style-src needs 'unsafe-inline' for Tailwind v4's inline class
-#   stylesheet generator + Monaco's dynamically-injected style elements.
+# - script-src needs 'unsafe-inline' because Monaco's @monaco-editor/react
+#   loader injects inline script elements for worker bootstrap. Tailwind v4
+#   also generates inline styles at runtime.
+# - style-src needs 'unsafe-inline' for the same Tailwind + Monaco reason.
 # - connect-src must allow wss: for the live-log WebSocket and
 #   https://schema.esphome.io for the editor schema fetcher (api/esphomeSchema.ts).
 # - worker-src 'self' blob: covers Monaco's editor worker.

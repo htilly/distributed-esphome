@@ -998,7 +998,6 @@ async def restart_device(request: web.Request) -> web.Response:
 
     filename = request.match_info["filename"]
     device_poller = request.app.get("device_poller")
-    ha_entity_status: dict[str, dict] = request.app.get("ha_entity_status", {})
 
     # ------------------------------------------------------------------
     # 1. Native API path — works without HA integration. Connects directly
@@ -1071,12 +1070,6 @@ async def restart_device(request: web.Request) -> web.Response:
             norm = _normalize_for_ha(n)
             if norm and norm not in candidate_names:
                 candidate_names.append(norm)
-    # Also pull any HA entity registry key that contains the device name and
-    # ends in _restart — handles cases where HA renamed the device.
-    for name in candidate_names[:]:
-        for key in ha_entity_status:
-            if name in key and key.endswith("_restart") and key not in candidate_names:
-                candidate_names.append(key)
     candidate_entity_ids = [f"button.{n}_restart" for n in candidate_names]
 
     token = os.environ.get("SUPERVISOR_TOKEN")
