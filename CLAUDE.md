@@ -117,6 +117,8 @@ Checked mechanically by `scripts/check-invariants.sh` (wired into the CI `test` 
 
 **PY-6 — Pydantic models in `protocol.py` are the wire contract.** `ha-addon/server/protocol.py` and `ha-addon/client/protocol.py` must stay byte-identical (enforced by `tests/test_protocol.py::test_server_and_client_protocol_files_are_identical`). Every server-facing `/api/v1/*` handler parses its body through the typed model; workers build their requests from the typed model. New fields are additive + optional unless `PROTOCOL_VERSION` is bumped.
 
+**PY-7 — Every `--ignore-vuln` must have an applicability assessment.** When adding a CVE ignore to `pip-audit` (or any audit tool), the inline comment must include: (1) why the fix version can't be pulled in (transitive bound, breaking change, etc.), (2) whether our code actually exercises the vulnerable code path, and (3) a date so staleness is visible. Don't just say "can't upgrade" — say whether the vulnerability matters for this codebase. If it does matter, track a follow-up in WORKITEMS rather than silently ignoring it.
+
 ## Design Judgment (aspirational — reviewed, not enforced)
 
 These aren't grep-checkable but matter just as much. They're how the codebase stays coherent.

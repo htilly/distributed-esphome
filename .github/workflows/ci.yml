@@ -95,10 +95,20 @@ jobs:
             --ignore-vuln CVE-2026-34073 \
             --ignore-vuln CVE-2026-39892 \
             --ignore-vuln CVE-2026-25645
-          # ^^^ cryptography 46.0.5 (CVE-2026-34073, CVE-2026-39892) and
-          # requests 2.32.5 (CVE-2026-25645) are pinned by ESPHome's
-          # transitive dependency bounds — can't upgrade until ESPHome
-          # releases with relaxed constraints. Tracked in WORKITEMS-1.4.md.
+          # ^^^ Pinned by ESPHome's transitive dep bounds — can't upgrade
+          # until ESPHome releases with relaxed constraints.
+          #
+          # Applicability assessment (2026-04-10):
+          #   CVE-2026-34073 (cryptography — DNS name constraint bypass):
+          #     NOT APPLICABLE. Transitive dep only; server↔worker comms
+          #     use HTTP, not HTTPS. Certificate validation never runs.
+          #   CVE-2026-39892 (cryptography — buffer overflow via non-contiguous buffers):
+          #     LOW RISK. Transitive dep; our code never passes custom buffers
+          #     to cryptographic APIs. Only theoretical path is Noise PSK in
+          #     aioesphomeapi, but buffer management is internal to the library.
+          #   CVE-2026-25645 (requests — predictable temp file in extract_zipped_paths):
+          #     NOT APPLICABLE. We never call extract_zipped_paths(); only
+          #     standard requests.get()/post() usage in client.py.
 
       - name: pip-audit (client lockfile)
         run: pip-audit --requirement ha-addon/client/requirements.lock
