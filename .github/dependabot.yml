@@ -55,6 +55,11 @@ updates:
     labels:
       - dependencies
       - docker
+    ignore:
+      # Python base image major bumps need lockfile regeneration + compile-test
+      # validation — don't auto-propose. Patch/minor updates are fine.
+      - dependency-name: python
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: docker
     directory: /ha-addon/client
@@ -65,6 +70,9 @@ updates:
     labels:
       - dependencies
       - docker
+    ignore:
+      - dependency-name: python
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
