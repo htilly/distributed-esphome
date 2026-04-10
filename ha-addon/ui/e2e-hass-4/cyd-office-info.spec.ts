@@ -217,41 +217,18 @@ test.describe.serial('cyd-office-info hass-4 smoke', () => {
     });
     expect(saveResp.ok(), 'save endpoint should accept the edit').toBeTruthy();
 
-    // #21: validate the edit. Trigger a validate-only job and poll the queue
-    // until it terminates, then assert the final state is success. This
-    // catches the class of bug where the edit is syntactically valid but
-    // semantically broken (substitutions resolved wrong, packages missing,
-    // etc.) — without it the next compile is the first thing that catches
-    // a regression.
+    // #21 / #25: validate the edit. Runs directly on the server as a
+    // subprocess (esphome config), no queue involvement. The response is
+    // immediate — { success: bool, output: string }.
     const validateResp = await request.post('./ui/api/validate', {
       data: { target: TARGET_FILENAME },
     });
-    expect(validateResp.ok(), 'validate endpoint should enqueue a job').toBeTruthy();
-    const validateJobId = (await validateResp.json() as { job_id: string }).job_id;
-    expect(validateJobId).toBeTruthy();
-
-    // Poll the queue for terminal state. Validate is fast (~5-15s on hass-4)
-    // but we give it 60s to be safe.
-    let validateState: string | null = null;
-    await expect.poll(
-      async () => {
-        const r = await request.get('./ui/api/queue');
-        if (!r.ok()) return null;
-        const queue = (await r.json()) as Array<{ id: string; state: string }>;
-        const job = queue.find(j => j.id === validateJobId);
-        validateState = job?.state ?? null;
-        return validateState;
-      },
-      {
-        timeout: 60_000,
-        intervals: [500, 1000, 2000],
-        message: 'validate job should reach a terminal state',
-      },
-    ).toMatch(/^(success|failed|timed_out)$/);
+    expect(validateResp.ok(), 'validate endpoint should return 2xx').toBeTruthy();
+    const validateResult = await validateResp.json() as { success: boolean; output: string };
     expect(
-      validateState,
-      `validate job ${validateJobId} should succeed; got ${validateState}`,
-    ).toBe('success');
+      validateResult.success,
+      `validation should pass; output:\n${validateResult.output}`,
+    ).toBe(true);
 
     // Reopen the editor and verify the marker shows up.
     await page.keyboard.press('Escape');

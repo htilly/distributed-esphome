@@ -558,11 +558,22 @@ async def set_esphome_version_handler(request: web.Request) -> web.Response:
 
 @routes.post("/ui/api/validate")
 async def validate_config(request: web.Request) -> web.Response:
-    """Start a validation job for a single target (runs esphome config, not compile).
+    """Validate a target's config by running ``esphome config`` directly
+    on the server.
 
     Body: { "target": "mydevice.yaml" }
-    Returns: { "job_id": "..." }
+    Returns: { "success": true/false, "output": "..." }
+
+    Bug #25: validation now runs as a direct subprocess on the add-on
+    server instead of going through the job queue. Rationale:
+      - ``esphome config`` only reads YAML files that are already on the
+        server's filesystem — no bundle transfer, no worker needed.
+      - It's fast (2–5 s) and the result is returned immediately in the
+        HTTP response — no queue polling, no log modal, no streaming.
+      - Doesn't consume remote worker capacity.
     """
+    import asyncio as _asyncio  # noqa: PLC0415
+
     try:
         body = await request.json()
     except Exception:
@@ -573,20 +584,44 @@ async def validate_config(request: web.Request) -> web.Response:
         return web.json_response({"error": "target required"}, status=400)
 
     cfg = _cfg(request)
-    queue = request.app["queue"]
-    server_version = get_esphome_version()
+    config_path = safe_resolve(Path(cfg.config_dir), target)
+    if config_path is None or not config_path.exists():
+        return json_error("Target file not found", 404)
 
-    job = await queue.enqueue(
-        target=target,
-        esphome_version=server_version,
-        run_id=str(uuid.uuid4()),
-        timeout_seconds=cfg.job_timeout,
-        validate_only=True,
-    )
-    if job is None:
-        return web.json_response({"error": "Job already queued"}, status=409)
-    logger.info("Validation job %s enqueued for target %s", job.id, target)
-    return web.json_response({"job_id": job.id})
+    logger.info("Validating %s via esphome config (direct subprocess)", target)
+
+    try:
+        proc = await _asyncio.create_subprocess_exec(
+            "esphome", "config", str(config_path),
+            stdout=_asyncio.subprocess.PIPE,
+            stderr=_asyncio.subprocess.STDOUT,
+            cwd=cfg.config_dir,
+        )
+        stdout, _ = await _asyncio.wait_for(proc.communicate(), timeout=60)
+        output = stdout.decode("utf-8", errors="replace") if stdout else ""
+        success = proc.returncode == 0
+    except _asyncio.TimeoutError:
+        return web.json_response(
+            {"success": False, "output": "Validation timed out after 60 seconds"},
+            status=200,
+        )
+    except FileNotFoundError:
+        return web.json_response(
+            {"success": False, "output": "esphome binary not found on the server"},
+            status=500,
+        )
+    except Exception as exc:
+        logger.exception("Validation subprocess failed for %s", target)
+        return web.json_response(
+            {"success": False, "output": f"Internal error: {exc}"},
+            status=500,
+        )
+
+    if success:
+        logger.info("Validation passed for %s", target)
+    else:
+        logger.warning("Validation failed for %s (exit %d)", target, proc.returncode or -1)
+    return web.json_response({"success": success, "output": output})
 
 
 @routes.post("/ui/api/compile")

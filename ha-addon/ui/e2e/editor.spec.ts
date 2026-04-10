@@ -64,17 +64,33 @@ test('clicking Save fires the save API and shows a toast', async ({ page }) => {
   await expect.poll(() => saveHits).toBeGreaterThan(0);
 });
 
-test('clicking Validate fires the validate API', async ({ page }) => {
+test('clicking Validate saves, fires the validate API, and shows a toast', async ({ page }) => {
+  // Bug #25: validation runs directly on the server (no queue). The flow:
+  // save → POST /ui/api/validate → immediate { success, output } response
+  // → success toast.
+  let saveHits = 0;
   let validateHits = 0;
+  await page.route('**/ui/api/targets/*/content', route => {
+    if (route.request().method() === 'POST') {
+      saveHits++;
+      return route.fulfill({ json: { ok: true } });
+    }
+    return route.fallback();
+  });
   await page.route('**/ui/api/validate', route => {
     validateHits++;
-    return route.fulfill({ json: { job_id: 'validate-001' } });
+    return route.fulfill({ json: { success: true, output: 'Configuration is valid!' } });
   });
 
   await openEditor(page);
   await page.getByRole('button', { name: /^validate$/i }).click();
 
-  await expect.poll(() => validateHits).toBeGreaterThan(0);
+  // Save fires first, then validate endpoint.
+  await expect.poll(() => saveHits, { message: 'Validate should save first' }).toBeGreaterThan(0);
+  await expect.poll(() => validateHits, { message: 'Validate API should be called' }).toBeGreaterThan(0);
+
+  // Success toast should appear (Sonner toast contains the text).
+  await expect(page.getByText(/validation passed/i)).toBeVisible({ timeout: 5_000 });
 });
 
 test('clicking Save & Upgrade fires save then opens the Upgrade modal', async ({ page }) => {

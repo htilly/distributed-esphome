@@ -231,11 +231,17 @@ export default function App() {
 
   async function handleValidate(target: string) {
     try {
+      // Bug #25: validation now runs directly on the server via
+      // ``esphome config`` — no queue, no worker, immediate result.
       const result = await validateConfig(target);
-      const jobId = result.job_id;
-      mutateQueue();
-      // Open the streaming log modal immediately — user sees output in real time
-      if (jobId) setLogJobId(jobId);
+      if (result.success) {
+        addToast(`Validation passed for ${stripYaml(target)}`, 'success');
+      } else {
+        addToast(`Validation failed for ${stripYaml(target)}`, 'error');
+        // Show the output in the console for debugging — the toast is
+        // too small for multi-line esphome error output.
+        console.error('[validate]', result.output);
+      }
     } catch (err) {
       addToast('Validate failed: ' + (err as Error).message, 'error');
     }

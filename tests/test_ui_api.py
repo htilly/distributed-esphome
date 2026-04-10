@@ -392,19 +392,48 @@ async def test_compile_invalid_json(tmp_path):
 # validate
 # ---------------------------------------------------------------------------
 
-async def test_validate_enqueues_validate_only_job(tmp_path):
+async def test_validate_runs_esphome_config_directly(tmp_path):
+    """Bug #25: /ui/api/validate runs ``esphome config`` as a direct subprocess
+    on the server. No queue, no worker, immediate response.
+
+    We mock ``asyncio.create_subprocess_exec`` since ``esphome`` isn't
+    installed in the test environment.
+    """
+    from unittest.mock import AsyncMock, patch, MagicMock
+
     ta = await _make_ui_app(tmp_path)
     try:
         _write_config(ta.config_dir, "device1.yaml", "device1")
-        resp = await ta.post("/ui/api/validate", json={"target": "device1.yaml"})
-        assert resp.status == 200
-        data = await resp.json()
-        assert "job_id" in data
 
-        job = ta.queue.get(data["job_id"])
-        assert job is not None
-        assert job.validate_only is True
-        assert job.target == "device1.yaml"
+        # Mock a successful esphome config run.
+        mock_proc = MagicMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"Configuration is valid!\n", b""))
+        mock_proc.returncode = 0
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+            resp = await ta.post("/ui/api/validate", json={"target": "device1.yaml"})
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["success"] is True
+            assert "valid" in data["output"].lower()
+
+            # Verify esphome config was called with the correct target path.
+            mock_exec.assert_called_once()
+            args = mock_exec.call_args[0]
+            assert args[0] == "esphome"
+            assert args[1] == "config"
+            assert "device1.yaml" in str(args[2])
+
+        # Also test a failed validation.
+        mock_proc.communicate = AsyncMock(return_value=(b"ERROR: Invalid YAML\n", b""))
+        mock_proc.returncode = 1
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            resp = await ta.post("/ui/api/validate", json={"target": "device1.yaml"})
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["success"] is False
+            assert "Invalid YAML" in data["output"]
     finally:
         await ta.close()
 
