@@ -10,7 +10,7 @@ import {
   type RowSelectionState,
 } from '@tanstack/react-table';
 import { getApiKey, restartDevice, pinTargetVersion, unpinTargetVersion, setTargetSchedule } from '../api/client';
-import { ScheduleModal } from './ScheduleModal';
+import { UpgradeModal } from './UpgradeModal';
 import type { Device, Job, Target, Worker } from '../types';
 import { stripYaml, timeAgo } from '../utils';
 import { StatusDot } from './StatusDot';
@@ -951,10 +951,16 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
       )}
 
       {bulkScheduleOpen && (
-        <ScheduleModal
+        <UpgradeModal
           target="(multiple)"
           displayName={`${selectedTargets.length} device${selectedTargets.length > 1 ? 's' : ''}`}
-          onSave={async (cron) => {
+          workers={workers}
+          esphomeVersions={[]}
+          defaultEsphomeVersion={null}
+          scheduleOnly
+          defaultMode="schedule"
+          onUpgradeNow={() => {}}
+          onSaveSchedule={async (cron) => {
             try {
               await Promise.all(selectedTargets.map(t => setTargetSchedule(t, cron)));
               onToast(`Schedule set for ${selectedTargets.length} device(s)`, 'success');
@@ -975,8 +981,7 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
               onToast('Schedule failed: ' + (err as Error).message, 'error');
             }
           }}
-          onDelete={() => setBulkScheduleOpen(false)}
-          onToggle={() => {}}
+          onDeleteSchedule={() => setBulkScheduleOpen(false)}
           onClose={() => setBulkScheduleOpen(false)}
         />
       )}

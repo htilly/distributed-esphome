@@ -6,47 +6,102 @@ import {
   DialogTitle,
 } from './ui/dialog';
 import { Button } from './ui/button';
+import { Input } from './ui/input';
 import { Select } from './ui/select';
 import type { Worker } from '../types';
 
 /**
- * Upgrade modal (#16).
+ * Unified Upgrade modal (#22).
  *
- * Replaces the inline Upgrade button click + hand-rolled "Upgrade on..."
- * submenu with a single modal that lets the user choose:
- *  - **Worker** — `<any>` (default; dispatches via the normal scheduler) or
- *    a specific online worker (sent as `pinned_client_id`).
- *  - **ESPHome version** — defaults to the global selected version, plus
- *    every other available version. Picking a non-default value enqueues
- *    the job with an `esphome_version` override.
+ * Two modes via radio buttons: "Now" (compile immediately) or "Scheduled"
+ * (set a recurring or one-time schedule). Both share the worker + version
+ * selectors. The confirm button adapts: "Upgrade" vs "Save Schedule".
  *
- * Confirm = "Upgrade" button. Cancel = the Dialog's built-in close.
+ * Entry points:
+ * - Row "Upgrade" button → defaultMode: 'now'
+ * - Hamburger "Schedule Upgrade..." → defaultMode: 'schedule'
+ * - Schedules tab "Edit" → defaultMode: 'schedule', schedule pre-filled
  */
 
+// ---------------------------------------------------------------------------
+// Cron builder helpers (from the old ScheduleModal)
+// ---------------------------------------------------------------------------
+
+function buildCron(interval: string, every: number, time: string, dow: string): string {
+  const [hh, mm] = time.split(':').map(Number);
+  const minute = isNaN(mm) ? 0 : mm;
+  const hour = isNaN(hh) ? 2 : hh;
+  switch (interval) {
+    case 'hours': return every === 1 ? `${minute} * * * *` : `${minute} */${every} * * *`;
+    case 'days': return every === 1 ? `${minute} ${hour} * * *` : `${minute} ${hour} */${every} * *`;
+    case 'weeks': return `${minute} ${hour} * * ${dow}`;
+    default: return `${minute} ${hour} * * *`;
+  }
+}
+
+function parseCron(cron: string): { interval: string; every: number; time: string; dow: string } | null {
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [min, hour, dom, , dow] = parts;
+  const minute = parseInt(min, 10);
+  if (isNaN(minute)) return null;
+  if (hour.startsWith('*/') && dom === '*' && dow === '*') {
+    return { interval: 'hours', every: parseInt(hour.slice(2), 10), time: `00:${String(minute).padStart(2, '0')}`, dow: '0' };
+  }
+  if (hour === '*' && dom === '*' && dow === '*') {
+    return { interval: 'hours', every: 1, time: `00:${String(minute).padStart(2, '0')}`, dow: '0' };
+  }
+  const h = parseInt(hour, 10);
+  if (isNaN(h)) return null;
+  const timeStr = `${String(h).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+  if (dow === '*') {
+    if (dom === '*') return { interval: 'days', every: 1, time: timeStr, dow: '0' };
+    if (dom.startsWith('*/')) return { interval: 'days', every: parseInt(dom.slice(2), 10), time: timeStr, dow: '0' };
+    return null;
+  }
+  if (dom === '*') return { interval: 'weeks', every: 1, time: timeStr, dow };
+  return null;
+}
+
+const DAY_OPTIONS = [
+  { label: 'Sunday', value: '0' },
+  { label: 'Monday', value: '1' },
+  { label: 'Tuesday', value: '2' },
+  { label: 'Wednesday', value: '3' },
+  { label: 'Thursday', value: '4' },
+  { label: 'Friday', value: '5' },
+  { label: 'Saturday', value: '6' },
+];
+
+// ---------------------------------------------------------------------------
+// Props
+// ---------------------------------------------------------------------------
+
 interface Props {
-  /** The target YAML filename (e.g. "cyd-office-info.yaml"). */
   target: string;
-  /** Display name shown in the title (friendly_name preferred, falls back to target). */
   displayName: string;
-  /** All workers; we filter to online + non-paused inside the component. */
   workers: Worker[];
-  /** All available ESPHome versions, newest first. */
   esphomeVersions: string[];
-  /** The currently selected/default ESPHome version (radio default). */
   defaultEsphomeVersion: string | null;
-  /** If the device is pinned, the pinned version. Shown as a warning. */
   pinnedVersion?: string | null;
-  /**
-   * Called when the user clicks Upgrade. Receives the selected worker
-   * client_id (or null for `<any>`) and the selected ESPHome version
-   * (or null when it equals the default — caller can omit the override).
-   */
-  onConfirm: (params: {
+  /** Pre-existing recurring schedule (cron expression). */
+  currentSchedule?: string | null;
+  currentScheduleEnabled?: boolean;
+  /** Pre-existing one-time schedule (ISO datetime). */
+  currentOnce?: string | null;
+  /** Which mode to open in: 'now' for immediate upgrade, 'schedule' for scheduling. */
+  defaultMode?: 'now' | 'schedule';
+  /** If true, only show the schedule UI — hide mode radios and worker/version pickers.
+   *  Used for bulk "Schedule Selected" where version/worker are per-device concerns. */
+  scheduleOnly?: boolean;
+  onUpgradeNow: (params: {
     pinnedClientId: string | null;
     esphomeVersion: string | null;
-    /** When true, the caller should update the device's pin to the selected version. */
     updatePin?: string | null;
   }) => void;
+  onSaveSchedule: (cron: string) => void;
+  onSaveOnce: (datetime: string) => void;
+  onDeleteSchedule: () => void;
   onClose: () => void;
 }
 
@@ -57,115 +112,221 @@ export function UpgradeModal({
   esphomeVersions,
   defaultEsphomeVersion,
   pinnedVersion,
-  onConfirm,
+  currentSchedule,
+  currentScheduleEnabled: _currentScheduleEnabled,
+  currentOnce,
+  defaultMode = 'now',
+  scheduleOnly = false,
+  onUpgradeNow,
+  onSaveSchedule,
+  onSaveOnce,
+  onDeleteSchedule,
   onClose,
 }: Props) {
   void _target;
-  // Online + accepting jobs. Sorted by hostname for stable ordering.
+
+  // --- Shared state: worker + version ---
   const eligibleWorkers = workers
     .filter(w => w.online && !w.disabled && (w.max_parallel_jobs ?? 0) > 0)
     .slice()
     .sort((a, b) => a.hostname.localeCompare(b.hostname, undefined, { sensitivity: 'base' }));
 
-  const [selectedWorker, setSelectedWorker] = useState<string>('');  // '' = <any>
+  const [selectedWorker, setSelectedWorker] = useState<string>('');
   const [selectedVersion, setSelectedVersion] = useState<string>(
     defaultEsphomeVersion ?? esphomeVersions[0] ?? '',
   );
 
-  // Build the version dropdown list. Always include the default at the top
-  // (even if it's not in the available list, e.g. when the global default
-  // is a build version that PyPI hasn't seen). De-dup the rest.
   const versionList: string[] = [];
   if (defaultEsphomeVersion) versionList.push(defaultEsphomeVersion);
   for (const v of esphomeVersions) {
     if (v && !versionList.includes(v)) versionList.push(v);
   }
 
+  // --- Mode: now vs schedule ---
+  const [mode, setMode] = useState<'now' | 'schedule'>(scheduleOnly ? 'schedule' : defaultMode);
+
+  // --- Schedule state ---
+  const parsed = currentSchedule ? parseCron(currentSchedule) : null;
+  const [scheduleType, setScheduleType] = useState<'recurring' | 'once'>(currentOnce ? 'once' : 'recurring');
+  const [interval, setInterval] = useState(parsed?.interval ?? 'days');
+  const [every, setEvery] = useState(parsed?.every ?? 1);
+  const [time, setTime] = useState(parsed?.time ?? '02:00');
+  const [dow, setDow] = useState(parsed?.dow ?? '0');
+  const [rawCron, setRawCron] = useState(currentSchedule ?? '');
+  const [cronMode, setCronMode] = useState<'friendly' | 'cron'>(parsed || !currentSchedule ? 'friendly' : 'cron');
+  const [onceDate, setOnceDate] = useState(() => {
+    if (currentOnce) return new Date(currentOnce).toISOString().slice(0, 16);
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(2, 0, 0, 0);
+    return tomorrow.toISOString().slice(0, 16);
+  });
+
+  const effectiveCron = cronMode === 'cron' ? rawCron.trim() : buildCron(interval, every, time, dow);
+  const hasExistingSchedule = !!(currentSchedule || currentOnce);
+
+  // --- Pin warning ---
+  const shouldUpdatePin = pinnedVersion && selectedVersion && selectedVersion !== pinnedVersion;
+
   function handleConfirm() {
-    // #12: if the device is pinned and the user chose a different version,
-    // tell the caller to update the pin to the new version.
-    const shouldUpdatePin = pinnedVersion && selectedVersion && selectedVersion !== pinnedVersion
-      ? selectedVersion
-      : null;
-    onConfirm({
-      pinnedClientId: selectedWorker || null,
-      // Only send the override when the user picked a non-default version.
-      esphomeVersion: selectedVersion && selectedVersion !== defaultEsphomeVersion
-        ? selectedVersion
-        : null,
-      updatePin: shouldUpdatePin,
-    });
+    if (mode === 'now') {
+      onUpgradeNow({
+        pinnedClientId: selectedWorker || null,
+        esphomeVersion: selectedVersion && selectedVersion !== defaultEsphomeVersion ? selectedVersion : null,
+        updatePin: shouldUpdatePin ? selectedVersion : null,
+      });
+    } else {
+      if (scheduleType === 'once') {
+        onSaveOnce(new Date(onceDate).toISOString());
+      } else {
+        onSaveSchedule(effectiveCron);
+      }
+    }
   }
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent style={{ maxWidth: 480 }}>
         <DialogHeader>
-          <DialogTitle>Upgrade {displayName}</DialogTitle>
+          <DialogTitle>Upgrade — {displayName}</DialogTitle>
         </DialogHeader>
         <div className="p-[18px] flex flex-col gap-4">
-          <div>
-            <label className="block text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)] mb-1">
-              Worker
-            </label>
-            <Select
-              value={selectedWorker}
-              onChange={e => setSelectedWorker(e.target.value)}
-            >
-              <option value="">&lt;any&gt; — let the scheduler pick</option>
-              {eligibleWorkers.map(w => (
-                <option key={w.client_id} value={w.client_id}>
-                  {w.hostname}
-                </option>
-              ))}
-            </Select>
-            {eligibleWorkers.length === 0 && (
-              <div className="mt-1 text-[11px] text-[var(--text-muted)]">
-                No workers are currently online; the job will queue and the next
-                available worker will pick it up.
-              </div>
-            )}
-          </div>
 
-          <div>
-            <label className="block text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)] mb-1">
-              ESPHome version
-            </label>
-            <Select
-              value={selectedVersion}
-              onChange={e => setSelectedVersion(e.target.value)}
-            >
-              {versionList.length === 0 && <option value="">(default)</option>}
-              {versionList.map(v => (
-                <option key={v} value={v}>
-                  {v}{v === defaultEsphomeVersion ? ' (default)' : ''}
-                </option>
-              ))}
-            </Select>
-            <div className="mt-1 text-[11px] text-[var(--text-muted)]">
-              Picking a non-default version stamps it on this job only — the
-              global default isn't changed.
-            </div>
-          </div>
-
-          {/* #12: when upgrading a pinned device to a different version, tell the
-              user the pin will be updated to match the new version. */}
-          {pinnedVersion && selectedVersion && selectedVersion !== pinnedVersion && (
-            <div
-              className="rounded-lg border border-[var(--accent)] bg-[var(--accent)]/10 px-3 py-2 text-[12px]"
-              style={{ color: 'var(--accent)' }}
-            >
-              <strong>Pin update.</strong> This device is currently pinned to{' '}
-              <code className="bg-[var(--surface)] px-1 rounded">{pinnedVersion}</code>
-              . Upgrading will update the pin to{' '}
-              <code className="bg-[var(--surface)] px-1 rounded">{selectedVersion}</code>
-              .
+          {/* Mode radio: Now vs Schedule (hidden in scheduleOnly mode) */}
+          {!scheduleOnly && (
+            <div className="flex items-center gap-4">
+              <label className="flex items-center gap-1.5 text-[13px] cursor-pointer">
+                <input type="radio" name="upgrade-mode" checked={mode === 'now'} onChange={() => setMode('now')} />
+                Now
+              </label>
+              <label className="flex items-center gap-1.5 text-[13px] cursor-pointer">
+                <input type="radio" name="upgrade-mode" checked={mode === 'schedule'} onChange={() => setMode('schedule')} />
+                Scheduled
+              </label>
             </div>
           )}
 
+          {/* Shared: Worker + Version (hidden in scheduleOnly mode) */}
+          {!scheduleOnly && (
+            <>
+              <div>
+                <label className="block text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)] mb-1">Worker</label>
+                <Select value={selectedWorker} onChange={e => setSelectedWorker(e.target.value)}>
+                  <option value="">&lt;any&gt; — let the scheduler pick</option>
+                  {eligibleWorkers.map(w => (
+                    <option key={w.client_id} value={w.client_id}>{w.hostname}</option>
+                  ))}
+                </Select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)] mb-1">ESPHome version</label>
+                <Select value={selectedVersion} onChange={e => setSelectedVersion(e.target.value)}>
+                  {versionList.map(v => (
+                    <option key={v} value={v}>
+                      {v}{v === defaultEsphomeVersion ? ' (default)' : ''}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+
+              {/* Pin warning */}
+              {shouldUpdatePin && mode === 'now' && (
+                <div className="rounded-lg border border-[var(--accent)] bg-[var(--accent)]/10 px-3 py-2 text-[12px]" style={{ color: 'var(--accent)' }}>
+                  <strong>Pin update.</strong> Currently pinned to <code className="bg-[var(--surface)] px-1 rounded">{pinnedVersion}</code>. Upgrading will update the pin to <code className="bg-[var(--surface)] px-1 rounded">{selectedVersion}</code>.
+                </div>
+              )}
+            </>
+          )}
+
+          {/* Schedule options (only visible in schedule mode) */}
+          {mode === 'schedule' && (
+            <div className="flex flex-col gap-3 pt-1 border-t border-[var(--border)]">
+              {/* Recurring vs Once */}
+              <div className="flex items-center gap-4">
+                <label className="flex items-center gap-1.5 text-[12px] cursor-pointer">
+                  <input type="radio" name="schedule-type" checked={scheduleType === 'recurring'} onChange={() => setScheduleType('recurring')} />
+                  Recurring
+                </label>
+                <label className="flex items-center gap-1.5 text-[12px] cursor-pointer">
+                  <input type="radio" name="schedule-type" checked={scheduleType === 'once'} onChange={() => setScheduleType('once')} />
+                  One-time
+                </label>
+                {scheduleType === 'recurring' && (
+                  <button
+                    className="ml-auto text-[10px] text-[var(--text-muted)] cursor-pointer hover:text-[var(--text)]"
+                    onClick={() => setCronMode(cronMode === 'friendly' ? 'cron' : 'friendly')}
+                  >
+                    {cronMode === 'friendly' ? 'Advanced (cron)' : 'Simple'}
+                  </button>
+                )}
+              </div>
+
+              {scheduleType === 'recurring' ? (
+                cronMode === 'friendly' ? (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[12px]">Every</span>
+                    <Input type="number" min={1} max={30} value={every} onChange={e => setEvery(Math.max(1, parseInt(e.target.value, 10) || 1))} className="w-[60px]" />
+                    <Select value={interval} onChange={e => setInterval(e.target.value)} className="w-[100px]">
+                      <option value="hours">hour(s)</option>
+                      <option value="days">day(s)</option>
+                      <option value="weeks">week(s)</option>
+                    </Select>
+                    {interval === 'weeks' && (
+                      <>
+                        <span className="text-[12px]">on</span>
+                        <Select value={dow} onChange={e => setDow(e.target.value)} className="w-[120px]">
+                          {DAY_OPTIONS.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
+                        </Select>
+                      </>
+                    )}
+                    {interval !== 'hours' && (
+                      <>
+                        <span className="text-[12px]">at</span>
+                        <Input type="time" value={time} onChange={e => setTime(e.target.value)} className="w-[100px]" />
+                      </>
+                    )}
+                  </div>
+                ) : (
+                  <div>
+                    <Input type="text" value={rawCron} placeholder="0 2 * * *" onChange={e => setRawCron(e.target.value)} />
+                    <div className="mt-1 text-[10px] text-[var(--text-muted)]">minute hour day-of-month month day-of-week</div>
+                  </div>
+                )
+              ) : (
+                <div>
+                  <Input type="datetime-local" value={onceDate} min={new Date().toISOString().slice(0, 16)} onChange={e => setOnceDate(e.target.value)} />
+                  <div className="mt-1 text-[10px] text-[var(--text-muted)]">Upgrades once at this time, then the schedule is removed.</div>
+                </div>
+              )}
+
+              {scheduleType === 'recurring' && cronMode === 'friendly' && (
+                <div className="text-[10px] text-[var(--text-muted)]">
+                  Cron: <code className="bg-[var(--surface)] px-1 rounded">{effectiveCron}</code>
+                </div>
+              )}
+
+              {hasExistingSchedule && (
+                <button
+                  className="text-[11px] text-[var(--destructive)] cursor-pointer hover:underline self-start"
+                  onClick={() => { onDeleteSchedule(); onClose(); }}
+                >
+                  Remove existing schedule
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Confirm */}
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="secondary" onClick={onClose}>Cancel</Button>
-            <Button variant="success" onClick={handleConfirm}>Upgrade</Button>
+            <Button
+              variant={mode === 'now' ? 'success' : 'default'}
+              disabled={mode === 'schedule' && scheduleType === 'once' && !onceDate}
+              onClick={handleConfirm}
+            >
+              {mode === 'now' ? 'Upgrade' : 'Save Schedule'}
+            </Button>
           </div>
         </div>
       </DialogContent>

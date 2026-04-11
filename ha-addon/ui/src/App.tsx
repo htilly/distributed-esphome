@@ -25,14 +25,13 @@ import {
   validateConfig,
   setTargetSchedule,
   deleteTargetSchedule,
-  toggleTargetSchedule,
   pinTargetVersion,
 } from './api/client';
 import { ConnectWorkerModal } from './components/ConnectWorkerModal';
 import { DeviceLogModal } from './components/DeviceLogModal';
 import { DevicesTab, RenameModal } from './components/DevicesTab';
 import { UpgradeModal } from './components/UpgradeModal';
-import { ScheduleModal } from './components/ScheduleModal';
+// ScheduleModal retired in #22 — absorbed into the unified UpgradeModal.
 import { SchedulesTab } from './components/SchedulesTab';
 import { EditorModal } from './components/EditorModal';
 import { EsphomeVersionDropdown } from './components/EsphomeVersionDropdown';
@@ -154,9 +153,8 @@ export default function App() {
   const [editorTarget, setEditorTarget] = useState<string | null>(null);
   const [connectModalOpen, setConnectModalOpen] = useState(false);
   const [connectModalPreset, setConnectModalPreset] = useState<import('./types').WorkerPreset | null>(null);
-  // #16: per-target Upgrade modal. Stores the target filename + display name.
-  const [upgradeModalTarget, setUpgradeModalTarget] = useState<{ target: string; displayName: string } | null>(null);
-  const [scheduleModalTarget, setScheduleModalTarget] = useState<string | null>(null);
+  // #22: unified Upgrade modal. Stores target + display name + which mode to open in.
+  const [upgradeModalTarget, setUpgradeModalTarget] = useState<{ target: string; displayName: string; defaultMode: 'now' | 'schedule' } | null>(null);
   const [renameModalTarget, setRenameModalTarget] = useState<string | null>(null);
 
   // Apply theme to <html> element on mount and on change
@@ -214,12 +212,12 @@ export default function App() {
     }
   }
 
-  // #16: open the Upgrade modal for a single target. The modal collects
-  // worker + ESPHome version preferences and calls handleUpgradeConfirm.
-  function handleOpenUpgradeModal(target: string) {
+  // #22: open the unified Upgrade modal. defaultMode controls whether it
+  // opens on "Now" or "Schedule" tab.
+  function handleOpenUpgradeModal(target: string, defaultMode: 'now' | 'schedule' = 'now') {
     const t = targets.find(x => x.target === target);
     const displayName = t?.friendly_name || stripYaml(target);
-    setUpgradeModalTarget({ target, displayName });
+    setUpgradeModalTarget({ target, displayName, defaultMode });
   }
 
   async function handleUpgradeConfirm(params: {
@@ -514,7 +512,7 @@ export default function App() {
             onToast={addToast}
             onDelete={handleDeleteDevice}
             onRename={handleRenameDevice}
-            onSchedule={setScheduleModalTarget}
+            onSchedule={(t) => handleOpenUpgradeModal(t, 'schedule')}
             onRefresh={() => mutateDevices()}
           />
         )}
@@ -550,7 +548,7 @@ export default function App() {
           <SchedulesTab
             targets={targets}
             workers={workers}
-            onSchedule={setScheduleModalTarget}
+            onSchedule={(t) => handleOpenUpgradeModal(t, 'schedule')}
             onRefresh={() => mutateDevices()}
             onToast={addToast}
           />
@@ -603,6 +601,7 @@ export default function App() {
         />
       )}
 
+      {/* #22: Unified Upgrade modal — handles both immediate upgrades and scheduling */}
       {upgradeModalTarget && (() => {
         const t = targets.find(x => x.target === upgradeModalTarget.target);
         return (
@@ -613,27 +612,16 @@ export default function App() {
             esphomeVersions={esphomeVersions.available}
             defaultEsphomeVersion={esphomeVersions.selected ?? esphomeVersions.detected ?? null}
             pinnedVersion={t?.pinned_version}
-            onConfirm={handleUpgradeConfirm}
-            onClose={() => setUpgradeModalTarget(null)}
-          />
-        );
-      })()}
-
-      {scheduleModalTarget && (() => {
-        const t = targets.find(x => x.target === scheduleModalTarget);
-        const displayName = t?.friendly_name || stripYaml(scheduleModalTarget);
-        return (
-          <ScheduleModal
-            target={scheduleModalTarget}
-            displayName={displayName}
             currentSchedule={t?.schedule}
-            currentEnabled={t?.schedule_enabled}
+            currentScheduleEnabled={t?.schedule_enabled}
             currentOnce={t?.schedule_once}
-            onSave={async (cron) => {
+            defaultMode={upgradeModalTarget.defaultMode}
+            onUpgradeNow={handleUpgradeConfirm}
+            onSaveSchedule={async (cron) => {
               try {
-                await setTargetSchedule(scheduleModalTarget, cron);
-                addToast(`Schedule set for ${displayName}`, 'success');
-                setScheduleModalTarget(null);
+                await setTargetSchedule(upgradeModalTarget.target, cron);
+                addToast(`Schedule set for ${upgradeModalTarget.displayName}`, 'success');
+                setUpgradeModalTarget(null);
                 mutateDevices();
               } catch (err) {
                 addToast('Schedule failed: ' + (err as Error).message, 'error');
@@ -642,38 +630,24 @@ export default function App() {
             onSaveOnce={async (datetime) => {
               try {
                 const { setTargetScheduleOnce } = await import('./api/client');
-                await setTargetScheduleOnce(scheduleModalTarget, datetime);
-                const d = new Date(datetime);
-                addToast(`One-time upgrade scheduled for ${displayName} at ${d.toLocaleString()}`, 'success');
-                setScheduleModalTarget(null);
+                await setTargetScheduleOnce(upgradeModalTarget.target, datetime);
+                addToast(`One-time upgrade scheduled for ${upgradeModalTarget.displayName}`, 'success');
+                setUpgradeModalTarget(null);
                 mutateDevices();
               } catch (err) {
                 addToast('Schedule failed: ' + (err as Error).message, 'error');
               }
             }}
-            onDelete={async () => {
+            onDeleteSchedule={async () => {
               try {
-                await deleteTargetSchedule(scheduleModalTarget);
-                addToast(`Schedule removed for ${displayName}`, 'success');
-                setScheduleModalTarget(null);
+                await deleteTargetSchedule(upgradeModalTarget.target);
+                addToast(`Schedule removed for ${upgradeModalTarget.displayName}`, 'success');
                 mutateDevices();
               } catch (err) {
                 addToast('Delete failed: ' + (err as Error).message, 'error');
               }
             }}
-            onToggle={async () => {
-              try {
-                const result = await toggleTargetSchedule(scheduleModalTarget);
-                addToast(
-                  result.schedule_enabled ? `Schedule enabled for ${displayName}` : `Schedule paused for ${displayName}`,
-                  'success',
-                );
-                mutateDevices();
-              } catch (err) {
-                addToast('Toggle failed: ' + (err as Error).message, 'error');
-              }
-            }}
-            onClose={() => setScheduleModalTarget(null)}
+            onClose={() => setUpgradeModalTarget(null)}
           />
         );
       })()}
