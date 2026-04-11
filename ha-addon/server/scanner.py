@@ -309,6 +309,7 @@ def get_device_metadata(config_dir: str, target: str) -> dict:
         "schedule": None,            # cron expression (5-field)
         "schedule_enabled": False,   # whether the schedule is active
         "schedule_last_run": None,   # ISO datetime of last triggered run
+        "schedule_once": None,       # ISO datetime for one-time schedule
         "tags": None,                # comma-separated tag string
     }
     # Read the per-device metadata comment block FIRST — it's cheap (text scan,
@@ -319,6 +320,7 @@ def get_device_metadata(config_dir: str, target: str) -> dict:
         result["schedule"] = device_meta.get("schedule")
         result["schedule_enabled"] = device_meta.get("schedule_enabled", False)
         result["schedule_last_run"] = device_meta.get("schedule_last_run")
+        result["schedule_once"] = device_meta.get("schedule_once")
         result["tags"] = device_meta.get("tags")
 
     config = _resolve_esphome_config(config_dir, target)
