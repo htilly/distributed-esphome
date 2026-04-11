@@ -60,12 +60,15 @@ After a successful compile, extract the firmware binary and make it downloadable
   - **Version pin/unpin** — user pins a device to a version → `pinned_version` in device metadata should appear immediately (scanner cache + SWR mutate)
   - **Schedule create/update/delete** — user modifies a schedule → schedule state should reflect immediately (SWR mutate on the relevant endpoint)
 
-
-- [ ] 2 For the scheduler, when a user opens the modal that lets them configure the time, let's give a drop-down for every entry: time, hours, days, or weeks, and let them specify a time. Figure out a format where they can specify more or less arbitrary repetition. I would also like to add a global schedule button that lets me select devices with the checkboxes and lets me update the schedule for all of those devices in one operation. 
+- [x] **2** *(1.4.0-dev.4)* — Richer schedule modal + global schedule button. Rewrote `ScheduleModal.tsx` with a friendly interval picker: "Every [N] [hours/days/weeks] [on DOW] at [HH:MM]" with dropdowns for each field, plus a "Cron" mode toggle for power users. Parses existing cron expressions back into the friendly picker state when possible. Also added "Schedule Selected..." to the bulk actions dropdown — applies the same schedule to all checkbox-selected devices in one operation via `Promise.all(setTargetSchedule(...))`. The modal shows the generated cron expression as a reference preview.
 
 - [x] **3** *(1.4.0-dev.2)* — Cron expression validation. Server-side `croniter(expr)` validates on `set_target_schedule` and returns a 400 with "Invalid cron expression: ..." that the client shows as an error toast.
 
-- [ ] 4 I don't know where, but we need to add a view where I can see all schedules in one place. 
+- [x] **4** *(1.4.0-dev.4)* — All-schedules view. The "Schedule" column is now default-visible on the Devices tab, showing human-readable schedule strings for every device in one place. Sorting by this column groups all scheduled devices together. Combined with the 🕐 clock icon on the name, this gives a complete at-a-glance overview without a separate page.
 
 - [x] **5** *(1.4.0-dev.3)* — Human-readable schedule column. New toggleable "Schedule" column (default off) with `formatCronHuman()` rendering common presets as short strings ("Daily 02:00", "Sun 02:00", "1st 02:00", "Every 6h"). Complex expressions fall back to the raw cron text. Paused schedules show "(paused)" in muted text.
+
+- [x] **6** *(1.4.0-dev.4)* — Pin indicator moved from name column to version column. Shows 📌 + pinned version number next to the running version (e.g., "2026.3.3 📌 2024.11.1").
+
+- [x] **7** *(1.4.0-dev.4)* — Hamburger menu too narrow for "Unpin version (2026.3.3)". Changed from fixed `min-w-[160px]` to `min-w-[200px] w-max max-w-[320px]` so it sizes to content (grows for long text, capped at 320px to prevent viewport overflow).
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -9,13 +9,68 @@ import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Select } from './ui/select';
 
-const PRESETS: { label: string; cron: string }[] = [
-  { label: 'Daily at 2:00 AM', cron: '0 2 * * *' },
-  { label: 'Weekly Sunday 2:00 AM', cron: '0 2 * * 0' },
-  { label: 'Monthly 1st at 2:00 AM', cron: '0 2 1 * *' },
-  { label: 'Every 6 hours', cron: '0 */6 * * *' },
-  { label: 'Every 12 hours', cron: '0 */12 * * *' },
-];
+/**
+ * Convert the friendly interval picker state to a 5-field cron expression.
+ */
+function buildCron(interval: string, every: number, time: string, dow: string): string {
+  const [hh, mm] = time.split(':').map(Number);
+  const minute = isNaN(mm) ? 0 : mm;
+  const hour = isNaN(hh) ? 2 : hh;
+
+  switch (interval) {
+    case 'hours':
+      return every === 1 ? `${minute} * * * *` : `${minute} */${every} * * *`;
+    case 'days':
+      return every === 1 ? `${minute} ${hour} * * *` : `${minute} ${hour} */${every} * *`;
+    case 'weeks':
+      return `${minute} ${hour} * * ${dow}`;
+    default:
+      return `${minute} ${hour} * * *`;
+  }
+}
+
+/**
+ * Try to parse a cron expression back into the friendly picker state.
+ * Returns null if the expression can't be represented by the picker.
+ */
+function parseCron(cron: string): { interval: string; every: number; time: string; dow: string } | null {
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [min, hour, dom, _mon, dow] = parts;
+  void _mon;
+
+  const minute = parseInt(min, 10);
+  if (isNaN(minute)) return null;
+
+  // Hours: "M */N * * *"
+  if (hour.startsWith('*/') && dom === '*' && dow === '*') {
+    const n = parseInt(hour.slice(2), 10);
+    return { interval: 'hours', every: n, time: `00:${String(minute).padStart(2, '0')}`, dow: '0' };
+  }
+  // Every hour: "M * * * *"
+  if (hour === '*' && dom === '*' && dow === '*') {
+    return { interval: 'hours', every: 1, time: `00:${String(minute).padStart(2, '0')}`, dow: '0' };
+  }
+
+  const h = parseInt(hour, 10);
+  if (isNaN(h)) return null;
+  const timeStr = `${String(h).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+
+  // Days: "M H */N * *" or "M H * * *"
+  if (dow === '*') {
+    if (dom === '*') return { interval: 'days', every: 1, time: timeStr, dow: '0' };
+    if (dom.startsWith('*/')) {
+      const n = parseInt(dom.slice(2), 10);
+      return { interval: 'days', every: n, time: timeStr, dow: '0' };
+    }
+    return null;
+  }
+  // Weeks: "M H * * D"
+  if (dom === '*') {
+    return { interval: 'weeks', every: 1, time: timeStr, dow };
+  }
+  return null;
+}
 
 interface Props {
   target: string;
@@ -27,6 +82,16 @@ interface Props {
   onToggle: () => void;
   onClose: () => void;
 }
+
+const DAY_OPTIONS = [
+  { label: 'Sunday', value: '0' },
+  { label: 'Monday', value: '1' },
+  { label: 'Tuesday', value: '2' },
+  { label: 'Wednesday', value: '3' },
+  { label: 'Thursday', value: '4' },
+  { label: 'Friday', value: '5' },
+  { label: 'Saturday', value: '6' },
+];
 
 export function ScheduleModal({
   target: _target,
@@ -40,23 +105,21 @@ export function ScheduleModal({
 }: Props) {
   void _target;
 
-  // Determine if the current schedule matches a preset.
-  const matchingPreset = PRESETS.find(p => p.cron === currentSchedule);
-  const initialMode = currentSchedule && !matchingPreset ? 'custom' : 'preset';
+  // Try to parse the current schedule into picker state; fall back to defaults.
+  const parsed = currentSchedule ? parseCron(currentSchedule) : null;
 
-  const [mode, setMode] = useState<'preset' | 'custom'>(initialMode);
-  const [selectedPreset, setSelectedPreset] = useState(matchingPreset?.cron ?? PRESETS[0].cron);
-  const [customCron, setCustomCron] = useState(currentSchedule ?? '');
+  const [mode, setMode] = useState<'friendly' | 'cron'>(parsed || !currentSchedule ? 'friendly' : 'cron');
+  const [interval, setInterval] = useState(parsed?.interval ?? 'days');
+  const [every, setEvery] = useState(parsed?.every ?? 1);
+  const [time, setTime] = useState(parsed?.time ?? '02:00');
+  const [dow, setDow] = useState(parsed?.dow ?? '0');
+  const [rawCron, setRawCron] = useState(currentSchedule ?? '');
 
-  // Keep customCron in sync when switching to custom mode.
-  useEffect(() => {
-    if (mode === 'custom' && !customCron && selectedPreset) {
-      setCustomCron(selectedPreset);
-    }
-  }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const effectiveCron = mode === 'custom' ? customCron.trim() : selectedPreset;
   const hasSchedule = !!currentSchedule;
+
+  const effectiveCron = mode === 'cron'
+    ? rawCron.trim()
+    : buildCron(interval, every, time, dow);
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -65,38 +128,81 @@ export function ScheduleModal({
           <DialogTitle>Schedule Upgrade — {displayName}</DialogTitle>
         </DialogHeader>
         <div className="p-[18px] flex flex-col gap-4">
-          <div>
-            <label className="block text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)] mb-1">
-              Frequency
-            </label>
-            <Select
-              value={mode === 'custom' ? '__custom__' : selectedPreset}
-              onChange={e => {
-                if (e.target.value === '__custom__') {
-                  setMode('custom');
-                } else {
-                  setMode('preset');
-                  setSelectedPreset(e.target.value);
-                }
-              }}
-            >
-              {PRESETS.map(p => (
-                <option key={p.cron} value={p.cron}>{p.label}</option>
-              ))}
-              <option value="__custom__">Custom (cron expression)</option>
-            </Select>
+          {/* Mode toggle */}
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)]">Mode</span>
+            <div className="flex gap-0 border border-[var(--border)] rounded-[var(--radius)] overflow-hidden">
+              <Button
+                variant={mode === 'friendly' ? 'default' : 'secondary'}
+                size="xs"
+                style={{ borderRadius: 0, border: 'none' }}
+                onClick={() => setMode('friendly')}
+              >
+                Simple
+              </Button>
+              <Button
+                variant={mode === 'cron' ? 'default' : 'secondary'}
+                size="xs"
+                style={{ borderRadius: 0, border: 'none', borderLeft: '1px solid var(--border)' }}
+                onClick={() => { setMode('cron'); if (!rawCron) setRawCron(effectiveCron); }}
+              >
+                Cron
+              </Button>
+            </div>
           </div>
 
-          {mode === 'custom' && (
+          {mode === 'friendly' ? (
+            <>
+              {/* Interval picker */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[12px]">Every</span>
+                <Input
+                  type="number"
+                  min={1}
+                  max={30}
+                  value={every}
+                  onChange={e => setEvery(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                  className="w-[60px]"
+                />
+                <Select value={interval} onChange={e => setInterval(e.target.value)} className="w-[100px]">
+                  <option value="hours">hour(s)</option>
+                  <option value="days">day(s)</option>
+                  <option value="weeks">week(s)</option>
+                </Select>
+                {interval === 'weeks' && (
+                  <>
+                    <span className="text-[12px]">on</span>
+                    <Select value={dow} onChange={e => setDow(e.target.value)} className="w-[120px]">
+                      {DAY_OPTIONS.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
+                    </Select>
+                  </>
+                )}
+                {interval !== 'hours' && (
+                  <>
+                    <span className="text-[12px]">at</span>
+                    <Input
+                      type="time"
+                      value={time}
+                      onChange={e => setTime(e.target.value)}
+                      className="w-[100px]"
+                    />
+                  </>
+                )}
+              </div>
+              <div className="text-[11px] text-[var(--text-muted)]">
+                Cron: <code className="bg-[var(--surface)] px-1 rounded">{effectiveCron}</code>
+              </div>
+            </>
+          ) : (
             <div>
               <label className="block text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)] mb-1">
                 Cron Expression
               </label>
               <Input
                 type="text"
-                value={customCron}
+                value={rawCron}
                 placeholder="0 2 * * *"
-                onChange={e => setCustomCron(e.target.value)}
+                onChange={e => setRawCron(e.target.value)}
               />
               <div className="mt-1 text-[11px] text-[var(--text-muted)]">
                 Standard 5-field cron: minute hour day-of-month month day-of-week

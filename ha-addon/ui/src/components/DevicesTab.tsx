@@ -9,7 +9,8 @@ import {
   type VisibilityState,
   type RowSelectionState,
 } from '@tanstack/react-table';
-import { getApiKey, restartDevice, pinTargetVersion, unpinTargetVersion } from '../api/client';
+import { getApiKey, restartDevice, pinTargetVersion, unpinTargetVersion, setTargetSchedule } from '../api/client';
+import { ScheduleModal } from './ScheduleModal';
 import type { Device, Job, Target, Worker } from '../types';
 import { stripYaml, timeAgo } from '../utils';
 import { StatusDot } from './StatusDot';
@@ -49,7 +50,7 @@ const OPTIONAL_COLUMNS: OptionalColumnDef[] = [
   { id: 'running', label: 'Version', defaultVisible: true },
   { id: 'ipconfig', label: 'IP Config', defaultVisible: false },
   { id: 'ap', label: 'AP', defaultVisible: false },
-  { id: 'schedule', label: 'Schedule', defaultVisible: false },
+  { id: 'schedule', label: 'Schedule', defaultVisible: true },
   { id: 'area', label: 'Area', defaultVisible: false },
   { id: 'comment', label: 'Comment', defaultVisible: false },
   { id: 'project', label: 'Project', defaultVisible: false },
@@ -413,9 +414,6 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
               {t.schedule && t.schedule_enabled && (
                 <span title={`Scheduled: ${t.schedule}`} style={{ marginLeft: 4, fontSize: 11, opacity: 0.7 }}>🕐</span>
               )}
-              {t.pinned_version && (
-                <span title={`Pinned to ${t.pinned_version}`} style={{ marginLeft: 4, fontSize: 11, opacity: 0.7 }}>📌</span>
-              )}
             </span>
             <div className="device-filename">{stripYaml(t.target)}</div>
           </>
@@ -616,6 +614,9 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
       cell: ({ row: { original: t } }) => (
         <span style={{ fontSize: 12 }}>
           {t.running_version || '—'}
+          {t.pinned_version && (
+            <span title={`Pinned to ${t.pinned_version}`} style={{ marginLeft: 4, fontSize: 10 }}>📌 {t.pinned_version}</span>
+          )}
           {t.config_modified && <div className="config-modified">config changed</div>}
         </span>
       ),
@@ -733,6 +734,14 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
     onCompile(selectedTargets);
   }
 
+  // #2: "Schedule Selected" — open the schedule modal in multi-target mode.
+  // We reuse the same ScheduleModal but apply the result to all selected targets.
+  const [bulkScheduleOpen, setBulkScheduleOpen] = useState(false);
+  function handleScheduleSelected() {
+    if (selectedTargets.length === 0) return;
+    setBulkScheduleOpen(true);
+  }
+
   // Column visibility for unmanaged rows — derive from TanStack state
   const isVisible = useCallback((col: OptionalColumnId) => columnVisibility[col] !== false, [columnVisibility]);
 
@@ -795,6 +804,9 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
                   <DropdownMenuSeparator />
                   <DropdownMenuItem onClick={handleCompileSelected}>
                     Upgrade Selected
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={handleScheduleSelected} disabled={Object.keys(rowSelection).length === 0}>
+                    Schedule Selected...
                   </DropdownMenuItem>
                 </DropdownMenuGroup>
               </DropdownMenuContent>
@@ -899,6 +911,25 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
         />
       )}
 
+      {bulkScheduleOpen && (
+        <ScheduleModal
+          target="(multiple)"
+          displayName={`${selectedTargets.length} device${selectedTargets.length > 1 ? 's' : ''}`}
+          onSave={async (cron) => {
+            try {
+              await Promise.all(selectedTargets.map(t => setTargetSchedule(t, cron)));
+              onToast(`Schedule set for ${selectedTargets.length} device(s)`, 'success');
+              setBulkScheduleOpen(false);
+            } catch (err) {
+              onToast('Schedule failed: ' + (err as Error).message, 'error');
+            }
+          }}
+          onDelete={() => setBulkScheduleOpen(false)}
+          onToggle={() => {}}
+          onClose={() => setBulkScheduleOpen(false)}
+        />
+      )}
+
       {menuTarget && menuPos && (
         <DeviceMenu
           target={menuTarget}
@@ -986,7 +1017,7 @@ function DeviceMenu({
       {/* Backdrop to close on outside click */}
       <div className="fixed inset-0 z-50" onClick={onClose} />
       <div
-        className="fixed z-50 min-w-[160px] rounded-lg border border-[var(--border)] bg-[var(--popover)] p-1 text-[var(--popover-foreground)] shadow-md ring-1 ring-[var(--foreground)]/10"
+        className="fixed z-50 min-w-[200px] w-max max-w-[320px] rounded-lg border border-[var(--border)] bg-[var(--popover)] p-1 text-[var(--popover-foreground)] shadow-md ring-1 ring-[var(--foreground)]/10"
         ref={(el) => {
           if (!el) return;
           const rect = el.getBoundingClientRect();
