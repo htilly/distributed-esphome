@@ -1,8 +1,35 @@
 import { useMemo, useState } from 'react';
+import {
+  useReactTable,
+  getCoreRowModel,
+  getSortedRowModel,
+  flexRender,
+  createColumnHelper,
+  type SortingState,
+  type RowSelectionState,
+} from '@tanstack/react-table';
 import type { Target, Worker } from '../types';
 import { stripYaml, timeAgo } from '../utils';
 import { Button } from './ui/button';
 import { deleteTargetSchedule } from '../api/client';
+
+function SortHeader({ label, column }: {
+  label: string;
+  column: { getIsSorted: () => false | 'asc' | 'desc'; toggleSorting: (desc?: boolean) => void; getCanSort: () => boolean };
+}) {
+  const sorted = column.getIsSorted();
+  const indicator = sorted === 'asc' ? ' \u25b2' : sorted === 'desc' ? ' \u25bc' : '';
+  const title = sorted === 'asc' ? 'Click to sort descending' : sorted === 'desc' ? 'Click to reset sort' : 'Click to sort ascending';
+  return (
+    <span
+      onClick={() => column.toggleSorting(sorted === 'asc')}
+      style={{ cursor: 'pointer', userSelect: 'none' }}
+      title={title}
+    >
+      {label}{indicator}
+    </span>
+  );
+}
 
 function formatNextRun(schedule: string | null | undefined, lastRun: string | null | undefined, scheduleOnce: string | null | undefined): string {
   if (scheduleOnce) {
@@ -22,6 +49,8 @@ interface Props {
   onToast: (msg: string, type?: 'info' | 'success' | 'error') => void;
 }
 
+const columnHelper = createColumnHelper<Target>();
+
 export function SchedulesTab({ targets, workers, onSchedule, onRefresh, onToast }: Props) {
   void workers;
 
@@ -30,32 +59,127 @@ export function SchedulesTab({ targets, workers, onSchedule, onRefresh, onToast 
     [targets],
   );
 
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [sorting, setSorting] = useState<SortingState>([]);
+  const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
+  const [filter, setFilter] = useState('');
 
-  function toggleOne(target: string) {
-    setSelected(prev => {
-      const next = new Set(prev);
-      if (next.has(target)) next.delete(target);
-      else next.add(target);
-      return next;
+  const filteredScheduled = useMemo(() => {
+    if (!filter) return scheduled;
+    const lc = filter.toLowerCase();
+    return scheduled.filter(t => {
+      const name = t.friendly_name || t.device_name || stripYaml(t.target);
+      return name.toLowerCase().includes(lc) || t.target.toLowerCase().includes(lc);
     });
-  }
+  }, [scheduled, filter]);
 
-  function toggleAll() {
-    if (selected.size === scheduled.length) {
-      setSelected(new Set());
-    } else {
-      setSelected(new Set(scheduled.map(t => t.target)));
-    }
-  }
+  const columns = useMemo(() => [
+    columnHelper.display({
+      id: 'select',
+      header: ({ table }) => (
+        <input
+          type="checkbox"
+          checked={table.getIsAllRowsSelected()}
+          onChange={table.getToggleAllRowsSelectedHandler()}
+        />
+      ),
+      cell: ({ row }) => (
+        <input
+          type="checkbox"
+          checked={row.getIsSelected()}
+          onChange={row.getToggleSelectedHandler()}
+        />
+      ),
+    }),
+    columnHelper.accessor(row => row.friendly_name || row.device_name || stripYaml(row.target), {
+      id: 'device',
+      header: ({ column }) => <SortHeader label="Device" column={column} />,
+      cell: ({ row }) => {
+        const t = row.original;
+        return (
+          <div>
+            <span className="text-[13px]">{t.friendly_name || t.device_name || stripYaml(t.target)}</span>
+            <div className="text-[11px] text-[var(--text-muted)]">{stripYaml(t.target)}</div>
+          </div>
+        );
+      },
+    }),
+    columnHelper.accessor(row => row.schedule || row.schedule_once || '', {
+      id: 'schedule',
+      header: ({ column }) => <SortHeader label="Schedule" column={column} />,
+      cell: ({ row }) => {
+        const t = row.original;
+        const enabled = t.schedule_enabled !== false;
+        const humanSchedule = t.schedule || (t.schedule_once ? `Once: ${new Date(t.schedule_once).toLocaleString()}` : '—');
+        return (
+          <span className="font-mono text-[12px]" style={{ opacity: enabled ? 1 : 0.5 }}>
+            {humanSchedule}
+            {!enabled && t.schedule && <span className="text-[var(--text-muted)] ml-2">(paused)</span>}
+          </span>
+        );
+      },
+    }),
+    columnHelper.accessor(row => row.schedule_once ? 'once' : row.schedule_enabled !== false ? 'active' : 'paused', {
+      id: 'status',
+      header: ({ column }) => <SortHeader label="Status" column={column} />,
+      cell: ({ row }) => {
+        const t = row.original;
+        if (t.schedule_once) return <span style={{ color: 'var(--accent)' }}>One-time</span>;
+        if (t.schedule_enabled !== false) return <span style={{ color: 'var(--success)' }}>Active</span>;
+        return <span style={{ color: 'var(--text-muted)' }}>Paused</span>;
+      },
+    }),
+    columnHelper.accessor(row => row.schedule_last_run || row.schedule_once || '', {
+      id: 'nextRun',
+      header: ({ column }) => <SortHeader label="Next / Last Run" column={column} />,
+      cell: ({ row }) => {
+        const t = row.original;
+        return <span className="text-[12px]">{formatNextRun(t.schedule, t.schedule_last_run, t.schedule_once)}</span>;
+      },
+    }),
+    columnHelper.accessor(row => row.pinned_version || row.server_version || '', {
+      id: 'version',
+      header: ({ column }) => <SortHeader label="Version" column={column} />,
+      cell: ({ row }) => {
+        const t = row.original;
+        const version = t.pinned_version || t.server_version || '—';
+        return (
+          <span className="font-mono text-[12px]">
+            {version}
+            {t.pinned_version && <span style={{ marginLeft: 4 }}>📌</span>}
+          </span>
+        );
+      },
+    }),
+    columnHelper.display({
+      id: 'actions',
+      cell: ({ row }) => (
+        <Button variant="secondary" size="xs" onClick={() => onSchedule(row.original.target)}>
+          Edit
+        </Button>
+      ),
+    }),
+  ], [onSchedule]);
+
+  const table = useReactTable({
+    data: filteredScheduled,
+    columns,
+    state: { sorting, rowSelection },
+    onSortingChange: setSorting,
+    onRowSelectionChange: setRowSelection,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    getRowId: (row) => row.target,
+  });
+
+  const selectedTargets = table.getSelectedRowModel().rows.map(r => r.original.target);
 
   async function handleRemoveSelected() {
-    const toRemove = [...selected].filter(t => scheduled.some(s => s.target === t));
+    const toRemove = selectedTargets.filter(t => scheduled.some(s => s.target === t));
     if (toRemove.length === 0) return;
     try {
       await Promise.all(toRemove.map(t => deleteTargetSchedule(t)));
       onToast(`Removed schedule from ${toRemove.length} device(s)`, 'success');
-      setSelected(new Set());
+      setRowSelection({});
       onRefresh();
     } catch (err) {
       onToast('Remove failed: ' + (err as Error).message, 'error');
@@ -64,98 +188,83 @@ export function SchedulesTab({ targets, workers, onSchedule, onRefresh, onToast 
 
   if (scheduled.length === 0) {
     return (
-      <div className="p-8 text-center text-[var(--text-muted)]">
-        <p style={{ fontSize: 14 }}>No devices have a schedule configured.</p>
-        <p style={{ fontSize: 12, marginTop: 8 }}>
-          Open a device's hamburger menu and choose "Schedule Upgrade..." to set one up.
-        </p>
+      <div className="block" id="tab-schedules">
+        <div className="overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-sm">
+          <div className="flex flex-wrap items-center gap-2 border-b border-[var(--border)] bg-[var(--surface2)] px-4 py-3">
+            <h2 className="text-[13px] font-semibold uppercase tracking-wide text-[var(--text-muted)] mr-1">Schedules</h2>
+          </div>
+          <div className="p-8 text-center text-[var(--text-muted)]">
+            <p style={{ fontSize: 14 }}>No devices have a schedule configured.</p>
+            <p style={{ fontSize: 12, marginTop: 8 }}>
+              Open a device's hamburger menu and choose "Schedule Upgrade..." to set one up.
+            </p>
+          </div>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="p-4">
-      {/* Toolbar */}
-      <div className="flex items-center gap-3 mb-3">
-        <span className="text-[12px] text-[var(--text-muted)]">
-          {selected.size > 0 ? `${selected.size} selected` : `${scheduled.length} scheduled device${scheduled.length !== 1 ? 's' : ''}`}
-        </span>
-        {selected.size > 0 && (
-          <Button variant="destructive" size="sm" onClick={handleRemoveSelected}>
-            Remove Selected
-          </Button>
-        )}
+    <div className="block" id="tab-schedules">
+      <div className="overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-sm">
+        <div className="flex flex-wrap items-center gap-2 border-b border-[var(--border)] bg-[var(--surface2)] px-4 py-3">
+          <h2 className="text-[13px] font-semibold uppercase tracking-wide text-[var(--text-muted)] mr-1">Schedules</h2>
+          <div className="relative max-w-[280px]">
+            <input
+              type="text"
+              value={filter}
+              onChange={e => setFilter(e.target.value)}
+              placeholder="Search schedules..."
+              className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface2)] px-2.5 py-1 pr-7 text-[13px] text-[var(--text)] outline-none placeholder:text-[var(--text-muted)] focus:border-[var(--accent)]"
+            />
+            {filter && (
+              <button
+                onClick={() => setFilter('')}
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 border-none bg-transparent text-sm leading-none text-[var(--text-muted)] cursor-pointer px-0.5"
+              >&times;</button>
+            )}
+          </div>
+          <div className="actions">
+            {selectedTargets.length > 0 && (
+              <Button variant="destructive" size="sm" onClick={handleRemoveSelected}>
+                Remove Selected ({selectedTargets.length})
+              </Button>
+            )}
+          </div>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              {table.getHeaderGroups().map(headerGroup => (
+                <tr key={headerGroup.id}>
+                  {headerGroup.headers.map(header => (
+                    <th key={header.id}>
+                      {header.isPlaceholder
+                        ? null
+                        : flexRender(header.column.columnDef.header, header.getContext())}
+                    </th>
+                  ))}
+                </tr>
+              ))}
+            </thead>
+            <tbody>
+              {table.getRowModel().rows.length === 0 ? (
+                <tr className="empty-row"><td colSpan={7}>No schedules match filter</td></tr>
+              ) : (
+                table.getRowModel().rows.map(row => (
+                  <tr key={row.id}>
+                    {row.getVisibleCells().map(cell => (
+                      <td key={cell.id}>
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </td>
+                    ))}
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
-
-      <table className="w-full text-left" style={{ borderCollapse: 'collapse' }}>
-        <thead>
-          <tr className="border-b border-[var(--border)] text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)]">
-            <th className="px-3 py-2 w-8">
-              <input
-                type="checkbox"
-                checked={selected.size === scheduled.length && scheduled.length > 0}
-                onChange={toggleAll}
-              />
-            </th>
-            <th className="px-3 py-2">Device</th>
-            <th className="px-3 py-2">Schedule</th>
-            <th className="px-3 py-2">Status</th>
-            <th className="px-3 py-2">Next / Last Run</th>
-            <th className="px-3 py-2">Version</th>
-            <th className="px-3 py-2"></th>
-          </tr>
-        </thead>
-        <tbody>
-          {scheduled.map(t => {
-            const humanSchedule = t.schedule || (t.schedule_once ? `Once: ${new Date(t.schedule_once).toLocaleString()}` : '—');
-            const enabled = t.schedule_enabled !== false;
-            const version = t.pinned_version || t.server_version || '—';
-            const isSelected = selected.has(t.target);
-
-            return (
-              <tr
-                key={t.target}
-                className={`border-b border-[var(--border)] hover:bg-[var(--surface2)] ${isSelected ? 'bg-[var(--accent)]/5' : ''}`}
-              >
-                <td className="px-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={isSelected}
-                    onChange={() => toggleOne(t.target)}
-                  />
-                </td>
-                <td className="px-3 py-2 text-[13px]">
-                  {t.friendly_name || t.device_name || stripYaml(t.target)}
-                  <div className="text-[11px] text-[var(--text-muted)]">{stripYaml(t.target)}</div>
-                </td>
-                <td className="px-3 py-2 text-[12px] font-mono" style={{ opacity: enabled ? 1 : 0.5 }}>
-                  {humanSchedule}
-                  {!enabled && t.schedule && <span className="text-[var(--text-muted)] ml-2">(paused)</span>}
-                </td>
-                <td className="px-3 py-2 text-[12px]">
-                  {t.schedule_once
-                    ? <span style={{ color: 'var(--accent)' }}>One-time</span>
-                    : enabled
-                      ? <span style={{ color: 'var(--success)' }}>Active</span>
-                      : <span style={{ color: 'var(--text-muted)' }}>Paused</span>}
-                </td>
-                <td className="px-3 py-2 text-[12px]">
-                  {formatNextRun(t.schedule, t.schedule_last_run, t.schedule_once)}
-                </td>
-                <td className="px-3 py-2 text-[12px] font-mono">
-                  {version}
-                  {t.pinned_version && <span style={{ marginLeft: 4 }}>📌</span>}
-                </td>
-                <td className="px-3 py-2">
-                  <Button variant="secondary" size="xs" onClick={() => onSchedule(t.target)}>
-                    Edit
-                  </Button>
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
     </div>
   );
 }
