@@ -783,7 +783,14 @@ async def set_target_schedule(request: web.Request) -> web.Response:
 
 @routes.delete("/ui/api/targets/{filename}/schedule")
 async def delete_target_schedule(request: web.Request) -> web.Response:
-    """Remove the cron schedule from a device."""
+    """Remove any schedule (recurring or one-time) from a device.
+
+    #37: previously this only removed the recurring ``schedule`` fields
+    (``schedule``, ``schedule_enabled``, ``schedule_last_run``) but left
+    ``schedule_once`` intact, so clicking "Remove schedule" on a device
+    that had a one-time schedule appeared to succeed but the schedule
+    stuck around. Now removes both types.
+    """
     filename = request.match_info["filename"]
     cfg = _cfg(request)
     path = safe_resolve(Path(cfg.config_dir), filename)
@@ -794,6 +801,7 @@ async def delete_target_schedule(request: web.Request) -> web.Response:
     meta.pop("schedule", None)
     meta.pop("schedule_enabled", None)
     meta.pop("schedule_last_run", None)
+    meta.pop("schedule_once", None)
     write_device_meta(cfg.config_dir, filename, meta)
     logger.info("Schedule removed for %s", filename)
     return web.json_response({"ok": True})

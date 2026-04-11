@@ -660,6 +660,7 @@ export default function App() {
               try {
                 await deleteTargetSchedule(upgradeModalTarget.target);
                 addToast(`Schedule removed for ${upgradeModalTarget.displayName}`, 'success');
+                setUpgradeModalTarget(null);
                 mutateDevices();
               } catch (err) {
                 addToast('Delete failed: ' + (err as Error).message, 'error');

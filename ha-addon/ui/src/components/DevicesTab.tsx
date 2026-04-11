@@ -745,10 +745,11 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
   }
 
   // #15: bulk remove schedule from selected devices.
+  // #37: include devices with a one-time schedule, not just recurring.
   async function handleRemoveScheduleSelected() {
     const scheduled = selectedTargets.filter(t => {
       const target = targets.find(x => x.target === t);
-      return target?.schedule;
+      return target?.schedule || target?.schedule_once;
     });
     if (scheduled.length === 0) {
       onToast('No selected devices have a schedule', 'info');

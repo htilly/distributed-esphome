@@ -208,20 +208,6 @@ export function UpgradeModal({
         </DialogHeader>
         <div className="p-[18px] flex flex-col gap-4">
 
-          {/* Mode radio: Now vs Schedule (hidden in scheduleOnly mode) */}
-          {!scheduleOnly && (
-            <div className="flex items-center gap-4">
-              <label className="flex items-center gap-1.5 text-[13px] cursor-pointer">
-                <input type="radio" name="upgrade-mode" checked={mode === 'now'} onChange={() => setMode('now')} />
-                Now
-              </label>
-              <label className="flex items-center gap-1.5 text-[13px] cursor-pointer">
-                <input type="radio" name="upgrade-mode" checked={mode === 'schedule'} onChange={() => setMode('schedule')} />
-                Scheduled
-              </label>
-            </div>
-          )}
-
           {/* Shared: Worker + Version (hidden in scheduleOnly mode) */}
           {!scheduleOnly && (
             <>
@@ -239,7 +225,7 @@ export function UpgradeModal({
                 <label className="block text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)] mb-1">ESPHome version</label>
                 <Select value={selectedVersion} onChange={e => setSelectedVersion(e.target.value)}>
                   <option value="">
-                    Latest{defaultEsphomeVersion ? ` — currently ${defaultEsphomeVersion}` : ''}
+                    Current{defaultEsphomeVersion ? ` (${defaultEsphomeVersion})` : ''}
                   </option>
                   {versionList.map(v => (
                     <option key={v} value={v}>{v}</option>
@@ -254,6 +240,23 @@ export function UpgradeModal({
                 </div>
               )}
             </>
+          )}
+
+          {/* Mode radio: Now vs Schedule (hidden in scheduleOnly mode).
+              #34: Radios sit *below* the worker+version selectors so the
+              primary choice (what to upgrade to) comes before the
+              secondary choice (when to run it). */}
+          {!scheduleOnly && (
+            <div className="flex items-center gap-4 pt-1 border-t border-[var(--border)]">
+              <label className="flex items-center gap-1.5 text-[13px] cursor-pointer pt-2">
+                <input type="radio" name="upgrade-mode" checked={mode === 'now'} onChange={() => setMode('now')} />
+                Now
+              </label>
+              <label className="flex items-center gap-1.5 text-[13px] cursor-pointer pt-2">
+                <input type="radio" name="upgrade-mode" checked={mode === 'schedule'} onChange={() => setMode('schedule')} />
+                Scheduled
+              </label>
+            </div>
           )}
 
           {/* Schedule options (only visible in schedule mode) */}
