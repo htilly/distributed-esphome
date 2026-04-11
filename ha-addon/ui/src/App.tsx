@@ -503,6 +503,7 @@ export default function App() {
             onDelete={handleDeleteDevice}
             onRename={handleRenameDevice}
             onSchedule={setScheduleModalTarget}
+            onRefresh={() => mutateDevices()}
           />
         )}
         {activeTab === 'queue' && (

@@ -818,10 +818,14 @@ async def set_target_schedule_once(request: web.Request) -> web.Response:
     if not dt_str:
         return web.json_response({"error": "datetime required"}, status=400)
 
-    # Validate it's a parseable ISO datetime.
+    # Validate it's a parseable ISO datetime and not in the past.
     try:
-        from datetime import datetime as _dt  # noqa: PLC0415
-        _dt.fromisoformat(dt_str)
+        from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
+        parsed_dt = _dt.fromisoformat(dt_str)
+        if parsed_dt.tzinfo is None:
+            parsed_dt = parsed_dt.replace(tzinfo=_tz.utc)
+        if parsed_dt <= _dt.now(_tz.utc):
+            return web.json_response({"error": "Datetime must be in the future"}, status=400)
     except ValueError:
         return web.json_response({"error": "Invalid datetime format (use ISO 8601)"}, status=400)
 

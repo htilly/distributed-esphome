@@ -250,6 +250,19 @@ export function QueueTab({
       ),
       sortingFn: 'alphanumeric',
     }),
+    // #21: triggered-by column — schedule vs user.
+    columnHelper.accessor(row => row.scheduled ? 'schedule' : 'user', {
+      id: 'triggered_by',
+      header: ({ column }) => <SortHeader label="Triggered" column={column} />,
+      cell: ({ row: { original: job } }) => (
+        <span style={{ fontSize: 12 }}>
+          {job.scheduled
+            ? <span title="Triggered by cron schedule">🕐 Schedule</span>
+            : <span title="Triggered by user action">👤 User</span>}
+        </span>
+      ),
+      sortingFn: 'alphanumeric',
+    }),
     columnHelper.accessor(row => new Date(row.created_at), {
       id: 'created_at',
       header: ({ column }) => <SortHeader label="Start Time" column={column} />,

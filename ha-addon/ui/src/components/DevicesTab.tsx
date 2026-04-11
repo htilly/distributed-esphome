@@ -100,6 +100,8 @@ interface Props {
   onDelete: (target: string, archive: boolean) => void;
   onRename: (oldTarget: string, newName: string) => void;
   onSchedule: (target: string) => void;
+  /** Trigger an immediate SWR revalidation of the devices/targets data. */
+  onRefresh: () => void;
 }
 
 function matchesFilter(filter: string, ...fields: (string | null | undefined)[]): boolean {
@@ -265,7 +267,7 @@ function DeleteModal({ target, onConfirm, onClose }: {
   );
 }
 
-export function DevicesTab({ targets, devices, workers, streamerMode, activeJobsByTarget, onCompile, onUpgradeOne, onEdit, onLogs, onToast, onDelete, onRename, onSchedule }: Props) {
+export function DevicesTab({ targets, devices, workers, streamerMode, activeJobsByTarget, onCompile, onUpgradeOne, onEdit, onLogs, onToast, onDelete, onRename, onSchedule, onRefresh }: Props) {
   const [filter, setFilter] = useState('');
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(loadColumnVisibility);
@@ -756,6 +758,7 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
       const { deleteTargetSchedule } = await import('../api/client');
       await Promise.all(scheduled.map(t => deleteTargetSchedule(t)));
       onToast(`Removed schedule from ${scheduled.length} device(s)`, 'success');
+      onRefresh();
     } catch (err) {
       onToast('Remove failed: ' + (err as Error).message, 'error');
     }
@@ -956,11 +959,22 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
               await Promise.all(selectedTargets.map(t => setTargetSchedule(t, cron)));
               onToast(`Schedule set for ${selectedTargets.length} device(s)`, 'success');
               setBulkScheduleOpen(false);
+              onRefresh();
             } catch (err) {
               onToast('Schedule failed: ' + (err as Error).message, 'error');
             }
           }}
-          onSaveOnce={() => {}}
+          onSaveOnce={async (datetime) => {
+            try {
+              const { setTargetScheduleOnce } = await import('../api/client');
+              await Promise.all(selectedTargets.map(t => setTargetScheduleOnce(t, datetime)));
+              onToast(`One-time upgrade scheduled for ${selectedTargets.length} device(s)`, 'success');
+              setBulkScheduleOpen(false);
+              onRefresh();
+            } catch (err) {
+              onToast('Schedule failed: ' + (err as Error).message, 'error');
+            }
+          }}
           onDelete={() => setBulkScheduleOpen(false)}
           onToggle={() => {}}
           onClose={() => setBulkScheduleOpen(false)}

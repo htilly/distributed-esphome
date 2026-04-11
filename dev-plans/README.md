@@ -5,6 +5,7 @@ Roadmap and bug tracking for distributed-esphome, organized by release.
 ## Active files
 
 - **[WORKITEMS-1.4.md](WORKITEMS-1.4.md)** — **Current release.** Fleet management & automation (version pinning, device groups, scheduled upgrades, firmware download)
+- **[WORKITEMS-1.4.1.md](WORKITEMS-1.4.1.md)** — Planned: UI quality sprint (DevicesTab split, shadcn context menu, accessibility, API cleanup, e2e coverage)
 - **[WORKITEMS-1.5.md](WORKITEMS-1.5.md)** — Planned: Editor & config management (file tree, config diff, git integration)
 - **[WORKITEMS-1.6.md](WORKITEMS-1.6.md)** — Planned: LLM-powered assistance (AI editor, release breaking-change analyzer)
 - **[WORKITEMS-1.7.md](WORKITEMS-1.7.md)** — Planned: Dashboard parity (create device, web serial, log tail, adoption, remote compilation)

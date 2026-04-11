@@ -186,6 +186,7 @@ export function ScheduleModal({
               <Input
                 type="datetime-local"
                 value={onceDate}
+                min={new Date().toISOString().slice(0, 16)}
                 onChange={e => setOnceDate(e.target.value)}
               />
               <div className="mt-1 text-[11px] text-[var(--text-muted)]">
