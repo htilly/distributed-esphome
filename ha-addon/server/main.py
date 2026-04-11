@@ -487,11 +487,13 @@ async def schedule_checker(app: web.Application) -> None:
     cfg: AppConfig = app["config"]
     queue: JobQueue = app["queue"]
 
+    logger.info("schedule_checker started (config_dir=%s)", cfg.config_dir)
     while True:
         await asyncio.sleep(60)
         try:
             targets = scan_configs(cfg.config_dir)
             now = datetime.now(timezone.utc)
+            logger.info("schedule_checker tick at %s — %d targets", now.isoformat(), len(targets))
 
             for target in targets:
                 try:
@@ -500,10 +502,12 @@ async def schedule_checker(app: web.Application) -> None:
                     # #17: one-time schedule — fires once then auto-clears.
                     once_str = meta.get("schedule_once")
                     if once_str:
+                        logger.info("schedule_checker: %s has schedule_once=%s", target, once_str)
                         try:
                             once_dt = datetime.fromisoformat(once_str)
                             if once_dt.tzinfo is None:
                                 once_dt = once_dt.replace(tzinfo=timezone.utc)
+                            logger.info("schedule_checker: %s once_dt=%s now=%s due=%s", target, once_dt.isoformat(), now.isoformat(), once_dt <= now)
                             if once_dt <= now:
                                 version = meta.get("pin_version") or get_esphome_version()
                                 device_poller = app.get("device_poller")
@@ -536,7 +540,7 @@ async def schedule_checker(app: web.Application) -> None:
                                 write_device_meta(cfg.config_dir, target, fresh_meta)
                                 continue  # don't also check recurring schedule
                         except Exception:
-                            logger.debug("One-time schedule parse failed for %s", target, exc_info=True)
+                            logger.exception("One-time schedule parse failed for %s", target)
 
                     cron_expr = meta.get("schedule")
                     enabled = meta.get("schedule_enabled", False)
@@ -598,7 +602,7 @@ async def schedule_checker(app: web.Application) -> None:
                     write_device_meta(cfg.config_dir, target, fresh_meta)
 
                 except Exception:
-                    logger.debug("Schedule check failed for %s", target, exc_info=True)
+                    logger.exception("Schedule check failed for %s", target)
 
         except Exception:
             logger.exception("Error in schedule checker")
