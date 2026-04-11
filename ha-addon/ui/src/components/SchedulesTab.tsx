@@ -93,27 +93,24 @@ export function SchedulesTab({ targets, workers, onSchedule, onRefresh, onToast 
     columnHelper.accessor(row => row.friendly_name || row.device_name || stripYaml(row.target), {
       id: 'device',
       header: ({ column }) => <SortHeader label="Device" column={column} />,
-      cell: ({ row }) => {
-        const t = row.original;
-        return (
-          <div>
-            <span className="text-[13px]">{t.friendly_name || t.device_name || stripYaml(t.target)}</span>
-            <div className="text-[11px] text-[var(--text-muted)]">{stripYaml(t.target)}</div>
-          </div>
-        );
-      },
+      cell: ({ row: { original: t } }) => (
+        <>
+          <span className="device-name">{t.friendly_name || t.device_name || stripYaml(t.target)}</span>
+          <div className="device-filename">{stripYaml(t.target)}</div>
+        </>
+      ),
+      sortingFn: 'alphanumeric',
     }),
     columnHelper.accessor(row => row.schedule || row.schedule_once || '', {
       id: 'schedule',
       header: ({ column }) => <SortHeader label="Schedule" column={column} />,
-      cell: ({ row }) => {
-        const t = row.original;
+      cell: ({ row: { original: t } }) => {
         const enabled = t.schedule_enabled !== false;
         const humanSchedule = t.schedule || (t.schedule_once ? `Once: ${new Date(t.schedule_once).toLocaleString()}` : '—');
         return (
-          <span className="font-mono text-[12px]" style={{ opacity: enabled ? 1 : 0.5 }}>
+          <span style={{ fontFamily: 'monospace', opacity: enabled ? 1 : 0.5 }}>
             {humanSchedule}
-            {!enabled && t.schedule && <span className="text-[var(--text-muted)] ml-2">(paused)</span>}
+            {!enabled && t.schedule && <span style={{ color: 'var(--text-muted)', marginLeft: 8 }}>(paused)</span>}
           </span>
         );
       },
@@ -121,8 +118,7 @@ export function SchedulesTab({ targets, workers, onSchedule, onRefresh, onToast 
     columnHelper.accessor(row => row.schedule_once ? 'once' : row.schedule_enabled !== false ? 'active' : 'paused', {
       id: 'status',
       header: ({ column }) => <SortHeader label="Status" column={column} />,
-      cell: ({ row }) => {
-        const t = row.original;
+      cell: ({ row: { original: t } }) => {
         if (t.schedule_once) return <span style={{ color: 'var(--accent)' }}>One-time</span>;
         if (t.schedule_enabled !== false) return <span style={{ color: 'var(--success)' }}>Active</span>;
         return <span style={{ color: 'var(--text-muted)' }}>Paused</span>;
@@ -131,19 +127,17 @@ export function SchedulesTab({ targets, workers, onSchedule, onRefresh, onToast 
     columnHelper.accessor(row => row.schedule_last_run || row.schedule_once || '', {
       id: 'nextRun',
       header: ({ column }) => <SortHeader label="Next / Last Run" column={column} />,
-      cell: ({ row }) => {
-        const t = row.original;
-        return <span className="text-[12px]">{formatNextRun(t.schedule, t.schedule_last_run, t.schedule_once)}</span>;
-      },
+      cell: ({ row: { original: t } }) => (
+        <span>{formatNextRun(t.schedule, t.schedule_last_run, t.schedule_once)}</span>
+      ),
     }),
     columnHelper.accessor(row => row.pinned_version || row.server_version || '', {
       id: 'version',
       header: ({ column }) => <SortHeader label="Version" column={column} />,
-      cell: ({ row }) => {
-        const t = row.original;
+      cell: ({ row: { original: t } }) => {
         const version = t.pinned_version || t.server_version || '—';
         return (
-          <span className="font-mono text-[12px]">
+          <span style={{ fontFamily: 'monospace' }}>
             {version}
             {t.pinned_version && <span style={{ marginLeft: 4 }}>📌</span>}
           </span>
