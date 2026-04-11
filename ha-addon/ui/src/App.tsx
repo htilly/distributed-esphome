@@ -26,6 +26,7 @@ import {
   setTargetSchedule,
   deleteTargetSchedule,
   toggleTargetSchedule,
+  pinTargetVersion,
 } from './api/client';
 import { ConnectWorkerModal } from './components/ConnectWorkerModal';
 import { DeviceLogModal } from './components/DeviceLogModal';
@@ -216,17 +217,26 @@ export default function App() {
     setUpgradeModalTarget({ target, displayName });
   }
 
-  async function handleUpgradeConfirm(params: { pinnedClientId: string | null; esphomeVersion: string | null }) {
+  async function handleUpgradeConfirm(params: {
+    pinnedClientId: string | null;
+    esphomeVersion: string | null;
+    updatePin?: string | null;
+  }) {
     const ctx = upgradeModalTarget;
     if (!ctx) return;
     setUpgradeModalTarget(null);
     try {
+      // #12: if the user changed the version on a pinned device, update the pin first.
+      if (params.updatePin) {
+        await pinTargetVersion(ctx.target, params.updatePin);
+      }
       await compile([ctx.target], params.pinnedClientId ?? undefined, params.esphomeVersion ?? undefined);
       const versionSuffix = params.esphomeVersion ? ` (ESPHome ${params.esphomeVersion})` : '';
       const workerSuffix = params.pinnedClientId
         ? ` on ${workers.find(w => w.client_id === params.pinnedClientId)?.hostname ?? params.pinnedClientId}`
         : '';
-      addToast(`Queued ${ctx.displayName}${workerSuffix}${versionSuffix}`, 'success');
+      const pinSuffix = params.updatePin ? ` (pin updated to ${params.updatePin})` : '';
+      addToast(`Queued ${ctx.displayName}${workerSuffix}${versionSuffix}${pinSuffix}`, 'success');
       switchTab('queue');
       mutateQueue();
       mutateDevices();

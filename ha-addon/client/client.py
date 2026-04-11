@@ -6,12 +6,10 @@ import base64
 import io
 import logging
 import os
-import shutil
 import socket
 import subprocess
 import sys
 import tarfile
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -42,7 +40,7 @@ from sysinfo import collect_system_info
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.4.0-dev.5"
+CLIENT_VERSION = "1.4.0-dev.6"
 
 
 def _read_image_version() -> Optional[str]:
@@ -703,17 +701,25 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
                 _active_jobs -= 1
             return
 
-    tmp_dir = tempfile.mkdtemp(prefix="esphome-job-")
+    # #13: use a stable per-target build directory instead of a random tmpdir
+    # so the .esphome/ build cache (PlatformIO compiled objects) persists
+    # across jobs. This turns a 60-90s full compile into a 5-10s incremental
+    # build when only the YAML changed. The queue dedup prevents concurrent
+    # builds for the same target, so there's no conflict risk.
+    target_stem = os.path.splitext(target)[0]
+    build_dir = os.path.join(_ESPHOME_VERSIONS_DIR, "builds", target_stem)
+    os.makedirs(build_dir, exist_ok=True)
     try:
-        # Extract bundle
+        # Extract bundle into the stable dir (overwrites changed files;
+        # .esphome/ subdir with PlatformIO cache is preserved).
         try:
-            extract_bundle(bundle_b64, tmp_dir)
+            extract_bundle(bundle_b64, build_dir)
         except Exception as exc:
             logger.error("Bundle extraction failed: %s", exc)
             _submit_result(job_id, "failed", log=f"Bundle extraction failed: {exc}", ota_result=None)
             return
 
-        target_path = os.path.join(tmp_dir, target)
+        target_path = os.path.join(build_dir, target)
         if not os.path.exists(target_path):
             _submit_result(job_id, "failed", log=f"Target file not found in bundle: {target}", ota_result=None)
             return
@@ -727,7 +733,7 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
             _log_invocation(job_id, validate_cmd)
             _compile_log, compile_ok = _run_subprocess(
                 validate_cmd,
-                cwd=tmp_dir,
+                cwd=build_dir,
                 timeout=60,  # validation is fast — 60s is plenty
                 label="validate",
                 env=subprocess_env,
@@ -766,7 +772,7 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
         total_timeout = timeout_seconds + OTA_TIMEOUT
         run_log, run_ok = _run_subprocess(
             run_cmd,
-            cwd=tmp_dir,
+            cwd=build_dir,
             timeout=total_timeout,
             label="compile+OTA",
             env=subprocess_env,
@@ -797,7 +803,7 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
                 _log_invocation(job_id, upload_cmd)
                 retry_log, retry_ok = _run_subprocess(
                     upload_cmd,
-                    cwd=tmp_dir,
+                    cwd=build_dir,
                     timeout=OTA_TIMEOUT,
                     label="OTA retry",
                     env=subprocess_env,
@@ -807,7 +813,7 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
                     _submit_result(job_id, "success", log=None, ota_result="success")
                 else:
                     _submit_result(job_id, "success", log=None, ota_result="failed")
-                    diag = _ota_network_diagnostics(target_path, tmp_dir, subprocess_env)
+                    diag = _ota_network_diagnostics(target_path, build_dir, subprocess_env)
                     if diag:
                         _flush_log_text(job_id, "\n--- Network Diagnostics ---\n" + diag)
             else:
@@ -818,11 +824,11 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
         _log_context.current_target = None
         with _active_jobs_lock:
             _active_jobs -= 1
-        try:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            logger.debug("Cleaned up temp dir %s", tmp_dir)
-        except Exception:
-            logger.debug("Failed to clean up temp dir %s", tmp_dir, exc_info=True)
+        # #13: intentionally NOT cleaning up build_dir — the .esphome/
+        # subdirectory contains PlatformIO's compiled object cache. Keeping
+        # it turns a 60-90s full compile into a 5-10s incremental build.
+        # The "Clean Cache" button in the Workers tab already handles
+        # cleanup by removing all of /esphome-versions/ including builds/.
 
 
 def _colorize_log_line(line: str) -> str:

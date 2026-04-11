@@ -217,6 +217,16 @@ def esphome_ota_fail(tmp_path) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Fixture: redirect _ESPHOME_VERSIONS_DIR to a temp dir so the stable
+# build-dir strategy (#13) doesn't write to /esphome-versions/ on the host.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _patch_versions_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(client_mod, "_ESPHOME_VERSIONS_DIR", str(tmp_path))
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

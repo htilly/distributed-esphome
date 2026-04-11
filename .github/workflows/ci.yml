@@ -130,7 +130,10 @@ jobs:
 
       - name: Install dependencies
         working-directory: ha-addon/ui
-        run: npm ci
+        # --legacy-peer-deps: eslint-plugin-react-hooks@7.0.1 declares
+        # peer eslint@^9, but we're on eslint@10. The plugin works fine
+        # at runtime; a compatible release will come when React updates it.
+        run: npm ci --legacy-peer-deps
 
       - name: npm audit (frontend)
         working-directory: ha-addon/ui

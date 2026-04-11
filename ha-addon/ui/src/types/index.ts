@@ -118,6 +118,10 @@ export interface SystemInfo {
   disk_total?: string;
   disk_free?: string;
   disk_used_pct?: number;
+  /** Number of target build directories with cached .esphome/ artifacts. */
+  cached_targets?: number;
+  /** Total size of the build cache in MB. */
+  cache_size_mb?: number;
 }
 
 /**

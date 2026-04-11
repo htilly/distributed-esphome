@@ -210,6 +210,29 @@ def collect_system_info(versions_dir: str = "/esphome-versions") -> dict:
     except Exception:
         pass
 
+    # 5.2: build cache stats — count cached targets + total cache size.
+    # The builds/ dir under versions_dir holds per-target .esphome/ caches.
+    cached_targets = 0
+    cache_size_mb: Optional[int] = None
+    try:
+        builds_dir = os.path.join(versions_dir, "builds")
+        if os.path.isdir(builds_dir):
+            entries = os.listdir(builds_dir)
+            cached_targets = len(entries)
+            total_bytes = 0
+            for entry in entries:
+                entry_path = os.path.join(builds_dir, entry)
+                if os.path.isdir(entry_path):
+                    for dirpath, _dirnames, filenames in os.walk(entry_path):
+                        for f in filenames:
+                            try:
+                                total_bytes += os.path.getsize(os.path.join(dirpath, f))
+                            except OSError:
+                                pass
+            cache_size_mb = round(total_bytes / (1024 * 1024))
+    except Exception:
+        pass
+
     return {
         "cpu_arch": platform.machine(),
         "os_version": os_version,
@@ -222,4 +245,6 @@ def collect_system_info(versions_dir: str = "/esphome-versions") -> dict:
         "disk_total": disk_total,
         "disk_free": disk_free,
         "disk_used_pct": disk_pct,
+        "cached_targets": cached_targets,
+        "cache_size_mb": cache_size_mb,
     }

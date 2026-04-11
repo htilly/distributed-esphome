@@ -411,6 +411,11 @@ def test_run_job_ota_retry_uses_upload_without_no_logs(tmp_path, monkeypatch):
     # construction logic runs.
     _add_fake_version(tmp_path, "2024.3.1")
 
+    # #13: run_job now uses a stable per-target build dir under
+    # _ESPHOME_VERSIONS_DIR. Point it at tmp_path so the test doesn't
+    # try to write to /esphome-versions/.
+    monkeypatch.setattr(client_module, "_ESPHOME_VERSIONS_DIR", str(tmp_path))
+
     commands: list[list[str]] = []
 
     def fake_run_subprocess(cmd, cwd, timeout, label, env=None, job_id=None):

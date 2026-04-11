@@ -44,6 +44,8 @@ interface Props {
   onConfirm: (params: {
     pinnedClientId: string | null;
     esphomeVersion: string | null;
+    /** When true, the caller should update the device's pin to the selected version. */
+    updatePin?: string | null;
   }) => void;
   onClose: () => void;
 }
@@ -80,12 +82,18 @@ export function UpgradeModal({
   }
 
   function handleConfirm() {
+    // #12: if the device is pinned and the user chose a different version,
+    // tell the caller to update the pin to the new version.
+    const shouldUpdatePin = pinnedVersion && selectedVersion && selectedVersion !== pinnedVersion
+      ? selectedVersion
+      : null;
     onConfirm({
       pinnedClientId: selectedWorker || null,
       // Only send the override when the user picked a non-default version.
       esphomeVersion: selectedVersion && selectedVersion !== defaultEsphomeVersion
         ? selectedVersion
         : null,
+      updatePin: shouldUpdatePin,
     });
   }
 
@@ -140,18 +148,18 @@ export function UpgradeModal({
             </div>
           </div>
 
-          {/* VP.5 / #10: warn when upgrading a pinned device with a different version */}
+          {/* #12: when upgrading a pinned device to a different version, tell the
+              user the pin will be updated to match the new version. */}
           {pinnedVersion && selectedVersion && selectedVersion !== pinnedVersion && (
             <div
-              className="rounded-lg border border-[var(--warn)] bg-[var(--warn)]/10 px-3 py-2 text-[12px]"
-              style={{ color: 'var(--warn)' }}
+              className="rounded-lg border border-[var(--accent)] bg-[var(--accent)]/10 px-3 py-2 text-[12px]"
+              style={{ color: 'var(--accent)' }}
             >
-              <strong>Pinned device.</strong> This device is pinned to{' '}
+              <strong>Pin update.</strong> This device is currently pinned to{' '}
               <code className="bg-[var(--surface)] px-1 rounded">{pinnedVersion}</code>
-              , but this upgrade will compile with{' '}
+              . Upgrading will update the pin to{' '}
               <code className="bg-[var(--surface)] px-1 rounded">{selectedVersion}</code>
-              . The pin itself won't change — future scheduled and bulk upgrades will
-              still use the pinned version.
+              .
             </div>
           )}
 

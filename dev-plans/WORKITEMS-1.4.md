@@ -60,7 +60,7 @@ Per-device cron scheduler for automatic compile+OTA. Schedule is stored in the d
 
 ## Build Operations
 
-- [ ] **5.2 Build cache status** — workers report cache stats, display in UI
+- [x] **5.2 Build cache status** *(1.4.0-dev.6)* — workers now report `cached_targets` (count of per-target build dirs) and `cache_size_mb` (total cache size) in `system_info`. Workers tab shows "Cache: N targets (M MB)". Foundation: #13 switched from random tmpdirs to stable per-target build dirs under `/esphome-versions/builds/<target>/` so the `.esphome/` PlatformIO cache persists across jobs.
 
 ## Firmware Download
 
@@ -97,3 +97,14 @@ After a successful compile, extract the firmware binary and make it downloadable
 
 - [x] **11** *(1.4.0-dev.5)* — Refresh button (↻) next to the ESPHome version picker in the top nav. Triggers `mutateEsphomeVersions()` to re-fetch from the server (which queries PyPI). New `onRefresh` prop on `EsphomeVersionDropdown`.
 
+- [x] **12** *(1.4.0-dev.6)* — Pinning warning in UpgradeModal: when the user changes the version on a pinned device, the modal now says "Pin update: upgrading will update the pin to X." and the confirm handler calls `pinTargetVersion(target, version)` to update the pin before enqueuing the compile. The pin is updated, not just warned about.
+
+- [x] **13** *(1.4.0-dev.6)* — Compiles starting from scratch every time. Root cause: `run_job` used `tempfile.mkdtemp()` for each job, so the `.esphome/` build cache (PlatformIO compiled objects) was thrown away after every compile. Fix: stable per-target build directory at `/esphome-versions/builds/<target_stem>/`. The bundle extracts over the existing dir (`.esphome/` persists), turning a 60-90s full compile into a 5-10s incremental build when only the YAML changed. The "Clean Cache" button already handles cleanup by wiping all of `/esphome-versions/`. Also fixed: CI was failing because `eslint-plugin-react-hooks@7.0.1` doesn't support `eslint@10` (Dependabot bumped eslint but not the plugin) — added `--legacy-peer-deps` to `npm ci` in CI + removed the deprecated `baseUrl` from `tsconfig.app.json` (TS 6 deprecation).
+
+- [ ] 14 Let's add a toaster when the ESP home version list refresh gets started and stopped. 
+
+- [ ] 15 Action menu: we should add an option to say "Remove schedule" from all the check boxes. 
+
+- [ ] 16 The height for the action button and the upgrade button in the devices section differs. We should use a standard UI library button control for all of these, please, so this doesn't keep happening. Check for this across all the different tabs and make sure all buttons use the same underlying UI library component. 
+
+- [ ] 17 For the scheduling dialogue that lets me pick the time, in addition to a recurring format, I should have a different tab for a one-time scheduled upgrade so that I can schedule it at a particular date and time. 

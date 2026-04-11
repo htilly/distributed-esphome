@@ -60,6 +60,15 @@ function workerPlatformHtml(si: SystemInfo): React.ReactNode {
       </span>
     );
   }
+  // 5.2: build cache stats
+  if (si.cached_targets != null) {
+    const cacheStr = si.cache_size_mb != null ? ` (${si.cache_size_mb} MB)` : '';
+    lines.push(
+      <span key="cache" style={{ fontSize: 10, color: 'var(--text-muted)' }} title={`Build cache: ${si.cached_targets} target(s) cached${cacheStr}`}>
+        Cache: {si.cached_targets} target{si.cached_targets !== 1 ? 's' : ''}{cacheStr}
+      </span>
+    );
+  }
   return lines.length === 0 ? null : (
     <>{lines.map((l, i) => <>{i > 0 && <br />}{l}</>)}</>
   );
