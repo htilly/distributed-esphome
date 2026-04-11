@@ -496,6 +496,48 @@ async def schedule_checker(app: web.Application) -> None:
             for target in targets:
                 try:
                     meta = read_device_meta(cfg.config_dir, target)
+
+                    # #17: one-time schedule — fires once then auto-clears.
+                    once_str = meta.get("schedule_once")
+                    if once_str:
+                        try:
+                            once_dt = datetime.fromisoformat(once_str)
+                            if once_dt.tzinfo is None:
+                                once_dt = once_dt.replace(tzinfo=timezone.utc)
+                            if once_dt <= now:
+                                version = meta.get("pin_version") or get_esphome_version()
+                                device_poller = app.get("device_poller")
+                                ota_address = None
+                                if device_poller:
+                                    for dev in device_poller.get_devices():
+                                        if dev.compile_target == target and dev.ip_address:
+                                            ota_address = (
+                                                device_poller._address_overrides.get(dev.name)
+                                                or dev.ip_address
+                                            )
+                                            break
+                                run_id = str(_uuid.uuid4())
+                                job = await queue.enqueue(
+                                    target=target,
+                                    esphome_version=version,
+                                    run_id=run_id,
+                                    timeout_seconds=cfg.job_timeout,
+                                    ota_address=ota_address,
+                                )
+                                if job is not None:
+                                    job.scheduled = True
+                                    logger.info(
+                                        "One-time schedule fired for %s (at=%s): enqueued job %s",
+                                        target, once_str, job.id,
+                                    )
+                                # Auto-clear the one-time schedule.
+                                fresh_meta = read_device_meta(cfg.config_dir, target)
+                                fresh_meta.pop("schedule_once", None)
+                                write_device_meta(cfg.config_dir, target, fresh_meta)
+                                continue  # don't also check recurring schedule
+                        except Exception:
+                            logger.debug("One-time schedule parse failed for %s", target, exc_info=True)
+
                     cron_expr = meta.get("schedule")
                     enabled = meta.get("schedule_enabled", False)
                     if not cron_expr or not enabled:

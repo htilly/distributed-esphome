@@ -440,7 +440,11 @@ export default function App() {
         <EsphomeVersionDropdown
           versions={esphomeVersions}
           onSelect={handleSelectEsphomeVersion}
-          onRefresh={() => mutateEsphomeVersions()}
+          onRefresh={async () => {
+            addToast('Refreshing ESPHome versions...', 'info');
+            await mutateEsphomeVersions();
+            addToast('ESPHome version list updated', 'success');
+          }}
         />
         <span
           className="rounded-full border border-[var(--border)] bg-[var(--surface2)] px-2 py-0.5 text-[11px] text-[var(--text-muted)] whitespace-nowrap"
@@ -602,10 +606,23 @@ export default function App() {
             displayName={displayName}
             currentSchedule={t?.schedule}
             currentEnabled={t?.schedule_enabled}
+            currentOnce={t?.schedule_once}
             onSave={async (cron) => {
               try {
                 await setTargetSchedule(scheduleModalTarget, cron);
                 addToast(`Schedule set for ${displayName}`, 'success');
+                setScheduleModalTarget(null);
+                mutateDevices();
+              } catch (err) {
+                addToast('Schedule failed: ' + (err as Error).message, 'error');
+              }
+            }}
+            onSaveOnce={async (datetime) => {
+              try {
+                const { setTargetScheduleOnce } = await import('./api/client');
+                await setTargetScheduleOnce(scheduleModalTarget, datetime);
+                const d = new Date(datetime);
+                addToast(`One-time upgrade scheduled for ${displayName} at ${d.toLocaleString()}`, 'success');
                 setScheduleModalTarget(null);
                 mutateDevices();
               } catch (err) {

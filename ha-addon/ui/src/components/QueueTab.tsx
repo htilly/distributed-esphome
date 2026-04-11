@@ -379,7 +379,7 @@ export function QueueTab({
           <div className="actions">
             {/* Retry dropdown */}
             <DropdownMenu>
-              <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg bg-[#78350f] px-2.5 py-1 text-xs font-medium text-[#fcd34d] hover:bg-[#92400e] cursor-pointer">
+              <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg bg-[#78350f] px-2.5 h-7 text-[0.8rem] font-medium text-[#fcd34d] hover:bg-[#92400e] cursor-pointer">
                 Retry &#9662;
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
@@ -400,7 +400,7 @@ export function QueueTab({
 
             {/* Clear dropdown */}
             <DropdownMenu>
-              <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface2)] px-2.5 py-1 text-xs font-medium text-[var(--text)] hover:bg-[var(--border)] cursor-pointer">
+              <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg border border-border bg-background px-2.5 h-7 text-[0.8rem] font-medium text-foreground hover:bg-muted cursor-pointer">
                 Clear &#9662;
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">

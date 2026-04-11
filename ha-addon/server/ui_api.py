@@ -289,6 +289,7 @@ async def get_targets(request: web.Request) -> web.Response:
             "schedule": meta.get("schedule"),
             "schedule_enabled": meta.get("schedule_enabled", False),
             "schedule_last_run": meta.get("schedule_last_run"),
+            "schedule_once": meta.get("schedule_once"),
             "tags": meta.get("tags"),
         }
         result.append(entry)
@@ -791,6 +792,44 @@ async def toggle_target_schedule(request: web.Request) -> web.Response:
     write_device_meta(cfg.config_dir, filename, meta)
     logger.info("Schedule toggled for %s: enabled=%s", filename, meta["schedule_enabled"])
     return web.json_response({"ok": True, "schedule_enabled": meta["schedule_enabled"]})
+
+
+@routes.post("/ui/api/targets/{filename}/schedule/once")
+async def set_target_schedule_once(request: web.Request) -> web.Response:
+    """Schedule a one-time upgrade at a specific date/time.
+
+    Body: ``{"datetime": "2026-04-15T14:00:00Z"}``
+
+    The scheduler fires the job when the datetime passes, then auto-clears
+    the ``schedule_once`` field (no recurring schedule created).
+    """
+    filename = request.match_info["filename"]
+    cfg = _cfg(request)
+    path = safe_resolve(Path(cfg.config_dir), filename)
+    if path is None or not path.exists():
+        return json_error("Target not found", 404)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    dt_str = body.get("datetime", "").strip()
+    if not dt_str:
+        return web.json_response({"error": "datetime required"}, status=400)
+
+    # Validate it's a parseable ISO datetime.
+    try:
+        from datetime import datetime as _dt  # noqa: PLC0415
+        _dt.fromisoformat(dt_str)
+    except ValueError:
+        return web.json_response({"error": "Invalid datetime format (use ISO 8601)"}, status=400)
+
+    meta = read_device_meta(cfg.config_dir, filename)
+    meta["schedule_once"] = dt_str
+    write_device_meta(cfg.config_dir, filename, meta)
+    logger.info("One-time schedule set for %s at %s", filename, dt_str)
+    return web.json_response({"ok": True, "schedule_once": dt_str})
 
 
 @routes.post("/ui/api/compile")

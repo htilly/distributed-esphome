@@ -69,6 +69,8 @@ export interface Target {
   schedule_enabled?: boolean;
   /** ISO datetime of last scheduled run. */
   schedule_last_run?: string | null;
+  /** ISO datetime for a one-time scheduled upgrade. Auto-cleared after firing. */
+  schedule_once?: string | null;
   /** Comma-separated tags from YAML metadata comment. */
   tags?: string | null;
 }

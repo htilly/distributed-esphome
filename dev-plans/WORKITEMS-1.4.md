@@ -101,10 +101,7 @@ After a successful compile, extract the firmware binary and make it downloadable
 
 - [x] **13** *(1.4.0-dev.6)* — Compiles starting from scratch every time. Root cause: `run_job` used `tempfile.mkdtemp()` for each job, so the `.esphome/` build cache (PlatformIO compiled objects) was thrown away after every compile. Fix: stable per-target build directory at `/esphome-versions/builds/<target_stem>/`. The bundle extracts over the existing dir (`.esphome/` persists), turning a 60-90s full compile into a 5-10s incremental build when only the YAML changed. The "Clean Cache" button already handles cleanup by wiping all of `/esphome-versions/`. Also fixed: CI was failing because `eslint-plugin-react-hooks@7.0.1` doesn't support `eslint@10` (Dependabot bumped eslint but not the plugin) — added `--legacy-peer-deps` to `npm ci` in CI + removed the deprecated `baseUrl` from `tsconfig.app.json` (TS 6 deprecation).
 
-- [ ] 14 Let's add a toaster when the ESP home version list refresh gets started and stopped. 
-
-- [ ] 15 Action menu: we should add an option to say "Remove schedule" from all the check boxes. 
-
-- [ ] 16 The height for the action button and the upgrade button in the devices section differs. We should use a standard UI library button control for all of these, please, so this doesn't keep happening. Check for this across all the different tabs and make sure all buttons use the same underlying UI library component. 
-
-- [ ] 17 For the scheduling dialogue that lets me pick the time, in addition to a recurring format, I should have a different tab for a one-time scheduled upgrade so that I can schedule it at a particular date and time. 
+- [x] **14** *(1.4.0-dev.7)* — Toast on version refresh. The ↻ button now shows "Refreshing ESPHome versions..." on click and "ESPHome version list updated" on completion.
+- [x] **15** *(1.4.0-dev.7)* — "Remove Schedule from Selected" added to the Actions dropdown. Filters selected targets to those with a schedule, calls `deleteTargetSchedule` for each via `Promise.all`, shows a summary toast.
+- [x] **16** *(1.4.0-dev.7)* — Button height consistency. All dropdown triggers in DevicesTab (Upgrade, Actions, gear) and QueueTab (Retry, Clear) now use the same `h-7 text-[0.8rem]` sizing. Previously Upgrade was `text-xs`, Actions was `text-sm`, and the gear was `text-base` — all different heights.
+- [x] **17** *(1.4.0-dev.7)* — One-time scheduled upgrade. The ScheduleModal now has a third "Once" tab with a datetime-local picker. Stores `schedule_once: "<ISO datetime>"` in the YAML comment block. The scheduler fires it when the datetime passes, then auto-clears the field. New endpoint: `POST /ui/api/targets/{f}/schedule/once`. The targets response includes `schedule_once`. The one-time schedule doesn't create a recurring cron — it's fire-and-forget.

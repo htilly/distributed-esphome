@@ -77,7 +77,9 @@ interface Props {
   displayName: string;
   currentSchedule?: string | null;
   currentEnabled?: boolean;
+  currentOnce?: string | null;  // ISO datetime for one-time schedule
   onSave: (cron: string) => void;
+  onSaveOnce: (datetime: string) => void;  // ISO datetime
   onDelete: () => void;
   onToggle: () => void;
   onClose: () => void;
@@ -98,7 +100,9 @@ export function ScheduleModal({
   displayName,
   currentSchedule,
   currentEnabled,
+  currentOnce,
   onSave,
+  onSaveOnce,
   onDelete,
   onToggle,
   onClose,
@@ -108,14 +112,29 @@ export function ScheduleModal({
   // Try to parse the current schedule into picker state; fall back to defaults.
   const parsed = currentSchedule ? parseCron(currentSchedule) : null;
 
-  const [mode, setMode] = useState<'friendly' | 'cron'>(parsed || !currentSchedule ? 'friendly' : 'cron');
+  const [mode, setMode] = useState<'friendly' | 'cron' | 'once'>(
+    currentOnce ? 'once' : (parsed || !currentSchedule ? 'friendly' : 'cron'),
+  );
   const [interval, setInterval] = useState(parsed?.interval ?? 'days');
   const [every, setEvery] = useState(parsed?.every ?? 1);
   const [time, setTime] = useState(parsed?.time ?? '02:00');
   const [dow, setDow] = useState(parsed?.dow ?? '0');
   const [rawCron, setRawCron] = useState(currentSchedule ?? '');
+  // #17: one-time schedule — datetime-local string (YYYY-MM-DDTHH:MM).
+  const [onceDate, setOnceDate] = useState(() => {
+    if (currentOnce) {
+      // Convert ISO string to datetime-local format
+      const d = new Date(currentOnce);
+      return d.toISOString().slice(0, 16);
+    }
+    // Default: tomorrow at 02:00
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(2, 0, 0, 0);
+    return tomorrow.toISOString().slice(0, 16);
+  });
 
-  const hasSchedule = !!currentSchedule;
+  const hasSchedule = !!(currentSchedule || currentOnce);
 
   const effectiveCron = mode === 'cron'
     ? rawCron.trim()
@@ -148,10 +167,32 @@ export function ScheduleModal({
               >
                 Cron
               </Button>
+              <Button
+                variant={mode === 'once' ? 'default' : 'secondary'}
+                size="xs"
+                style={{ borderRadius: 0, border: 'none', borderLeft: '1px solid var(--border)' }}
+                onClick={() => setMode('once')}
+              >
+                Once
+              </Button>
             </div>
           </div>
 
-          {mode === 'friendly' ? (
+          {mode === 'once' ? (
+            <div>
+              <label className="block text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)] mb-1">
+                Date &amp; Time
+              </label>
+              <Input
+                type="datetime-local"
+                value={onceDate}
+                onChange={e => setOnceDate(e.target.value)}
+              />
+              <div className="mt-1 text-[11px] text-[var(--text-muted)]">
+                The device will be upgraded once at this date and time, then the schedule is automatically removed.
+              </div>
+            </div>
+          ) : mode === 'friendly' ? (
             <>
               {/* Interval picker */}
               <div className="flex items-center gap-2 flex-wrap">
@@ -236,10 +277,18 @@ export function ScheduleModal({
               <Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button>
               <Button
                 size="sm"
-                disabled={!effectiveCron}
-                onClick={() => onSave(effectiveCron)}
+                disabled={mode === 'once' ? !onceDate : !effectiveCron}
+                onClick={() => {
+                  if (mode === 'once') {
+                    onSaveOnce(new Date(onceDate).toISOString());
+                  } else {
+                    onSave(effectiveCron);
+                  }
+                }}
               >
-                {hasSchedule ? 'Update Schedule' : 'Set Schedule'}
+                {mode === 'once'
+                  ? 'Schedule Once'
+                  : hasSchedule ? 'Update Schedule' : 'Set Schedule'}
               </Button>
             </div>
           </div>

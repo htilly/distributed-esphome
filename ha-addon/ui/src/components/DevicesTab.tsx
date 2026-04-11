@@ -742,6 +742,25 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
     setBulkScheduleOpen(true);
   }
 
+  // #15: bulk remove schedule from selected devices.
+  async function handleRemoveScheduleSelected() {
+    const scheduled = selectedTargets.filter(t => {
+      const target = targets.find(x => x.target === t);
+      return target?.schedule;
+    });
+    if (scheduled.length === 0) {
+      onToast('No selected devices have a schedule', 'info');
+      return;
+    }
+    try {
+      const { deleteTargetSchedule } = await import('../api/client');
+      await Promise.all(scheduled.map(t => deleteTargetSchedule(t)));
+      onToast(`Removed schedule from ${scheduled.length} device(s)`, 'success');
+    } catch (err) {
+      onToast('Remove failed: ' + (err as Error).message, 'error');
+    }
+  }
+
   // Column visibility for unmanaged rows — derive from TanStack state
   const isVisible = useCallback((col: OptionalColumnId) => columnVisibility[col] !== false, [columnVisibility]);
 
@@ -778,7 +797,7 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
           <div className="actions">
             {/* Upgrade dropdown */}
             <DropdownMenu>
-              <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg bg-[var(--accent)] px-2.5 py-1 text-xs font-medium text-white hover:bg-[var(--accent-hover)] cursor-pointer">
+              <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg bg-primary px-2.5 h-7 text-[0.8rem] font-medium text-primary-foreground hover:bg-primary/80 cursor-pointer">
                 Upgrade &#9662;
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="min-w-[180px]">
@@ -811,7 +830,7 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
 
             {/* #8: Actions dropdown — non-compile bulk operations */}
             <DropdownMenu>
-              <DropdownMenuTrigger className="inline-flex items-center rounded-lg border border-[var(--border)] bg-[var(--surface2)] px-2 py-1 text-sm text-[var(--text)] hover:bg-[var(--border)] cursor-pointer">
+              <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg border border-border bg-background px-2.5 h-7 text-[0.8rem] font-medium text-foreground hover:bg-muted cursor-pointer">
                 Actions &#9662;
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
@@ -819,13 +838,19 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
                   <DropdownMenuItem onClick={handleScheduleSelected} disabled={Object.keys(rowSelection).length === 0}>
                     Schedule Selected...
                   </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={handleRemoveScheduleSelected}
+                    disabled={Object.keys(rowSelection).length === 0}
+                  >
+                    Remove Schedule from Selected
+                  </DropdownMenuItem>
                 </DropdownMenuGroup>
               </DropdownMenuContent>
             </DropdownMenu>
 
             {/* Column picker (gear icon) */}
             <DropdownMenu>
-              <DropdownMenuTrigger className="inline-flex items-center rounded-lg border border-[var(--border)] bg-[var(--surface2)] px-2 py-1 text-base text-[var(--text)] hover:bg-[var(--border)] cursor-pointer" title="Toggle columns">
+              <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg border border-border bg-background px-2.5 h-7 text-[0.8rem] font-medium text-foreground hover:bg-muted cursor-pointer" title="Toggle columns">
                 &#9881;
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
@@ -935,6 +960,7 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
               onToast('Schedule failed: ' + (err as Error).message, 'error');
             }
           }}
+          onSaveOnce={() => {}}
           onDelete={() => setBulkScheduleOpen(false)}
           onToggle={() => {}}
           onClose={() => setBulkScheduleOpen(false)}

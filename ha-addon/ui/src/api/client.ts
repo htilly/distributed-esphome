@@ -431,3 +431,21 @@ export async function unpinTargetVersion(filename: string): Promise<void> {
     throw new Error(data.error || String(r.status));
   }
 }
+
+export async function setTargetScheduleOnce(
+  filename: string,
+  datetime: string,
+): Promise<void> {
+  const r = await apiFetch(
+    `./ui/api/targets/${encodeURIComponent(filename)}/schedule/once`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ datetime }),
+    },
+  );
+  if (!r.ok) {
+    const data = await r.json().catch(() => ({})) as { error?: string };
+    throw new Error(data.error || String(r.status));
+  }
+}
