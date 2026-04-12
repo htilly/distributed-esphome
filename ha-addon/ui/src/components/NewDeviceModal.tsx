@@ -67,10 +67,11 @@ export function NewDeviceModal({ mode, sourceTarget, existingTargets, onCreate, 
     setSaving(true);
     try {
       const target = await createTarget(slug, mode === 'duplicate' ? sourceTarget : undefined);
+      const displayName = stripYaml(target).replace(/^\.pending\./, '');
       onToast(
         mode === 'duplicate'
-          ? `Duplicated ${stripYaml(sourceTarget!)} → ${stripYaml(target)}`
-          : `Created ${stripYaml(target)}`,
+          ? `Duplicated ${stripYaml(sourceTarget!)} → ${displayName}`
+          : `Created ${displayName}`,
         'success',
       );
       onCreate(target);
