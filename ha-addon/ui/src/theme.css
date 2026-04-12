@@ -327,15 +327,16 @@ input[type="checkbox"] {
 }
 .ip-link:hover { text-decoration: underline; }
 
-/* Dialog size variants */
-[data-slot="dialog-content"].dialog-lg {
-  max-width: 960px;
-  height: min(70vh, calc(100vh - 12rem));
-}
-
+/* Dialog size variants.
+   #44: dialog-lg (log viewer) and dialog-xl (editor) should take most of
+   the visible viewport with a small margin. Previously capped at 960px/
+   1200px wide — on a wide monitor that left most of the page unused.
+   Both variants now scale to viewport-minus-2rem-margin on each side. */
+[data-slot="dialog-content"].dialog-lg,
 [data-slot="dialog-content"].dialog-xl {
-  max-width: 1200px;
-  height: min(75vh, calc(100vh - 10rem));
+  max-width: calc(100vw - 4rem);
+  width: calc(100vw - 4rem);
+  height: calc(100vh - 4rem);
 }
 
 @theme inline {

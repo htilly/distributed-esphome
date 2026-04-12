@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import io
 import logging
 import os
+import shutil
 import socket
 import subprocess
 import sys
 import tarfile
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 import requests
 from pydantic import ValidationError
@@ -40,7 +43,7 @@ from sysinfo import collect_system_info
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.4.0-dev.24"
+CLIENT_VERSION = "1.4.0-dev.25"
 
 
 def _read_image_version() -> Optional[str]:
@@ -633,6 +636,115 @@ def _ota_network_diagnostics(target_path: str, cwd: str, env: dict) -> str:
     return diag_text
 
 
+# ---------------------------------------------------------------------------
+# #45: Per-slot working dirs + shared per-target compile cache.
+#
+# Two concurrent compiles for the same target used to share one build dir
+# under /esphome-versions/builds/<stem>/, racing on PlatformIO's .pio/ files
+# and ESPHome's .esphome/ state. The fix:
+#
+#   /esphome-versions/
+#     slots/<slot>/<stem>/   per-slot, per-target working dir (compile here)
+#     cache/<stem>/          shared per-target cache of .pio/ + .esphome/
+#     cache/<stem>.lock      fcntl lock — serialises rsync in/out per target
+#
+# Sync-in: only when the slot dir has no .pio/ yet (first compile of this
+# target on this slot). Sync-out: always on successful compile, so any other
+# slot that later picks up the same target gets a warm cache to start from.
+# Both sync operations take the per-target lock.
+# ---------------------------------------------------------------------------
+
+
+def _slot_dir(worker_id: int, target_stem: str) -> str:
+    return os.path.join(_ESPHOME_VERSIONS_DIR, "slots", str(worker_id), target_stem)
+
+
+def _cache_dir(target_stem: str) -> str:
+    return os.path.join(_ESPHOME_VERSIONS_DIR, "cache", target_stem)
+
+
+@contextmanager
+def _target_cache_lock(target_stem: str) -> Iterator[None]:
+    """Exclusive fcntl lock on a per-target lock file under the cache dir.
+
+    Serialises sync-in/sync-out for a target across slots so two workers
+    can't step on each other while rsync'ing the .pio/.esphome subtrees.
+    The lock file itself is never deleted — it's just a handle.
+    """
+    cache_parent = os.path.join(_ESPHOME_VERSIONS_DIR, "cache")
+    os.makedirs(cache_parent, exist_ok=True)
+    lock_path = os.path.join(cache_parent, f"{target_stem}.lock")
+    with open(lock_path, "w", encoding="utf-8") as fp:
+        fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+
+
+def _copytree_replace(src: str, dst: str) -> None:
+    """Copy *src* tree to *dst*, replacing *dst* if it exists.
+
+    Uses shutil.rmtree + shutil.copytree — acceptable for typical ESPHome
+    .pio/.esphome sizes (~50-100MB). Silently tolerates missing src.
+    """
+    if not os.path.isdir(src):
+        return
+    if os.path.exists(dst):
+        shutil.rmtree(dst, ignore_errors=True)
+    shutil.copytree(src, dst, symlinks=True)
+
+
+def _sync_cache_into_slot(target_stem: str, slot_dir: str) -> None:
+    """On first compile of *target_stem* in *slot_dir*, seed .pio/.esphome
+    from the shared cache so the slot benefits from any prior compile on
+    any other slot.
+    """
+    cache_dir = _cache_dir(target_stem)
+    if not os.path.isdir(cache_dir):
+        return
+
+    slot_pio = os.path.join(slot_dir, ".pio")
+    slot_esphome = os.path.join(slot_dir, ".esphome")
+    cache_pio = os.path.join(cache_dir, ".pio")
+    cache_esphome = os.path.join(cache_dir, ".esphome")
+
+    need_pio = os.path.isdir(cache_pio) and not os.path.isdir(slot_pio)
+    need_esphome = os.path.isdir(cache_esphome) and not os.path.isdir(slot_esphome)
+    if not (need_pio or need_esphome):
+        return
+
+    with _target_cache_lock(target_stem):
+        if need_pio:
+            logger.info("Slot seeding .pio/ from shared cache for %s", target_stem)
+            _copytree_replace(cache_pio, slot_pio)
+        if need_esphome:
+            logger.info("Slot seeding .esphome/ from shared cache for %s", target_stem)
+            _copytree_replace(cache_esphome, slot_esphome)
+
+
+def _sync_slot_into_cache(target_stem: str, slot_dir: str) -> None:
+    """After a successful compile, push .pio/.esphome back to the shared
+    cache so subsequent compiles on any slot start warm.
+    """
+    slot_pio = os.path.join(slot_dir, ".pio")
+    slot_esphome = os.path.join(slot_dir, ".esphome")
+    if not (os.path.isdir(slot_pio) or os.path.isdir(slot_esphome)):
+        return
+
+    cache_dir = _cache_dir(target_stem)
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        with _target_cache_lock(target_stem):
+            if os.path.isdir(slot_pio):
+                _copytree_replace(slot_pio, os.path.join(cache_dir, ".pio"))
+            if os.path.isdir(slot_esphome):
+                _copytree_replace(slot_esphome, os.path.join(cache_dir, ".esphome"))
+        logger.info("Updated shared cache for %s", target_stem)
+    except Exception:
+        logger.warning("Failed to update shared cache for %s", target_stem, exc_info=True)
+
+
 def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_id: int = 1) -> None:
     """Execute a single build job end-to-end."""
     global _active_jobs
@@ -701,15 +813,23 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
                 _active_jobs -= 1
             return
 
-    # #13: use a stable per-target build directory instead of a random tmpdir
-    # so the .esphome/ build cache (PlatformIO compiled objects) persists
-    # across jobs. This turns a 60-90s full compile into a 5-10s incremental
-    # build when only the YAML changed. The queue dedup prevents concurrent
-    # builds for the same target, so there's no conflict risk.
+    # #13: stable per-target build directory so the .esphome/ build cache
+    #      (PlatformIO compiled objects) persists across jobs — turns a
+    #      60-90s full compile into a 5-10s incremental build.
+    # #45: now per-SLOT as well, so concurrent compiles on the same worker
+    #      don't race on the same directory. The shared /cache/<stem>/ dir
+    #      is synced in on first compile and synced out on success so cache
+    #      still reuses across slots via the shared cache. Two slots can
+    #      compile the same target in parallel without stepping on each
+    #      other — they work in separate slot dirs and only contend on the
+    #      brief sync-in/sync-out phases (serialized by a per-target lock).
     target_stem = os.path.splitext(target)[0]
-    build_dir = os.path.join(_ESPHOME_VERSIONS_DIR, "builds", target_stem)
+    build_dir = _slot_dir(worker_id, target_stem)
     os.makedirs(build_dir, exist_ok=True)
     try:
+        # Seed this slot's .pio/.esphome from the shared cache if this is
+        # the first compile of this target on this slot. No-op otherwise.
+        _sync_cache_into_slot(target_stem, build_dir)
         # Extract bundle into the stable dir (overwrites changed files;
         # .esphome/ subdir with PlatformIO cache is preserved).
         try:
@@ -780,11 +900,21 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
         )
 
         if run_ok:
+            # #45: compile succeeded — sync the slot's .pio/.esphome back to
+            # the shared cache so other slots can start warm next time.
+            _sync_slot_into_cache(target_stem, build_dir)
             _submit_result(job_id, "success", log=None, ota_result="success")
         else:
             log_lower = run_log.lower()
             compile_succeeded = "successfully compiled" in log_lower
             ota_failed = compile_succeeded and ("failed" in log_lower or "timed out" in log_lower)
+
+            # #45: if the COMPILE succeeded (even if OTA failed or retried)
+            # we still want to promote the build artifacts to the shared
+            # cache — a successful compile is worth caching regardless of
+            # whether the device was reachable for OTA.
+            if compile_succeeded:
+                _sync_slot_into_cache(target_stem, build_dir)
 
             if not compile_succeeded:
                 _submit_result(job_id, "failed", log=None, ota_result=None)
