@@ -500,6 +500,20 @@ class DevicePoller:
         for dev in self._devices.values():
             dev.compile_target = self._map_target(dev.name)
 
+        # #59: remove stale proactive entries — devices that were pre-created
+        # for a YAML target that no longer exists and have never been seen
+        # online (no mDNS discovery, no MAC, no firmware version). These ghost
+        # entries show up as unchecked/undeletable rows in the Devices tab.
+        stale_keys = [
+            key for key, dev in self._devices.items()
+            if dev.compile_target is None
+            and not dev.online
+            and not dev.mac_address
+            and not dev.running_version
+        ]
+        for key in stale_keys:
+            del self._devices[key]
+
         # Proactively create Device entries for every YAML target. Now that
         # build_name_to_target_map populates address_overrides for ALL targets
         # (via get_device_address, which falls back to {name}.local), every
