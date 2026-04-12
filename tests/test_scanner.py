@@ -740,6 +740,20 @@ def test_duplicate_device_preserves_include_tags(tmp_path):
     assert "!secret 'ap_password'" in result or "!secret ap_password" in result
 
 
+def test_duplicate_device_strips_use_address(tmp_path):
+    """#47: wifi.use_address is stripped so the clone doesn't match the original's IP."""
+    import yaml
+    src = tmp_path / "src.yaml"
+    src.write_text(
+        "esphome:\n  name: device\n"
+        "wifi:\n  use_address: 192.168.1.100\n  ssid: home\n"
+    )
+    result = duplicate_device(str(tmp_path), "src.yaml", "device-copy")
+    data = yaml.safe_load(result)
+    assert "use_address" not in data.get("wifi", {}), "use_address should be stripped"
+    assert data["wifi"]["ssid"] == "home"
+
+
 def test_duplicate_device_preserves_includes_with_substitution_rewrite(tmp_path):
     """Combined: substitution rewrite + !include preservation."""
     src = tmp_path / "src.yaml"

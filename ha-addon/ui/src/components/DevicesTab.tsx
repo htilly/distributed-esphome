@@ -802,8 +802,10 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
             )}
           </div>
           <div className="actions">
-            {/* CD.5: "+ New Device" button */}
-            <Button variant="secondary" size="sm" onClick={onNewDevice} title="Create a new device YAML">
+            {/* CD.5: "+ New Device" button. #46: use default variant (primary
+                styling) so it reads as a real action button, matching the visual
+                weight of the Upgrade/Actions dropdown triggers next to it. */}
+            <Button size="sm" onClick={onNewDevice} title="Create a new device YAML">
               + New Device
             </Button>
             {/* Upgrade dropdown */}
