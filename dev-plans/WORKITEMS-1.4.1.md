@@ -102,5 +102,77 @@ After this phase: `DevicesTab.tsx` should be ~300-400 lines (orchestrator: state
   - Persist DevicesTab sort order in localStorage
   - URL query param state for deep-linking (`?tab=queue&filter=kitchen`)
 
+## Phase 8 — Pre-release Playwright Coverage
+
+Automated tests for 1.4.0 features not yet covered by the existing mocked + prod Playwright tests. Split into mocked (fast, no real server) and prod hass-4 (real server, real devices).
+
+### Mocked tests (`ha-addon/ui/e2e/`)
+
+- [ ] **PT.1 `pin-unpin.spec.ts`** — Version Pinning UI:
+  - Pin via hamburger → 📌 appears in version column, tooltip shows pinned version
+  - Unpin via hamburger → 📌 disappears
+  - Upgrade modal on pinned device → amber warning banner visible, explains pin vs compile version
+  - Bulk "Upgrade All" request intercepted → assert the `POST /ui/api/compile` request doesn't send an explicit `esphome_version` (server-side pin resolution handles it)
+- [ ] **PT.2 `schedule-modal.spec.ts`** — Schedule creation + editing:
+  - Hamburger → "Schedule Upgrade..." opens modal in Scheduled mode (radio pre-selected)
+  - Row Upgrade button opens modal in Now mode by default
+  - Switch between Now ↔ Scheduled → fields update, no stale state
+  - Create recurring schedule → mock API returns updated target with `schedule` field → 🕐 icon + schedule column update within 1s
+  - Pause schedule → schedule column shows "(paused)"
+  - Schedules tab Edit button → modal opens with schedule pre-filled in friendly picker (assert interval/unit/time dropdowns match the fixture cron)
+  - One-time schedule → mock API, verify `schedule_once` field in request
+- [ ] **PT.3 `schedules-tab.spec.ts`** — Schedules tab layout + interactions:
+  - Tab renders table with columns: Device, Schedule, Status, Next Run, Last Run, Version, Worker, Edit
+  - Search/filter narrows rows
+  - Checkbox select-all + "Remove Selected" button appears when selection > 0
+  - Bulk remove → mock delete API called for each selected, rows disappear, single toast
+  - Empty state renders when no devices have schedules
+- [ ] **PT.4 `bulk-schedule.spec.ts`** — Bulk schedule operations:
+  - Select 2+ devices → Actions ▾ → "Schedule Selected..." → modal opens → Save → mock API called for each target
+  - Select 2+ devices → Actions ▾ → "Remove Schedule from Selected" → mock delete API called → single summary toast
+- [ ] **PT.5 `queue-extras.spec.ts`** — Queue tab 1.4 additions:
+  - Triggered column: fixture with `scheduled: true` job shows "🕐" text; `scheduled: false` shows "👤"
+  - Rerun vs Retry labels: successful job row has green "Rerun" button; failed has amber "Retry"; cancelled has "Retry"
+  - Cancelled job badge renders as grey "Cancelled" (not red "Failed")
+  - Clear actions don't touch cancelled jobs (verify cancelled row persists after "Clear All Finished")
+- [ ] **PT.6 `modal-sizing.spec.ts`** — Editor/Log modal viewport:
+  - Open editor modal → measure `dialog` bounding box → width ≥ `viewport.width - 8rem`, height ≥ `viewport.height - 8rem`
+  - Assert Save/Validate buttons row is fully visible (bottom of button row `y + height` < viewport height)
+  - Open log modal → same dimension checks
+  - Repeat at 1024×768 and 1920×1080 viewports
+- [ ] **PT.7 `button-consistency.spec.ts`** — Toolbar button heights:
+  - On Devices tab: measure heights of Upgrade trigger, Actions trigger, + New Device, ⚙ gear → assert all equal
+  - On Queue tab: measure heights of Retry trigger, Clear trigger → assert equal to Devices buttons
+  - On Workers tab: measure heights of Clean All Caches, + Connect Worker → assert equal
+- [ ] **PT.8 `cancel-new-device.spec.ts`** — Cancel without saving deletes stub:
+  - "+ New Device" → Create → editor opens → press Escape (close without saving) → intercept `DELETE /ui/api/targets/...` → assert it was called
+
+### Prod tests (`ha-addon/ui/e2e-hass-4/`)
+
+- [ ] **PT.9 `schedule-fires.spec.ts`** — Schedule fires on real server:
+  - Set a one-time schedule for ~90s from now on `cyd-office-info` (or test device) via API
+  - Poll `/ui/api/queue` until a job with `scheduled: true` for that target appears (budget: 3 min)
+  - Assert job state reaches terminal (success or fail)
+  - Poll `/ui/api/targets` → assert `schedule_once` is cleared (auto-clear worked)
+- [ ] **PT.10 `incremental-build.spec.ts`** — Build cache reuse:
+  - Compile `cyd-office-info` via API, record `duration` from the queue's `finished_at - assigned_at`
+  - Edit the YAML comment (trivial change), compile again, record second duration
+  - Assert second duration < first duration × 0.5 (incremental should be ≥50% faster)
+  - Verify worker's `system_info.cached_targets > 0` via `/ui/api/workers`
+- [ ] **PT.11 `pinned-bulk-compile.spec.ts`** — Pinned version honored in bulk compile:
+  - Pin `garage-door-big` to a specific version via `POST /ui/api/targets/{f}/pin`
+  - Trigger "Upgrade All" via API
+  - Poll queue for the `garage-door-big` job → assert `esphome_version` matches the pinned version (not the global default)
+  - Clean up: unpin the device
+
+### Fixture updates
+
+- [ ] **PT.12 Update `e2e/fixtures.ts`** — add to the existing fixture data:
+  - A device with `pinned_version: "2024.11.1"` (for pin tests)
+  - A device with `schedule: "0 2 * * 0"`, `schedule_enabled: true`, `schedule_last_run: "..."` (for schedule tests)
+  - A device with `schedule_once: "2025-01-15T14:00:00Z"` (for one-time schedule tests)
+  - A queue job with `scheduled: true` (for triggered column test)
+  - A queue job with `state: "cancelled"` (for cancelled badge test)
+
 ## Open Bugs & Tweaks
 

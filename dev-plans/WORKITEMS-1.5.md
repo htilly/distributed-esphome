@@ -1,6 +1,6 @@
 # Work Items — 1.5.0
 
-Theme: **Editor and config management.** Turn the built-in editor into a real development environment with file browsing, config diffing, git integration, and URL import.
+Theme: **Editor and config management.** Turn the built-in editor into a real development environment with file browsing, automatic version history, and URL import. Every YAML save is auto-versioned via a local git repo — users get history, diff, and rollback for free with zero config.
 
 ## File Tree Editor
 
@@ -16,23 +16,67 @@ Browse and edit any file in the ESPHome config directory, including subdirectori
 - [ ] **FT.8 Conditional buttons** — Save & Upgrade/Validate/Rename only for entry-point YAML; includes get Save only
 - [ ] **FT.9 API functions** — `listFiles()`, `readFile()`, `writeFile()` in client.ts
 
-## Config Diff
+## Auto-Versioning (local git, zero config)
 
-- [ ] **1.5a Store config snapshot** — save YAML at compile time to `/data/config_snapshots/`
-- [ ] **1.5b Diff endpoint** — return unified diff between current and last-compiled
-- [ ] **1.5c Diff viewer in editor** — Monaco diff editor or inline diff display
+Every save creates a git commit automatically. Users get per-file history, diff, and rollback without touching git or configuring anything. The config directory becomes a local git repo on first startup; existing git repos are left intact.
 
-## Git Integration
+**Why git:** Diff is free (`git diff`), history is free (`git log --follow`), rollback is `git checkout <hash> -- <file>` + a new commit, Monaco already has a diff editor in the bundle, and the `git` binary ships in the HA add-on base image (zero image size cost). The alternative (copy-on-write snapshots + DIY diff) is more code and worse tooling.
 
-Version history, commit, and push/pull for ESPHome configs — pairs with the File Tree Editor and Config Diff features to give power users full source-control visibility without leaving the UI.
+- [ ] **AV.1 Auto-init** — on server startup, if `/config/esphome/` is not a git repo, run `git init` + `git add -A` + initial commit "Initial commit by distributed-esphome". If it's already a git repo (user set it up themselves), skip init. Add `.gitignore` for `secrets.yaml` and `.esphome/` if not already present. Log the outcome at INFO.
+- [ ] **AV.2 Auto-commit on save** — after every file-writing operation (editor save, rename, duplicate, pin, schedule, delete), run `git add <file>` + `git commit -m "<action>: <file>"` in a background task. Debounce window of 2s so rapid saves (e.g., save + pin in quick succession) coalesce into one commit. Commit author set to `"HA User <ha@distributed-esphome.local>"`. Non-blocking: save returns immediately, commit happens async.
+- [ ] **AV.3 History endpoint** — `GET /ui/api/files/{path}/history` — returns `[{hash, message, date, lines_added, lines_removed}]` via `git log --follow --stat -- <path>`. The `--follow` flag tracks renames. Paginated (default 50 entries).
+- [ ] **AV.4 Diff endpoint** — `GET /ui/api/files/{path}/diff?from=<hash>&to=<hash|HEAD>` — returns unified diff string via `git diff <from> <to> -- <path>`. If `to` is omitted, diffs against working tree (uncommitted changes).
+- [ ] **AV.5 Rollback endpoint** — `POST /ui/api/files/{path}/rollback` body `{hash}` — runs `git checkout <hash> -- <path>` then auto-commits as "Revert <file> to <short-hash>". Returns the restored file content. Invalidates the scanner config cache.
+- [ ] **AV.6 History panel in editor** — sidebar or dropdown in the editor modal showing per-file commit history (AV.3). Each entry shows date, message, and `+N/-M` diff stat. Click an entry → opens Monaco diff editor (current vs that version, via AV.4). "Restore this version" button calls AV.5.
+- [ ] **AV.7 Config Diff on compile** — when a compile job is enqueued, record the current HEAD hash on the job (new `Job.config_hash` field). The "what changed since last compile" diff is `git diff <last_job_hash> <current_hash> -- <target>`. Replaces the snapshot-file approach (old 1.5a/1.5b) — no `/data/config_snapshots/` directory needed.
+- [ ] **AV.8 Diff viewer in editor** — Monaco diff editor component. Used by AV.6 (history comparison) and AV.7 (changes since last compile). Reuse `@monaco-editor/react`'s `DiffEditor` — it's already in the bundle, just not imported.
+- [ ] **AV.9 Git status in file tree** — if the file tree editor (FT section) lands in the same release: show modified/untracked badges on files using `git status --porcelain`. If FT doesn't land, defer this to when it does.
+- [ ] **AV.10 Tests** — unit tests: auto-init on empty dir, auto-init skips existing repo, auto-commit creates a commit with correct message, debounce coalesces rapid writes, history endpoint returns correct entries, diff endpoint returns correct diff, rollback restores content + creates a new commit. Integration test: save via editor API → verify `git log` shows the commit.
 
-- [ ] **GI.1 Git detection** — on startup, detect whether the config directory is a git repo; expose `git_enabled` flag in `/ui/api/info`
-- [ ] **GI.2 Git status endpoint** — `GET /ui/api/git/status` — returns per-file status (modified, untracked, staged) for the config directory
-- [ ] **GI.3 Git log endpoint** — `GET /ui/api/git/log` — recent commits (hash, message, author, date) for the config directory
-- [ ] **GI.4 Git commit endpoint** — `POST /ui/api/git/commit` — stage changed files + commit with user-provided message
-- [ ] **GI.5 Git pull/push endpoints** — `POST /ui/api/git/pull`, `POST /ui/api/git/push` — sync with remote (if configured)
-- [ ] **GI.6 Git status indicators in File Tree** — modified/untracked badges on files in the FT sidebar
-- [ ] **GI.7 Git history panel** — commit log viewer, per-file history, diff between commits
+## GitHub Sync (optional remote)
+
+Connect the local git repo to a GitHub (or any git remote) for backup and team collaboration. Private repos work identically to public. This is stretch scope for 1.5.0 — can slip to 1.6.0 if auto-versioning alone fills the release.
+
+**Auth options:** GitHub Personal Access Token (HTTPS) or SSH deploy key. Stored in add-on options (encrypted at rest by HA Supervisor). No OAuth flow needed — PATs are simpler and work for private repos.
+
+- [ ] **GS.1 Remote configuration** — add-on options: `git_remote_url` (string, e.g. `https://github.com/user/esphome-configs.git`), `git_remote_token` (secret string, PAT for HTTPS auth), `git_remote_ssh_key` (secret string, for SSH auth). On startup, if configured, run `git remote add origin <url>` (or update if remote exists). Validate connectivity with `git ls-remote`.
+- [ ] **GS.2 Push** — `POST /ui/api/git/push`. Runs `git push origin main`. Called automatically after each auto-commit batch (configurable: after every commit, every N minutes, or manual-only). Auth via credential helper for HTTPS or SSH key file for SSH. Surfaces errors (auth failure, force-push rejected, network) via the `/ui/api/info` response so the UI can show a banner.
+- [ ] **GS.3 Pull** — `POST /ui/api/git/pull`. Runs `git pull --rebase origin main`. Called on startup (if remote configured) and on-demand via UI button. On conflict: abort the rebase, keep local, log the conflict at WARNING, surface it in the UI as "Remote has changes that conflict with local edits — resolve manually or force-push".
+- [ ] **GS.4 Sync status UI** — indicator in the header or settings page showing: last push time, last pull time, sync errors. "Push now" / "Pull now" buttons.
+- [ ] **GS.5 `.gitignore` management** — ensure `secrets.yaml` is always in `.gitignore` (auto-add on init and on remote config). Warn in the UI if `secrets.yaml` has been committed (it contains WiFi passwords and API keys).
+
+## Device Organization
+
+Key/value tags (like AWS resource tags), stored in the per-device `# distributed-esphome:` comment block as a `tags:` map. Users can group the Devices table by any tag key (Notion-style table groups) and filter by `key=value`.
+
+Format in the YAML comment block:
+```yaml
+# distributed-esphome:
+#   tags:
+#     location: kitchen
+#     floor: "1"
+#     env: prod
+#     owner: stefan
+```
+
+The existing `tags` field landed in 1.4.0-dev.2 as a simple list of strings — that needs to migrate to a key/value map. `read_device_meta()` should accept both shapes during the transition (list → coerce to `{tag: ""}` or warn-and-ignore) and `write_device_meta()` always writes the map shape going forward.
+
+- [ ] **DO.1 Tag schema migration** — `read_device_meta()` accepts either list-of-strings (legacy) or string-keyed map; normalizes to map on read. `write_device_meta()` always writes the map. Add a unit test that round-trips both shapes.
+- [ ] **DO.2 Tag CRUD endpoints** — `POST /ui/api/targets/{f}/tags` (set, body `{key, value}`), `DELETE /ui/api/targets/{f}/tags/{key}` (clear). Reuses `read_device_meta()` / `write_device_meta()`. Validates key is non-empty, max 64 chars, no leading/trailing whitespace; value is string, max 256 chars (allow empty for "key present, no value").
+- [ ] **DO.3 Tag editor UI** — modal opened from the device hamburger menu ("Edit tags…"). Shows current tags as editable rows: `[key] [value] [×]` plus an "+ Add tag" button. Save persists via `POST /ui/api/targets/{f}/tags` for each changed entry. Datalist autocomplete on `key` from the union of all keys currently in use across the fleet.
+- [ ] **DO.4 Tag column** — toggleable "Tags" column on the Devices tab showing each device's tags as compact `key=value` chips (truncated, full set in tooltip). Sortable by string representation.
+- [ ] **DO.5 Group-by-tag selector** — top-of-table dropdown: "Group by: [None / location / floor / env / …]". When set, rows are grouped under sticky group headers showing the value (e.g., "location: kitchen — 4 devices"). Devices without that tag key fall into an "— unset —" group at the bottom. Group state persists in localStorage. Like Notion table groups: collapsible group headers, group-level select-all checkbox.
+- [ ] **DO.6 Filter by tag** — top-of-table filter chips: click a tag chip in any row to add it as a filter (`location=kitchen`). Multiple chips AND together. Clear-all button. Filter state in URL query string so it survives reloads and is shareable.
+- [ ] **DO.7 Bulk tag operations** — extend multi-select on the Devices tab: "Set tag…" (prompts for key+value, applies to all selected via `Promise.all`), "Remove tag…" (prompts for key, removes from all selected). Single summary toast per bulk action.
+- [ ] **DO.8 Bulk delete + bulk validate** *(formerly 6.6)* — extend multi-select: bulk delete and bulk validate alongside the existing bulk upgrade.
+
+## Firmware Download
+
+After a successful compile, extract the firmware binary and make it downloadable from the UI. Foundation for remote compilation in a later release.
+
+- [ ] **3.1a Worker extracts firmware binary** — read .bin after compile, POST to server
+- [ ] **3.1b Server stores firmware** — `/data/firmware/<target>/`, metadata endpoint
+- [ ] **3.1c Download button on device row** — `GET /ui/api/targets/{f}/firmware`
 
 ## Import
 

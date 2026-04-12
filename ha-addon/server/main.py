@@ -758,8 +758,12 @@ async def _fetch_ha_esphome_version(session: aiohttp.ClientSession) -> Optional[
     return None
 
 
-async def _fetch_pypi_versions(session: aiohttp.ClientSession, limit: int = 50) -> list[str]:
-    """Return recent ESPHome versions from PyPI, newest first."""
+async def _fetch_pypi_versions(session: aiohttp.ClientSession) -> list[str]:
+    """Return ALL ESPHome versions from PyPI, newest first.
+
+    #69: no longer capped at 50 — returns every release so users can
+    access historic versions. The UI filters betas via a toggle (#64).
+    """
     try:
         async with session.get(
             "https://pypi.org/pypi/esphome/json",
@@ -769,11 +773,34 @@ async def _fetch_pypi_versions(session: aiohttp.ClientSession, limit: int = 50) 
                 data = await resp.json()
                 releases = list(data.get("releases", {}).keys())
 
-                def _version_key(v: str) -> list[int]:
-                    return [int(x) for x in v.split(".") if x.isdigit()]
+                def _version_key(v: str) -> tuple:
+                    # PEP440-ish sort: split on dots, parse numeric parts,
+                    # treat beta/alpha/rc as less-than the stable release.
+                    parts: list[object] = []
+                    for seg in v.split("."):
+                        if seg.isdigit():
+                            parts.append((0, int(seg)))
+                        else:
+                            # e.g. "0b1" → numeric prefix 0, beta suffix "b1"
+                            import re  # noqa: PLC0415
+                            m = re.match(r"(\d+)(.*)", seg)
+                            if m:
+                                parts.append((0, int(m.group(1))))
+                                suffix = m.group(2).lower()
+                                # a < b < rc < (empty=stable)
+                                order = {"a": -3, "b": -2, "rc": -1, "dev": -4}
+                                for tag, rank in order.items():
+                                    if suffix.startswith(tag):
+                                        parts.append((rank, 0))
+                                        break
+                                else:
+                                    parts.append((0, 0))
+                            else:
+                                parts.append((0, seg))
+                    return tuple(parts)
 
                 releases.sort(key=_version_key, reverse=True)
-                return releases[:limit]
+                return releases
     except Exception:
         logger.debug("Failed to fetch PyPI esphome versions", exc_info=True)
     return []

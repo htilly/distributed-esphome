@@ -148,6 +148,16 @@ export function UpgradeModal({
     if (v && !versionList.includes(v)) versionList.push(v);
   }
 
+  // #64: searchable + beta-filterable version list
+  const [versionSearch, setVersionSearch] = useState('');
+  const [showBetas, setShowBetas] = useState(false);
+  const isBeta = (v: string) => /\d(a|b|rc|dev)\d/i.test(v);
+  const filteredVersions = versionList.filter(v => {
+    if (!showBetas && isBeta(v)) return false;
+    if (versionSearch && !v.toLowerCase().includes(versionSearch.toLowerCase())) return false;
+    return true;
+  });
+
   // --- Mode: now vs schedule ---
   const [mode, setMode] = useState<'now' | 'schedule'>(scheduleOnly ? 'schedule' : defaultMode);
 
@@ -225,14 +235,25 @@ export function UpgradeModal({
 
               <div>
                 <label className="block text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)] mb-1">ESPHome version</label>
+                <input
+                  type="text"
+                  value={versionSearch}
+                  onChange={e => setVersionSearch(e.target.value)}
+                  placeholder="Search versions..."
+                  className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-2.5 py-1 text-[12px] text-[var(--text)] outline-none placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] mb-1"
+                />
                 <Select value={selectedVersion} onChange={e => setSelectedVersion(e.target.value)}>
                   <option value="">
                     Current{defaultEsphomeVersion ? ` (${defaultEsphomeVersion})` : ''}
                   </option>
-                  {versionList.map(v => (
+                  {filteredVersions.map(v => (
                     <option key={v} value={v}>{v}</option>
                   ))}
                 </Select>
+                <label className="flex items-center gap-1.5 mt-1 text-[11px] text-[var(--text-muted)] cursor-pointer">
+                  <input type="checkbox" checked={showBetas} onChange={e => setShowBetas(e.target.checked)} />
+                  Show betas
+                </label>
               </div>
 
               {/* Pin warning */}

@@ -17,31 +17,6 @@ Pin individual devices to a specific ESPHome version. Pinned devices compile wit
 - [x] **VP.7 Compile guard** *(1.4.0-dev.3)* — when a pinned device is included in bulk "Upgrade All/Outdated", the compile endpoint reads `pin_version` from the device's metadata comment and uses it instead of the global version. An explicit `version_override` from the UpgradeModal still takes precedence.
 - [x] **VP.8 Scheduled Upgrades integration** *(1.4.0-dev.2)* — the `schedule_checker()` background task uses `meta.get("pin_version") or get_esphome_version()` as the compile version, so pinned devices respect their pin during scheduled runs.
 
-## Device Organization
-
-Key/value tags (like AWS resource tags), stored in the per-device `# distributed-esphome:` comment block as a `tags:` map. Users can group the Devices table by any tag key (Notion-style table groups) and filter by `key=value`.
-
-Format in the YAML comment block:
-```yaml
-# distributed-esphome:
-#   tags:
-#     location: kitchen
-#     floor: "1"
-#     env: prod
-#     owner: stefan
-```
-
-The existing `tags` field landed in 1.4.0-dev.2 as a simple list of strings — that needs to migrate to a key/value map. `read_device_meta()` should accept both shapes during the transition (list → coerce to `{tag: ""}` or warn-and-ignore) and `write_device_meta()` always writes the map shape going forward.
-
-- [ ] **DO.1 Tag schema migration** — `read_device_meta()` accepts either list-of-strings (legacy) or string-keyed map; normalizes to map on read. `write_device_meta()` always writes the map. Add a unit test that round-trips both shapes.
-- [ ] **DO.2 Tag CRUD endpoints** — `POST /ui/api/targets/{f}/tags` (set, body `{key, value}`), `DELETE /ui/api/targets/{f}/tags/{key}` (clear). Reuses `read_device_meta()` / `write_device_meta()`. Validates key is non-empty, max 64 chars, no leading/trailing whitespace; value is string, max 256 chars (allow empty for "key present, no value").
-- [ ] **DO.3 Tag editor UI** — modal opened from the device hamburger menu ("Edit tags…"). Shows current tags as editable rows: `[key] [value] [×]` plus an "+ Add tag" button. Save persists via `POST /ui/api/targets/{f}/tags` for each changed entry. Datalist autocomplete on `key` from the union of all keys currently in use across the fleet.
-- [ ] **DO.4 Tag column** — toggleable "Tags" column on the Devices tab showing each device's tags as compact `key=value` chips (truncated, full set in tooltip). Sortable by string representation.
-- [ ] **DO.5 Group-by-tag selector** — top-of-table dropdown: "Group by: [None / location / floor / env / …]". When set, rows are grouped under sticky group headers showing the value (e.g., "location: kitchen — 4 devices"). Devices without that tag key fall into an "— unset —" group at the bottom. Group state persists in localStorage. Like Notion table groups: collapsible group headers, group-level select-all checkbox.
-- [ ] **DO.6 Filter by tag** — top-of-table filter chips: click a tag chip in any row to add it as a filter (`location=kitchen`). Multiple chips AND together. Clear-all button. Filter state in URL query string so it survives reloads and is shareable.
-- [ ] **DO.7 Bulk tag operations** — extend multi-select on the Devices tab: "Set tag…" (prompts for key+value, applies to all selected via `Promise.all`), "Remove tag…" (prompts for key, removes from all selected). Single summary toast per bulk action.
-- [ ] **DO.8 Bulk delete + bulk validate** *(formerly 6.6)* — extend multi-select: bulk delete and bulk validate alongside the existing bulk upgrade.
-
 ## Create Device
 
 Minimal "new" + "duplicate" flow. Deliberately simple: no platform/board/WiFi wizard (that can come later in 1.7 if it earns its keep). The whole interaction is one shared modal + the existing editor.
@@ -93,14 +68,6 @@ Per-device cron scheduler for automatic compile+OTA. Schedule is stored in the d
 ## Build Operations
 
 - [x] **5.2 Build cache status** *(1.4.0-dev.6)* — workers now report `cached_targets` (count of per-target build dirs) and `cache_size_mb` (total cache size) in `system_info`. Workers tab shows "Cache: N targets (M MB)". Foundation: #13 switched from random tmpdirs to stable per-target build dirs under `/esphome-versions/builds/<target>/` so the `.esphome/` PlatformIO cache persists across jobs.
-
-## Firmware Download
-
-After a successful compile, extract the firmware binary and make it downloadable from the UI. Foundation for remote compilation in a later release.
-
-- [ ] **3.1a Worker extracts firmware binary** — read .bin after compile, POST to server
-- [ ] **3.1b Server stores firmware** — `/data/firmware/<target>/`, metadata endpoint
-- [ ] **3.1c Download button on device row** — `GET /ui/api/targets/{f}/firmware`
 
 ## Open Bugs & Tweaks
 
@@ -170,78 +137,6 @@ After a successful compile, extract the firmware binary and make it downloadable
 - [x] **48** *(1.4.0-dev.27 — believed fixed by #45)* — The compile cache reuse tested by the user was likely run against pre-#45 code (before auto-update propagated). The per-slot implementation correctly: (a) keeps `.pio/` and `.esphome/` in each slot dir across compiles of the same target, (b) syncs to shared cache on success, (c) seeds from shared cache on first compile per slot+target. Added visible "Slot cache sync-in skipped" INFO log in dev.27 so the next test run will show whether the cache reuse path was actually hit. If still broken, the INFO log will pinpoint where the cache was expected but not found.
 - [x] **49** *(1.4.0-dev.27)* — Added `CANCELLED` to `JobState` enum. `queue.cancel()` now transitions to `CANCELLED` (was `FAILED`). UI: new grey "Cancelled" badge in QueueTab; `isJobFailed()` excludes cancelled; "Retry All Failed" doesn't touch cancelled jobs. `CANCELLED` is added to all terminal-state checks (clear/remove/followup-dedup/timeout). Sort order: cancelled sorts between failed and success.
 - [x] **50** *(1.4.0-dev.27)* — Editor + Logs dialog margin increased from 4rem (2rem each side) to 6rem (3rem each side). The extra margin ensures the editor header row (filename + Save/Validate) stays fully visible when the add-on is loaded inside HA Ingress, which has its own ~60px header above the iframe eating into the inner 100vh.
-## Pre-release Playwright Coverage
-
-Automated tests for 1.4.0 features not yet covered by the existing 43 mocked + 6 prod Playwright tests. Split into mocked (fast, no real server) and prod hass-4 (real server, real devices).
-
-### Mocked tests (`ha-addon/ui/e2e/`)
-
-- [ ] **PT.1 `pin-unpin.spec.ts`** — Version Pinning UI:
-  - Pin via hamburger → 📌 appears in version column, tooltip shows pinned version
-  - Unpin via hamburger → 📌 disappears
-  - Upgrade modal on pinned device → amber warning banner visible, explains pin vs compile version
-  - Bulk "Upgrade All" request intercepted → assert the `POST /ui/api/compile` request doesn't send an explicit `esphome_version` (server-side pin resolution handles it)
-- [ ] **PT.2 `schedule-modal.spec.ts`** — Schedule creation + editing:
-  - Hamburger → "Schedule Upgrade..." opens modal in Scheduled mode (radio pre-selected)
-  - Row Upgrade button opens modal in Now mode by default
-  - Switch between Now ↔ Scheduled → fields update, no stale state
-  - Create recurring schedule → mock API returns updated target with `schedule` field → 🕐 icon + schedule column update within 1s
-  - Pause schedule → schedule column shows "(paused)"
-  - Schedules tab Edit button → modal opens with schedule pre-filled in friendly picker (assert interval/unit/time dropdowns match the fixture cron)
-  - One-time schedule → mock API, verify `schedule_once` field in request
-- [ ] **PT.3 `schedules-tab.spec.ts`** — Schedules tab layout + interactions:
-  - Tab renders table with columns: Device, Schedule, Status, Next Run, Last Run, Version, Worker, Edit
-  - Search/filter narrows rows
-  - Checkbox select-all + "Remove Selected" button appears when selection > 0
-  - Bulk remove → mock delete API called for each selected, rows disappear, single toast
-  - Empty state renders when no devices have schedules
-- [ ] **PT.4 `bulk-schedule.spec.ts`** — Bulk schedule operations:
-  - Select 2+ devices → Actions ▾ → "Schedule Selected..." → modal opens → Save → mock API called for each target
-  - Select 2+ devices → Actions ▾ → "Remove Schedule from Selected" → mock delete API called → single summary toast
-- [ ] **PT.5 `queue-extras.spec.ts`** — Queue tab 1.4 additions:
-  - Triggered column: fixture with `scheduled: true` job shows "🕐" text; `scheduled: false` shows "👤"
-  - Rerun vs Retry labels: successful job row has green "Rerun" button; failed has amber "Retry"; cancelled has "Retry"
-  - Cancelled job badge renders as grey "Cancelled" (not red "Failed")
-  - Clear actions don't touch cancelled jobs (verify cancelled row persists after "Clear All Finished")
-- [ ] **PT.6 `modal-sizing.spec.ts`** — Editor/Log modal viewport:
-  - Open editor modal → measure `dialog` bounding box → width ≥ `viewport.width - 8rem`, height ≥ `viewport.height - 8rem`
-  - Assert Save/Validate buttons row is fully visible (bottom of button row `y + height` < viewport height)
-  - Open log modal → same dimension checks
-  - Repeat at 1024×768 and 1920×1080 viewports
-- [ ] **PT.7 `button-consistency.spec.ts`** — Toolbar button heights:
-  - On Devices tab: measure heights of Upgrade trigger, Actions trigger, + New Device, ⚙ gear → assert all equal
-  - On Queue tab: measure heights of Retry trigger, Clear trigger → assert equal to Devices buttons
-  - On Workers tab: measure heights of Clean All Caches, + Connect Worker → assert equal
-- [ ] **PT.8 `cancel-new-device.spec.ts`** — Cancel without saving deletes stub:
-  - "+ New Device" → Create → editor opens → press Escape (close without saving) → intercept `DELETE /ui/api/targets/...` → assert it was called
-
-### Prod tests (`ha-addon/ui/e2e-hass-4/`)
-
-- [ ] **PT.9 `schedule-fires.spec.ts`** — Schedule fires on real server:
-  - Set a one-time schedule for ~90s from now on `cyd-office-info` (or test device) via API
-  - Poll `/ui/api/queue` until a job with `scheduled: true` for that target appears (budget: 3 min)
-  - Assert job state reaches terminal (success or fail)
-  - Poll `/ui/api/targets` → assert `schedule_once` is cleared (auto-clear worked)
-- [ ] **PT.10 `incremental-build.spec.ts`** — Build cache reuse:
-  - Compile `cyd-office-info` via API, record `duration` from the queue's `finished_at - assigned_at`
-  - Edit the YAML comment (trivial change), compile again, record second duration
-  - Assert second duration < first duration × 0.5 (incremental should be ≥50% faster)
-  - Verify worker's `system_info.cached_targets > 0` via `/ui/api/workers`
-- [ ] **PT.11 `pinned-bulk-compile.spec.ts`** — Pinned version honored in bulk compile:
-  - Pin `garage-door-big` to a specific version via `POST /ui/api/targets/{f}/pin`
-  - Trigger "Upgrade All" via API
-  - Poll queue for the `garage-door-big` job → assert `esphome_version` matches the pinned version (not the global default)
-  - Clean up: unpin the device
-
-### Fixture updates
-
-- [ ] **PT.12 Update `e2e/fixtures.ts`** — add to the existing fixture data:
-  - A device with `pinned_version: "2024.11.1"` (for pin tests)
-  - A device with `schedule: "0 2 * * 0"`, `schedule_enabled: true`, `schedule_last_run: "..."` (for schedule tests)
-  - A device with `schedule_once: "2025-01-15T14:00:00Z"` (for one-time schedule tests)
-  - A queue job with `scheduled: true` (for triggered column test)
-  - A queue job with `state: "cancelled"` (for cancelled badge test)
-
 - [x] **51** *(1.4.0-dev.28)* — Retry now honors device pinned version. The retry endpoint was hardcoding `server_version` for all retried jobs. Now reads each target's `pin_version` from YAML metadata and passes a per-target `target_versions` map to `queue.retry()`.
 - [x] **52** *(1.4.0-dev.32 — subsumed by #61)* — Same root cause as #61 (success variant border). Fix + regression tests landed in #61.
 - [x] **53** *(1.4.0-dev.28)* — Reverted #47 wifi.use_address strip. Instead, new/duplicated files are now written to `.staging/` subdirectory (scanner ignores subdirs). On first save, the save endpoint detects `.staging/` prefix, writes to the final location, and removes the staged file. Cancelling deletes only the staged file (#42). Cloned devices no longer appear online/in-HA before the user commits.
@@ -255,8 +150,9 @@ Automated tests for 1.4.0 features not yet covered by the existing 43 mocked + 6
 - [x] **61** *(1.4.0-dev.32)* — Button height mismatch was a visual illusion: all buttons are exactly 28px (h-7) from `size="sm"`, but the `success` variant had a visible colored border (`border-[#166534]`) while other variants used `border-transparent`. The colored border made the green button APPEAR taller. Fix: removed `border-[#166534]` from the success variant so all buttons have transparent borders. Added two Playwright regression tests (`devices.spec.ts`) that measure every button in the Devices toolbar and editor header and assert identical heights — total mocked suite now 45 tests.
 - [x] **62** *(1.4.0-dev.30)* — Both create and duplicate flows were broken after #53's staging approach. Root cause: `.staging/<name>.yaml` contained a `/` which broke aiohttp's `{filename}` route (only captures up to next `/`). Fix: replaced with `.pending.<name>.yaml` dotfile prefix — no slashes, all endpoints work. On first save the prefix is stripped. On cancel the dotfile is deleted. 7 server tests + 43 e2e updated.
 - [x] **63** *(1.4.0-dev.30)* — Queue tab Version column now shows 📌 pin icon when the job's `esphome_version` matches the target's `pinned_version`, matching the Devices tab rendering. Font was already monospace.
-- [ ] 64 For the ESP Home version selector, let's add a toggle that shows or hides beta versions. Also, let's make that drop-down searchable. 
+- [x] **64** *(1.4.0-dev.35)* — Version selector: both the header dropdown (EsphomeVersionDropdown) and the UpgradeModal now have a search input + "Show betas" checkbox. Betas (versions containing "a", "b", "rc", or "dev" suffixes) are hidden by default. Search filters as you type. Server: removed the 50-version limit on `_fetch_pypi_versions` so ALL historic ESPHome releases from PyPI are available (#69). Sort key updated to properly order beta versions before their stable release.
 - [x] **65** *(1.4.0-dev.34)* — Button heights: added `border border-transparent` to the two DropdownMenuTrigger elements that lacked it (Upgrade dropdown in DevicesTab, Retry dropdown in QueueTab). All other triggers already had borders. The `<Button>` base class includes `border border-transparent`, so triggers without it had a 2px difference in internal layout (content filled 28px vs 26px+2px border). Now all buttons and triggers are pixel-identical.
 - [x] **66** *(1.4.0-dev.34)* — Font consistency: removed `fontFamily: 'monospace'` from the version columns on Queue tab and Schedules tab. Devices tab version column was already proportional. All three tabs now render version numbers in the same proportional font. Also added `fontSize: 12` and pin tooltip to the Schedules tab version cell to match DevicesTab exactly. Audited all `fontFamily: 'monospace'` usages — remaining uses are correct (IP addresses, log terminals, filename input).
 - [x] **67** *(1.4.0-dev.34)* — Scheduler fired immediately on first schedule. Root cause: when `schedule_last_run` was absent, the scheduler used epoch (2000-01-01) as the starting point for croniter, making the very first cron tick compute a time far in the past → always fires on first check regardless of the expression. Fix: use `now` instead of epoch when `schedule_last_run` is absent, so the first cron tick computes the NEXT future occurrence. A "0 2 * * *" schedule now waits until 2am instead of firing immediately. Updated the test expectation.
 - [x] **68** *(1.4.0-dev.34 — partially addressed)* — The scheduler test `test_schedule_first_run_waits_for_next_occurrence` now correctly asserts that a new schedule does NOT fire immediately. The broader SU.7 hardening (next-fire-driven loop, jitter, misfire grace) is a separate work item. 
+- [x] **69** *(1.4.0-dev.35)* — All historic ESPHome versions now available. `_fetch_pypi_versions` no longer caps at 50; returns every release from PyPI. Users can find any version via the new search input (#64). GitHub issue #44. 
