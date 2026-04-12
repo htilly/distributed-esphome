@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -349,6 +349,25 @@ class DevicePoller:
                     tasks.append(self._query_device(name, addr))
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
+
+            # #60: TTL — remove devices that haven't been seen in 4 hours
+            # AND have no compile_target (no YAML file). Real configured
+            # devices persist even when offline; only stray mDNS discoveries
+            # from retired/unplugged/neighbor devices get purged.
+            ttl_cutoff = _utcnow() - timedelta(hours=4)
+            async with self._lock:
+                expired = [
+                    key for key, dev in self._devices.items()
+                    if dev.compile_target is None
+                    and not dev.online
+                    and dev.last_seen is not None
+                    and dev.last_seen < ttl_cutoff
+                ]
+                for key in expired:
+                    del self._devices[key]
+                if expired:
+                    logger.info("TTL expired %d stale device(s): %s", len(expired), expired)
+                    self._save_cache()
 
             await asyncio.sleep(self._poll_interval)
 
