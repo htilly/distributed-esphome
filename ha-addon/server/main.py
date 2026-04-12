@@ -495,16 +495,22 @@ async def config_scanner(app: web.Application) -> None:
 
 
 async def schedule_checker(app: web.Application) -> None:
-    """Background task: check per-device cron schedules every 60s.
+    """Background task: check per-device cron schedules (SU.7 hardened).
 
-    For each target that has a ``schedule`` + ``schedule_enabled: true`` in its
-    ``# distributed-esphome:`` comment block, compute whether the next cron tick
-    has passed since the last run. If so, enqueue a compile+OTA job (same path
-    as clicking Upgrade) and write ``schedule_last_run`` back to the comment.
+    SU.7 improvements over the original fixed-60s-tick approach:
+    - Next-fire-driven sleep: computes the earliest next-fire across all
+      schedules and sleeps until then (capped at 60s so config changes
+      land promptly). Eliminates up-to-60s latency.
+    - Misfire grace window (300s default): if a schedule was missed by more
+      than the grace window (e.g. server was down for hours), it's skipped
+      with a log warning rather than fired late.
+    - History ring buffer: records the last 50 fire events per target in
+      ``schedule_history`` for the SU.6 history view.
     """
     import uuid as _uuid  # noqa: PLC0415
     from datetime import datetime, timezone  # noqa: PLC0415
 
+    import schedule_history  # noqa: PLC0415
     from scanner import scan_configs, read_device_meta, write_device_meta, get_esphome_version  # noqa: PLC0415
 
     try:
@@ -515,15 +521,28 @@ async def schedule_checker(app: web.Application) -> None:
 
     cfg: AppConfig = app["config"]
     queue: JobQueue = app["queue"]
+    misfire_grace = getattr(cfg, "misfire_grace_seconds", 300)
 
     app["schedule_checker_started_at"] = datetime.now(timezone.utc).isoformat()
     app["schedule_checker_tick_count"] = 0
     app["schedule_checker_last_tick"] = None
     app["schedule_checker_last_error"] = None
 
+    def _get_ota_address(target: str) -> str | None:
+        device_poller = app.get("device_poller")
+        if not device_poller:
+            return None
+        for dev in device_poller.get_devices():
+            if dev.compile_target == target and dev.ip_address:
+                return device_poller._address_overrides.get(dev.name) or dev.ip_address
+        return None
+
+    next_sleep = 5.0  # first tick after 5s
     logger.info("schedule_checker started (config_dir=%s)", cfg.config_dir)
+
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(next_sleep)
+        next_fires: list[datetime] = []
         try:
             targets = scan_configs(cfg.config_dir)
             now = datetime.now(timezone.utc)
@@ -534,58 +553,50 @@ async def schedule_checker(app: web.Application) -> None:
                 try:
                     meta = read_device_meta(cfg.config_dir, target)
 
-                    # #17: one-time schedule — fires once then auto-clears.
+                    # --- One-time schedule ---
                     once_str = meta.get("schedule_once")
                     if once_str:
                         try:
                             once_dt = datetime.fromisoformat(once_str)
                             if once_dt.tzinfo is None:
                                 once_dt = once_dt.replace(tzinfo=timezone.utc)
-                            if once_dt <= now:
+                            if once_dt > now:
+                                next_fires.append(once_dt)
+                            elif (now - once_dt).total_seconds() <= misfire_grace:
                                 version = meta.get("pin_version") or get_esphome_version()
-                                device_poller = app.get("device_poller")
-                                ota_address = None
-                                if device_poller:
-                                    for dev in device_poller.get_devices():
-                                        if dev.compile_target == target and dev.ip_address:
-                                            ota_address = (
-                                                device_poller._address_overrides.get(dev.name)
-                                                or dev.ip_address
-                                            )
-                                            break
                                 run_id = str(_uuid.uuid4())
                                 job = await queue.enqueue(
                                     target=target,
                                     esphome_version=version,
                                     run_id=run_id,
                                     timeout_seconds=cfg.job_timeout,
-                                    ota_address=ota_address,
+                                    ota_address=_get_ota_address(target),
                                 )
                                 if job is not None:
                                     job.scheduled = True
-                                    logger.info(
-                                        "One-time schedule fired for %s (at=%s): enqueued job %s",
-                                        target, once_str, job.id,
-                                    )
-                                # Auto-clear the one-time schedule.
+                                    schedule_history.record(target, now, job.id)
+                                    logger.info("One-time schedule fired for %s (at=%s): job %s", target, once_str, job.id)
                                 fresh_meta = read_device_meta(cfg.config_dir, target)
                                 fresh_meta.pop("schedule_once", None)
                                 write_device_meta(cfg.config_dir, target, fresh_meta)
-                                continue  # don't also check recurring schedule
+                            else:
+                                logger.warning(
+                                    "One-time schedule for %s missed by %ds (grace=%ds) — clearing",
+                                    target, int((now - once_dt).total_seconds()), misfire_grace,
+                                )
+                                fresh_meta = read_device_meta(cfg.config_dir, target)
+                                fresh_meta.pop("schedule_once", None)
+                                write_device_meta(cfg.config_dir, target, fresh_meta)
+                            continue
                         except Exception:
                             logger.exception("One-time schedule parse failed for %s", target)
 
+                    # --- Recurring schedule ---
                     cron_expr = meta.get("schedule")
                     enabled = meta.get("schedule_enabled", False)
                     if not cron_expr or not enabled:
                         continue
 
-                    # #67: determine last_run. If absent, use NOW so the first
-                    # cron tick fires at the NEXT scheduled time — not
-                    # immediately. The old epoch default (2000-01-01) caused
-                    # every new schedule to fire on the first tick regardless
-                    # of the cron expression, because croniter would compute a
-                    # next-fire-time far in the past.
                     last_run_str = meta.get("schedule_last_run")
                     if last_run_str:
                         last_run = datetime.fromisoformat(last_run_str)
@@ -600,40 +611,38 @@ async def schedule_checker(app: web.Application) -> None:
                         next_run = next_run.replace(tzinfo=timezone.utc)
 
                     if next_run > now:
-                        continue  # not yet due
+                        next_fires.append(next_run)
+                        continue
 
-                    # Determine compile version: pinned or global.
+                    # SU.7: misfire grace — skip if missed by more than grace
+                    missed_by = (now - next_run).total_seconds()
+                    if missed_by > misfire_grace:
+                        logger.warning(
+                            "Schedule for %s missed by %ds (grace=%ds) — skipping",
+                            target, int(missed_by), misfire_grace,
+                        )
+                        fresh_meta = read_device_meta(cfg.config_dir, target)
+                        fresh_meta["schedule_last_run"] = now.isoformat()
+                        write_device_meta(cfg.config_dir, target, fresh_meta)
+                        continue
+
                     version = meta.get("pin_version") or get_esphome_version()
-
-                    # Get OTA address if available.
-                    device_poller = app.get("device_poller")
-                    ota_address = None
-                    if device_poller:
-                        for dev in device_poller.get_devices():
-                            if dev.compile_target == target and dev.ip_address:
-                                ota_address = (
-                                    device_poller._address_overrides.get(dev.name)
-                                    or dev.ip_address
-                                )
-                                break
-
                     run_id = str(_uuid.uuid4())
                     job = await queue.enqueue(
                         target=target,
                         esphome_version=version,
                         run_id=run_id,
                         timeout_seconds=cfg.job_timeout,
-                        ota_address=ota_address,
+                        ota_address=_get_ota_address(target),
                     )
                     if job is not None:
                         job.scheduled = True
+                        schedule_history.record(target, now, job.id)
                         logger.info(
-                            "Schedule fired for %s (cron=%s): enqueued job %s (version=%s)",
+                            "Schedule fired for %s (cron=%s): job %s (version=%s)",
                             target, cron_expr, job.id, version,
                         )
 
-                    # Persist last_run. Re-read meta to avoid overwriting a
-                    # concurrent user edit (small window, but safe).
                     fresh_meta = read_device_meta(cfg.config_dir, target)
                     fresh_meta["schedule_last_run"] = now.isoformat()
                     write_device_meta(cfg.config_dir, target, fresh_meta)
@@ -644,6 +653,15 @@ async def schedule_checker(app: web.Application) -> None:
         except Exception as e:
             app["schedule_checker_last_error"] = f"{type(e).__name__}: {e}"
             logger.exception("Error in schedule checker")
+
+        # SU.7: next-fire-driven sleep — sleep until the earliest upcoming
+        # fire time, capped at 60s so config changes land promptly.
+        if next_fires:
+            now_after = datetime.now(timezone.utc)
+            earliest = min(next_fires)
+            next_sleep = max(1.0, min(60.0, (earliest - now_after).total_seconds()))
+        else:
+            next_sleep = 60.0
 
 
 # ---------------------------------------------------------------------------

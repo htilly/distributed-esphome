@@ -49,7 +49,7 @@ async def _run_one_schedule_tick(config_dir: Path, queue: JobQueue) -> None:
     from main import schedule_checker  # noqa: PLC0415
 
     app: dict = {
-        "config": MagicMock(config_dir=str(config_dir), job_timeout=600),
+        "config": MagicMock(config_dir=str(config_dir), job_timeout=600, misfire_grace_seconds=300),
         "queue": queue,
     }
 
@@ -75,9 +75,11 @@ def tmp_queue(tmp_path):
 
 
 async def test_schedule_fires_when_due(tmp_path, tmp_queue):
-    """A schedule whose next tick is in the past should enqueue a job."""
-    last_run = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
-    _write_scheduled_device(tmp_path, cron="0 2 * * *", last_run=last_run)
+    """A schedule whose next tick is in the past (within grace) should enqueue a job."""
+    # Use a per-minute cron with last_run 2 minutes ago — next fire is ~1 minute
+    # ago, well within the 300s misfire grace window.
+    last_run = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    _write_scheduled_device(tmp_path, cron="* * * * *", last_run=last_run)
 
     await _run_one_schedule_tick(tmp_path, tmp_queue)
 
@@ -89,8 +91,8 @@ async def test_schedule_fires_when_due(tmp_path, tmp_queue):
 
 async def test_schedule_does_not_fire_when_disabled(tmp_path, tmp_queue):
     """A disabled schedule should not enqueue anything."""
-    last_run = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
-    _write_scheduled_device(tmp_path, cron="0 2 * * *", enabled=False, last_run=last_run)
+    last_run = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    _write_scheduled_device(tmp_path, cron="* * * * *", enabled=False, last_run=last_run)
 
     await _run_one_schedule_tick(tmp_path, tmp_queue)
 
@@ -110,9 +112,9 @@ async def test_schedule_does_not_fire_when_not_yet_due(tmp_path, tmp_queue):
 
 async def test_schedule_respects_pinned_version(tmp_path, tmp_queue):
     """A pinned device should compile with its pinned version, not the global one."""
-    last_run = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+    last_run = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
     _write_scheduled_device(
-        tmp_path, cron="0 2 * * *", last_run=last_run, pin_version="2024.11.1",
+        tmp_path, cron="* * * * *", last_run=last_run, pin_version="2024.11.1",
     )
 
     with patch("scanner.get_esphome_version", return_value="2026.3.3"):
@@ -125,8 +127,8 @@ async def test_schedule_respects_pinned_version(tmp_path, tmp_queue):
 
 async def test_schedule_updates_last_run_after_firing(tmp_path, tmp_queue):
     """After a schedule fires, schedule_last_run should be updated in the YAML."""
-    last_run = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
-    _write_scheduled_device(tmp_path, cron="0 2 * * *", last_run=last_run)
+    last_run = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    _write_scheduled_device(tmp_path, cron="* * * * *", last_run=last_run)
 
     before = datetime.now(timezone.utc)
     await _run_one_schedule_tick(tmp_path, tmp_queue)
@@ -139,10 +141,10 @@ async def test_schedule_updates_last_run_after_firing(tmp_path, tmp_queue):
 
 async def test_schedule_survives_invalid_cron(tmp_path, tmp_queue):
     """An invalid cron expression should be logged and skipped, not crash."""
-    last_run = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+    last_run = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
     _write_scheduled_device(tmp_path, name="bad-cron", cron="not a cron", last_run=last_run)
     # Also add a valid device to prove it still runs.
-    _write_scheduled_device(tmp_path, name="good-device", cron="0 2 * * *", last_run=last_run)
+    _write_scheduled_device(tmp_path, name="good-device", cron="* * * * *", last_run=last_run)
 
     await _run_one_schedule_tick(tmp_path, tmp_queue)
 
@@ -164,3 +166,68 @@ async def test_schedule_first_run_waits_for_next_occurrence(tmp_path, tmp_queue)
 
     jobs = tmp_queue.get_all()
     assert len(jobs) == 0, "Should not fire — 2am hasn't arrived yet"
+
+
+# ---------------------------------------------------------------------------
+# SU.7 — misfire grace + history ring buffer
+# ---------------------------------------------------------------------------
+
+
+async def test_misfire_within_grace_fires(tmp_path, tmp_queue):
+    """A schedule missed by less than 300s should still fire."""
+    # last_run 90s ago, cron "* * * * *" → next tick was ~30s ago (within 300s grace)
+    last_run = (datetime.now(timezone.utc) - timedelta(seconds=90)).isoformat()
+    _write_scheduled_device(tmp_path, cron="* * * * *", last_run=last_run)
+
+    await _run_one_schedule_tick(tmp_path, tmp_queue)
+
+    assert len(tmp_queue.get_all()) == 1
+
+
+async def test_misfire_beyond_grace_skips(tmp_path, tmp_queue):
+    """A schedule missed by more than 300s should NOT fire."""
+    # last_run 10 minutes ago with cron "* * * * *" → next tick was ~9 minutes ago
+    # That's 540s > 300s grace → skipped. But actually "* * * * *" fires every
+    # minute so the most recent missed tick is < 60s ago. We need a less frequent
+    # cron and a larger gap. Use hourly + 2 hour gap.
+    last_run = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    _write_scheduled_device(tmp_path, cron="0 * * * *", last_run=last_run)
+
+    await _run_one_schedule_tick(tmp_path, tmp_queue)
+
+    # The next fire was ~1 hour ago (> 300s grace) → should have skipped
+    jobs = tmp_queue.get_all()
+    assert len(jobs) == 0, "Should have been skipped due to misfire grace"
+
+    # But last_run should be updated so it doesn't re-check the same stale window
+    meta = read_device_meta(str(tmp_path), "test-device.yaml")
+    assert meta.get("schedule_last_run") is not None
+
+
+async def test_schedule_history_records_on_fire(tmp_path, tmp_queue):
+    """After a schedule fires, the history ring buffer has an entry."""
+    import schedule_history
+
+    schedule_history.clear()
+    last_run = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    _write_scheduled_device(tmp_path, cron="* * * * *", last_run=last_run)
+
+    await _run_one_schedule_tick(tmp_path, tmp_queue)
+
+    history = schedule_history.get("test-device.yaml")
+    assert len(history) >= 1
+    fired_at, job_id, outcome = history[0]
+    assert outcome == "enqueued"
+    assert job_id == tmp_queue.get_all()[0].id
+
+
+async def test_schedule_history_ring_buffer_caps(tmp_path, tmp_queue):
+    """History ring buffer should not exceed _MAX_PER_TARGET entries."""
+    import schedule_history
+
+    schedule_history.clear()
+    for i in range(60):
+        schedule_history.record("test.yaml", datetime.now(timezone.utc), f"job-{i}")
+
+    history = schedule_history.get("test.yaml")
+    assert len(history) == schedule_history._MAX_PER_TARGET
