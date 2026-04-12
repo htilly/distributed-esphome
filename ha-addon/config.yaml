@@ -1,5 +1,5 @@
 name: "ESPHome Distributed Build Server"
-version: "1.4.0-dev.36"
+version: "1.4.0-dev.37"
 slug: "esphome_dist_server"
 description: "Offload ESPHome firmware compilation to remote machines with a web UI for job management and OTA updates"
 url: "https://github.com/weirded/distributed-esphome"
@@ -31,6 +31,12 @@ host_network: true
 hassio_api: true
 # HA Core REST API access — needed to read entity states (device connectivity)
 homeassistant_api: true
+
+# GitHub #45: exclude the local worker's ESPHome version cache + build
+# artifacts from HA backups. These are large (~50-200MB per target) and
+# fully reproducible — they'll be rebuilt on first compile after restore.
+backup_exclude:
+  - esphome-versions
 
 map:
   - config:rw
