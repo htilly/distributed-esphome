@@ -521,7 +521,20 @@ async def config_scanner(app: web.Application) -> None:
             logger.exception("Error in config scanner")
 
 
+async def _legacy_schedule_checker_removed() -> None:
+    """Removed in #87 — replaced by APScheduler in scheduler.py."""
+
+
 async def schedule_checker(app: web.Application) -> None:
+    """LEGACY — kept as a no-op stub so tests that import it don't break.
+
+    The real scheduler is now APScheduler in scheduler.py, started via
+    scheduler.start(app) in on_startup.
+    """
+    return
+
+
+async def _old_schedule_checker(app: web.Application) -> None:
     """Background task: check per-device cron schedules (SU.7 hardened).
 
     SU.7 improvements over the original fixed-60s-tick approach:
@@ -726,50 +739,11 @@ async def _fetch_ha_esphome_version(session: aiohttp.ClientSession) -> Optional[
     #    installs without requiring an elevated role.
     auth = {"Authorization": f"Bearer {token}"}
 
-    # --- Tier 1: listing
-    listing_failed = False
-    try:
-        async with session.get(
-            "http://supervisor/addons",
-            headers=auth,
-            timeout=aiohttp.ClientTimeout(total=5),
-        ) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                addons: list[dict] = data.get("data", {}).get("addons", []) or []
-
-                def _is_esphome_addon(a: dict) -> bool:
-                    slug = str(a.get("slug", "")).lower()
-                    name = str(a.get("name", "")).lower()
-                    if slug in ("core_esphome", "local_esphome") or slug.endswith("_esphome"):
-                        return True
-                    return name == "esphome" or name.startswith("esphome ")
-
-                matches = [a for a in addons if _is_esphome_addon(a)]
-                for addon in matches:
-                    version = addon.get("version")
-                    slug = addon.get("slug", "")
-                    if version:
-                        logger.debug(
-                            "Detected HA ESPHome add-on version %s (slug: %s, via /addons listing)",
-                            version, slug,
-                        )
-                        return str(version)
-                # Listing succeeded but no match — try the fallback anyway in
-                # case the name heuristic missed it.
-                listing_failed = not matches
-            else:
-                # 403 is the common case (we don't have hassio_role: manager).
-                # Drop to the per-slug fallback silently.
-                listing_failed = True
-    except Exception as exc:
-        logger.debug("Supervisor /addons listing failed (%s); using slug fallback", exc)
-        listing_failed = True
-
-    if not listing_failed:
-        # Listing worked but the matched add-ons had no ``version`` field —
-        # fall through to the per-slug probe to fill it in.
-        pass
+    # #86: skip the tier-1 /addons listing entirely. It requires
+    # hassio_role: manager which we don't have (hassio_api: true only grants
+    # per-slug access). The 403 response was spamming the Supervisor log
+    # with "Invalid token for access /addons" every 30s. The per-slug
+    # fallback below covers all real installs.
 
     # --- Tier 2: per-slug probe over known patterns.
     candidate_slugs = (
@@ -872,17 +846,15 @@ async def pypi_version_refresher(app: web.Application) -> None:
             async with aiohttp.ClientSession() as session:
                 # Re-check HA ESPHome add-on version
                 new_detected = await _fetch_ha_esphome_version(session)
-                old_detected = app.get("esphome_detected_version")
+                old_detected = app["_rt"].get("esphome_detected_version")
                 if new_detected and new_detected != old_detected:
-                    logger.info(
-                        "ESPHome add-on version changed: %s → %s",
-                        old_detected, new_detected,
-                    )
                     app["_rt"]["esphome_detected_version"] = new_detected
-                    # Auto-update selected version to match
                     from scanner import set_esphome_version  # noqa: PLC0415
                     set_esphome_version(new_detected)
-                    logger.info("Auto-selected ESPHome %s (matches updated add-on)", new_detected)
+                    if old_detected is None:
+                        logger.info("ESPHome add-on version detected: %s", new_detected)
+                    else:
+                        logger.info("ESPHome add-on version changed: %s → %s", old_detected, new_detected)
 
                 # Refresh PyPI list periodically
                 pypi_countdown -= check_interval
@@ -890,9 +862,13 @@ async def pypi_version_refresher(app: web.Application) -> None:
                     pypi_countdown = _PYPI_CACHE_TTL
                     versions = await _fetch_pypi_versions(session)
                     if versions:
+                        old_count = len(app["_rt"]["esphome_available_versions"])
                         app["_rt"]["esphome_available_versions"] = versions
                         app["_rt"]["esphome_versions_fetched_at"] = time.monotonic()
-                        logger.info("Refreshed PyPI ESPHome version list: %d versions", len(versions))
+                        if old_count == 0 or len(versions) != old_count:
+                            logger.info("Refreshed PyPI ESPHome version list: %d versions", len(versions))
+                        else:
+                            logger.debug("Refreshed PyPI ESPHome version list: %d versions (unchanged)", len(versions))
         except Exception:
             logger.exception("Error in version refresher")
 
@@ -1017,7 +993,10 @@ def create_app() -> web.Application:
         app["config_scanner_task"] = asyncio.create_task(config_scanner(app))
         app["pypi_version_refresher_task"] = asyncio.create_task(pypi_version_refresher(app))
         app["ha_entity_poller_task"] = asyncio.create_task(ha_entity_poller(app))
-        app["schedule_checker_task"] = asyncio.create_task(schedule_checker(app))
+
+        # #87: APScheduler replaces the DIY schedule_checker
+        import scheduler as scheduler_module  # noqa: PLC0415
+        scheduler_module.start(app)
 
         # Start local worker if client code is bundled
         local_worker_script = Path("/app/client/client.py")
@@ -1061,7 +1040,7 @@ def create_app() -> web.Application:
                 proc.kill()
             logger.info("Local worker stopped")
 
-        for task_name in ("timeout_checker_task", "config_scanner_task", "pypi_version_refresher_task", "ha_entity_poller_task", "schedule_checker_task"):
+        for task_name in ("timeout_checker_task", "config_scanner_task", "pypi_version_refresher_task", "ha_entity_poller_task"):
             task = app.get(task_name)
             if task:
                 task.cancel()
@@ -1069,6 +1048,10 @@ def create_app() -> web.Application:
                     await task
                 except asyncio.CancelledError:
                     pass
+
+        # #87: stop APScheduler
+        import scheduler as scheduler_module  # noqa: PLC0415
+        scheduler_module.stop()
 
         await device_poller.stop()
 

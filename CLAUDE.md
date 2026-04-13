@@ -135,6 +135,15 @@ These aren't grep-checkable but matter just as much. They're how the codebase st
 - **Think about the UX before shipping.** Walk through the change mentally: does the layout make sense on real data? Would it look sloppy to a user?
 - **Update `.gitignore` whenever a new tool is introduced.** Most tools generate cache/lock/build/report directories — add them in the same commit that introduces the tool.
 
+## Performance Expectations
+
+This is a home-lab tool used by one or two people intermittently, not a high-traffic web service. Optimize for **idle efficiency**, not peak throughput.
+
+- **Idle is the default state.** When no user has the UI open and no compile is running, the server should be close to zero CPU. Background tasks (scheduler, device poller, entity poller, PyPI refresher) sleep on long intervals — don't add tight loops or frequent timers without justification. Log noise is a proxy for wasted work.
+- **Active use can be expensive.** When a user is interacting with the UI or a compile is running, it's fine to do real work — scan configs, query devices, resolve YAML. Don't pre-compute or cache aggressively for a user who might not show up for days.
+- **Be mindful of payload size.** Users access the UI over home networks that may be slow (VPN, remote access, mobile tethering). Enable gzip/deflate on the web server for JSON and static assets. Don't send large blobs (full job logs, firmware binaries) in polling responses — stream them on demand via WebSocket or separate endpoints. The 1Hz SWR polls should be small JSON; strip heavy fields (like `log`) from list endpoints and let the UI fetch them individually when a modal opens.
+- **Don't over-optimize.** Shaving milliseconds off a response that runs once a second for one user is not worth the code complexity. Prefer simple, correct implementations over clever ones. If something is slow, measure before optimizing.
+
 ## Quality Standards (QG.1)
 
 The bar for landing new code on `develop`. Most are automated; the rest are developer discipline.

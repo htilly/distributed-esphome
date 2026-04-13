@@ -40,24 +40,11 @@ def _cfg(request: web.Request) -> AppConfig:
 
 @routes.get("/ui/api/_debug/scheduler")
 async def debug_scheduler(request: web.Request) -> web.Response:
-    """Diagnostic endpoint — reports on the schedule_checker background task."""
-    app = request.app
-    task = app.get("schedule_checker_task")
-    task_info: dict = {}
-    if task is None:
-        task_info["status"] = "not_created"
-    else:
-        task_info["done"] = task.done()
-        task_info["cancelled"] = task.cancelled()
-        if task.done() and not task.cancelled():
-            exc = task.exception()
-            task_info["exception"] = f"{type(exc).__name__}: {exc}" if exc else None
+    """Diagnostic endpoint — reports on the APScheduler state (#87)."""
+    import scheduler as scheduler_module  # noqa: PLC0415
     return web.json_response({
-        "task": task_info,
-        "started_at": app["_rt"].get("schedule_checker_started_at"),
-        "tick_count": app["_rt"].get("schedule_checker_tick_count"),
-        "last_tick": app["_rt"].get("schedule_checker_last_tick"),
-        "last_error": app["_rt"].get("schedule_checker_last_error"),
+        "engine": "apscheduler",
+        "jobs": scheduler_module.get_jobs_info(),
     })
 
 
@@ -854,6 +841,8 @@ async def set_target_schedule(request: web.Request) -> web.Response:
     meta["schedule"] = cron_expr
     meta["schedule_enabled"] = True
     write_device_meta(cfg.config_dir, filename, meta)
+    import scheduler as _sched  # noqa: PLC0415
+    _sched.sync_target(filename)
     logger.info("Schedule set for %s: %s", filename, cron_expr)
     return web.json_response({
         "ok": True,
@@ -884,6 +873,8 @@ async def delete_target_schedule(request: web.Request) -> web.Response:
     meta.pop("schedule_last_run", None)
     meta.pop("schedule_once", None)
     write_device_meta(cfg.config_dir, filename, meta)
+    import scheduler as _sched  # noqa: PLC0415
+    _sched.sync_target(filename)
     logger.info("Schedule removed for %s", filename)
     return web.json_response({"ok": True})
 
@@ -902,6 +893,8 @@ async def toggle_target_schedule(request: web.Request) -> web.Response:
         return web.json_response({"error": "No schedule configured"}, status=400)
     meta["schedule_enabled"] = not meta.get("schedule_enabled", False)
     write_device_meta(cfg.config_dir, filename, meta)
+    import scheduler as _sched  # noqa: PLC0415
+    _sched.sync_target(filename)
     logger.info("Schedule toggled for %s: enabled=%s", filename, meta["schedule_enabled"])
     return web.json_response({"ok": True, "schedule_enabled": meta["schedule_enabled"]})
 
@@ -946,6 +939,8 @@ async def set_target_schedule_once(request: web.Request) -> web.Response:
     meta = read_device_meta(cfg.config_dir, filename)
     meta["schedule_once"] = dt_str
     write_device_meta(cfg.config_dir, filename, meta)
+    import scheduler as _sched  # noqa: PLC0415
+    _sched.sync_target(filename)
     logger.info("One-time schedule set for %s at %s", filename, dt_str)
     return web.json_response({"ok": True, "schedule_once": dt_str})
 
