@@ -170,3 +170,18 @@ Per-device cron scheduler for automatic compile+OTA. Schedule is stored in the d
 - [x] **81** *(1.4.0-dev.40)* — Schedule history visible in Schedules tab "Last Run" column. Shows most recent fire with status indicator (● enqueued, ✓ success, ✗ failed). Tooltip shows last 5 runs. New `GET /ui/api/schedule-history` endpoint + `getScheduleHistory()` API client. Auto-refreshes every 30s.
 - [x] **82** *(1.4.0-dev.40)* — MAC template query was returning empty (~1241 entity rows hit HA size limit). Split into two queries: MAC→device_id (deduped by device, ~65 rows) + entity→device_id (~1241 rows). MAC-based matching restored.
 - [x] **83** *(1.4.0-dev.41)* — Schedules fire at the wrong time. Root cause: the cron builder stored the user's LOCAL time directly into the cron expression, but the scheduler evaluates in UTC. A PDT user (UTC-7) scheduling 18:15 got cron `15 18 * * 0` which fires at 18:15 UTC = 11:15 PDT — 7 hours early. Fix: `buildCron()` converts local→UTC; `parseCron()` converts UTC→local for display; `formatCronHuman()` also converts for the schedule columns.
+- [ ] 84 ha supervisor logs is full of these: 
+2026-04-12 19:33:47.705 INFO (MainThread) [supervisor.api.middleware.security] /addons/5c53de3b_esphome/info access from local_esphome_dist_server
+2026-04-12 19:34:17.711 WARNING (MainThread) [supervisor.api.middleware.security] /addons no role for local_esphome_dist_server
+2026-04-12 19:34:17.711 ERROR (MainThread) [supervisor.api.middleware.security] Invalid token for access /addons
+2026-04-12 19:34:17.713 INFO (MainThread) [supervisor.api.middleware.security] /addons/core_esphome/info access from local_esphome_dist_server
+2026-04-12 19:34:17.715 INFO (MainThread) [supervisor.api.middleware.security] /addons/local_esphome/info access from local_esphome_dist_server
+2026-04-12 19:34:17.716 INFO (MainThread) [supervisor.api.middleware.security] /addons/a0d7b954_esphome/info access from local_esphome_dist_server
+2026-04-12 19:34:17.718 INFO (MainThread) [supervisor.api.middleware.security] /addons/5c53de3b_esphome/info access from local_esphome_dist_server
+2026-04-12 19:34:47.724 WARNING (MainThread) [supervisor.api.middleware.security] /addons no role for local_esphome_dist_server
+2026-04-12 19:34:47.724 ERROR (MainThread) [supervisor.api.middleware.security] Invalid token for access /addons
+2026-04-12 19:34:47.725 INFO (MainThread) [supervisor.api.middleware.security] /addons/core_esphome/info access from local_esphome_dist_server
+2026-04-12 19:34:47.727 INFO (MainThread) [supervisor.api.middleware.security] /addons/local_esphome/info access from local_esphome_dist_server
+2026-04-12 19:34:47.729 INFO (MainThread) [supervisor.api.middleware.security] /addons/a0d7b954_esphome/info access from local_esphome_dist_server
+2026-04-12 19:34:47.730 INFO (MainThread) [supervisor.api.middleware.security] /addons/5c53de3b_esphome/info access from local_esphome_dist_server
+- [ ] 85 Do we notify the scheduler immediately when a schedule is changed? I still can't get a schedule to fire. Take a look at the schedule for athom-plug-1 - why did it not fire? Add debubg logging and experiment yourself. Keep adjusting the schedule and wait for it to fire. 

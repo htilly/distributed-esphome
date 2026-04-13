@@ -962,14 +962,20 @@ def create_app() -> web.Application:
         if assets_dir.is_dir():
             app.router.add_static("/assets/", path=str(assets_dir), name="assets")
 
-    # ESPHome version state — populated during startup
-    app["esphome_detected_version"] = None   # version from HA Supervisor (or None)
-    app["esphome_available_versions"] = []   # list of versions from PyPI
+    # Pre-initialize ALL dynamic keys so background tasks can update them
+    # without triggering aiohttp's DeprecationWarning ("Changing state of
+    # started or joined application is deprecated").
+    app["esphome_detected_version"] = None
+    app["esphome_available_versions"] = []
     app["esphome_versions_fetched_at"] = 0.0
-
-    # HA entity status — populated by ha_entity_poller background task
-    # dict[str, {"configured": bool, "connected": bool | None}]
     app["ha_entity_status"] = {}
+    app["ha_mac_set"] = set()
+    app["ha_mac_to_device_id"] = {}
+    app["ha_name_to_device_id"] = {}
+    app["schedule_checker_started_at"] = None
+    app["schedule_checker_tick_count"] = 0
+    app["schedule_checker_last_tick"] = None
+    app["schedule_checker_last_error"] = None
 
     # Startup/shutdown hooks
     async def on_startup(app: web.Application) -> None:

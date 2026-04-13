@@ -186,7 +186,8 @@ Everything lives in `dev-plans/`:
 **Turn** = one user prompt → one assistant response cycle. At the end of every turn:
 1. Run `bash scripts/bump-dev.sh` — auto-increments `-dev.N`. Never skip.
 2. Run `./push-to-hass-4.sh` for the prod smoke test.
-3. Update `dev-plans/WORKITEMS-X.Y.md` immediately — check the box, add the specific dev.N tag. Don't batch.
+3. **Check add-on logs for errors/warnings** after deploy: `ssh root@hass-4.local "ha addons logs local_esphome_dist_server" | grep -iE "ERROR|WARNING|Traceback|DeprecationWarning" | tail -20`. Fix any new issues before moving on. Warnings that existed before this turn can be noted but don't block.
+4. Update `dev-plans/WORKITEMS-X.Y.md` immediately — check the box, add the specific dev.N tag. Don't batch.
 
 **Work item / bug checkbox format:** `- [x] **#NNN** *(X.Y.Z-dev.N)* — description` (the `#NNN` only applies to bugs). Use the exact dev.N, not a generic `dev`. For wontfix/duplicate/stale entries, use `~~**#NNN**~~ WONTFIX —` (strike-through bold ID + label).
 
