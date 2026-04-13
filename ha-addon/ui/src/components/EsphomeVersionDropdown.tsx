@@ -39,7 +39,7 @@ export function EsphomeVersionDropdown({ versions, onSelect, onRefresh }: Props)
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
     <DropdownMenu>
       <DropdownMenuTrigger className="rounded-full border border-[var(--border)] bg-[var(--surface2)] px-2 py-0.5 text-[11px] text-[var(--text-muted)] whitespace-nowrap" title="Click to change ESPHome version" style={{ cursor: 'pointer' }}>
-        ESPHome {sel} &#9660;
+        ESPHome {sel} <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'inline', verticalAlign: 'middle' }}><path d="m6 9 6 6 6-6"/></svg>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" style={{ maxHeight: 400, overflowY: 'auto' }}>
         <DropdownMenuGroup>

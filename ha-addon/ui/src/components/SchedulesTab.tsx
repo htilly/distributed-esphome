@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   useReactTable,
   getCoreRowModel,
@@ -11,7 +11,7 @@ import {
 import type { Target, Worker } from '../types';
 import { stripYaml, timeAgo, formatCronHuman } from '../utils';
 import { Button } from './ui/button';
-import { deleteTargetSchedule } from '../api/client';
+import { deleteTargetSchedule, getScheduleHistory, type ScheduleHistoryEntry } from '../api/client';
 
 function SortHeader({ label, column }: {
   label: string;
@@ -62,6 +62,21 @@ export function SchedulesTab({ targets, workers, onSchedule, onRefresh, onToast 
   const [sorting, setSorting] = useState<SortingState>([]);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [filter, setFilter] = useState('');
+
+  // #81: fetch schedule history for display
+  const [history, setHistory] = useState<Record<string, ScheduleHistoryEntry[]>>({});
+  useEffect(() => {
+    let cancelled = false;
+    const fetchHistory = async () => {
+      try {
+        const data = await getScheduleHistory();
+        if (!cancelled) setHistory(data);
+      } catch { /* ignore */ }
+    };
+    fetchHistory();
+    const id = setInterval(fetchHistory, 30_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
 
   const filteredScheduled = useMemo(() => {
     if (!filter) return scheduled;
@@ -140,10 +155,29 @@ export function SchedulesTab({ targets, workers, onSchedule, onRefresh, onToast 
     }),
     columnHelper.accessor(row => row.schedule_last_run || row.schedule_once || '', {
       id: 'nextRun',
-      header: ({ column }) => <SortHeader label="Next / Last Run" column={column} />,
-      cell: ({ row: { original: t } }) => (
-        <span>{formatNextRun(t.schedule, t.schedule_last_run, t.schedule_once)}</span>
-      ),
+      header: ({ column }) => <SortHeader label="Last Run" column={column} />,
+      cell: ({ row: { original: t } }) => {
+        const targetHistory = history[t.target] ?? [];
+        const lastEntry = targetHistory.length > 0 ? targetHistory[targetHistory.length - 1] : null;
+        const historyTooltip = targetHistory.length > 0
+          ? targetHistory.slice(-5).reverse().map(h =>
+              `${new Date(h.fired_at).toLocaleString()} — ${h.outcome}`
+            ).join('\n')
+          : undefined;
+        return (
+          <span title={historyTooltip}>
+            {lastEntry
+              ? <>
+                  {timeAgo(lastEntry.fired_at)}
+                  {lastEntry.outcome === 'enqueued' && <span style={{ color: 'var(--accent)', marginLeft: 4 }}>●</span>}
+                  {lastEntry.outcome === 'success' && <span style={{ color: 'var(--success)', marginLeft: 4 }}>✓</span>}
+                  {lastEntry.outcome === 'failed' && <span style={{ color: 'var(--destructive)', marginLeft: 4 }}>✗</span>}
+                </>
+              : <span style={{ color: 'var(--text-muted)' }}>{formatNextRun(t.schedule, t.schedule_last_run, t.schedule_once)}</span>
+            }
+          </span>
+        );
+      },
     }),
     columnHelper.accessor(row => row.pinned_version || row.server_version || '', {
       id: 'version',

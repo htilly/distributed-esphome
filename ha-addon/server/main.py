@@ -317,51 +317,78 @@ async def ha_entity_poller(app: web.Application) -> None:
                 ha_mac_to_device_id: dict[str, str] = {}
                 entity_to_device_id: dict[str, str] = {}
                 if esphome_entity_ids:
+                    # Query 1: MAC + device_id, deduped by device (small output)
                     try:
-                        tmpl = (
-                            "{%- set ns = namespace(rows=[]) -%}"
+                        mac_tmpl = (
+                            "{%- set ns = namespace(pairs=[], seen=[]) -%}"
                             "{%- for eid in integration_entities('esphome') -%}"
                             "  {%- set did = device_id(eid) -%}"
-                            "  {%- if did -%}"
+                            "  {%- if did and did not in ns.seen -%}"
+                            "    {%- set ns.seen = ns.seen + [did] -%}"
                             "    {%- set conns = device_attr(did, 'connections') -%}"
-                            "    {%- set mac = none -%}"
                             "    {%- if conns -%}"
                             "      {%- for conn in conns -%}"
                             "        {%- if conn[0] == 'mac' -%}"
-                            "          {%- set mac = conn[1] -%}"
+                            "          {%- set ns.pairs = ns.pairs + [[conn[1], did]] -%}"
                             "        {%- endif -%}"
                             "      {%- endfor -%}"
                             "    {%- endif -%}"
-                            "    {%- set ns.rows = ns.rows + [[eid, did, mac]] -%}"
                             "  {%- endif -%}"
                             "{%- endfor -%}"
-                            "{{ ns.rows | tojson }}"
+                            "{{ ns.pairs | tojson }}"
                         )
                         async with session.post(
                             "http://supervisor/core/api/template",
                             headers={**headers, "Content-Type": "application/json"},
-                            json={"template": tmpl},
+                            json={"template": mac_tmpl},
                             timeout=timeout,
                         ) as resp:
                             if resp.status == 200:
-                                raw_pairs = await resp.text()
+                                raw = await resp.text()
                                 try:
-                                    parsed = _json.loads(raw_pairs)
+                                    parsed = _json.loads(raw)
                                     if isinstance(parsed, list):
                                         for item in parsed:
-                                            if not isinstance(item, list) or len(item) != 3:
-                                                continue
-                                            eid, did, mac = item
-                                            did_str = str(did)
-                                            entity_to_device_id[str(eid)] = did_str
-                                            if mac:
-                                                mac_lc = str(mac).lower()
+                                            if isinstance(item, list) and len(item) == 2:
+                                                mac_lc = str(item[0]).lower()
+                                                did_str = str(item[1])
                                                 ha_mac_set.add(mac_lc)
                                                 ha_mac_to_device_id[mac_lc] = did_str
                                 except (_json.JSONDecodeError, TypeError):
                                     pass
                     except Exception:
                         logger.debug("MAC template query failed", exc_info=True)
+
+                    # Query 2: entity_id → device_id mapping (for name-based fallback)
+                    try:
+                        eid_tmpl = (
+                            "{%- set ns = namespace(pairs=[]) -%}"
+                            "{%- for eid in integration_entities('esphome') -%}"
+                            "  {%- set did = device_id(eid) -%}"
+                            "  {%- if did -%}"
+                            "    {%- set ns.pairs = ns.pairs + [[eid, did]] -%}"
+                            "  {%- endif -%}"
+                            "{%- endfor -%}"
+                            "{{ ns.pairs | tojson }}"
+                        )
+                        async with session.post(
+                            "http://supervisor/core/api/template",
+                            headers={**headers, "Content-Type": "application/json"},
+                            json={"template": eid_tmpl},
+                            timeout=timeout,
+                        ) as resp:
+                            if resp.status == 200:
+                                raw = await resp.text()
+                                try:
+                                    parsed = _json.loads(raw)
+                                    if isinstance(parsed, list):
+                                        for item in parsed:
+                                            if isinstance(item, list) and len(item) == 2:
+                                                entity_to_device_id[str(item[0])] = str(item[1])
+                                except (_json.JSONDecodeError, TypeError):
+                                    pass
+                    except Exception:
+                        logger.debug("Entity→device_id template query failed", exc_info=True)
 
                 # 2. Fetch states for connectivity info
                 async with session.get(

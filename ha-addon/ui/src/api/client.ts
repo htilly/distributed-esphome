@@ -481,3 +481,15 @@ export async function setTargetScheduleOnce(
     throw new Error(data.error || String(r.status));
   }
 }
+
+export interface ScheduleHistoryEntry {
+  fired_at: string;
+  job_id: string;
+  outcome: string;
+}
+
+export async function getScheduleHistory(): Promise<Record<string, ScheduleHistoryEntry[]>> {
+  const r = await apiFetch('./ui/api/schedule-history');
+  if (!r.ok) return {};
+  return r.json() as Promise<Record<string, ScheduleHistoryEntry[]>>;
+}

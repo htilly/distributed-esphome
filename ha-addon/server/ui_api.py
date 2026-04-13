@@ -61,6 +61,20 @@ async def debug_scheduler(request: web.Request) -> web.Response:
     })
 
 
+@routes.get("/ui/api/schedule-history")
+async def get_schedule_history(request: web.Request) -> web.Response:
+    """Return the schedule fire history for all targets (#81)."""
+    import schedule_history  # noqa: PLC0415
+    all_history = schedule_history.get_all()
+    result: dict[str, list[dict]] = {}
+    for target, entries in all_history.items():
+        result[target] = [
+            {"fired_at": fired_at.isoformat(), "job_id": job_id, "outcome": outcome}
+            for fired_at, job_id, outcome in entries
+        ]
+    return web.json_response(result)
+
+
 @routes.get("/ui/api/esphome-schema")
 async def get_esphome_schema(request: web.Request) -> web.Response:
     """Return ESPHome component names for editor autocomplete.
