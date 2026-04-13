@@ -139,23 +139,33 @@ table {
   min-width: 500px;
 }
 
+/* #76/#77: tightened padding for better screen-estate use on fleet
+   management dashboards. Horizontal padding 13→8px, vertical 9→6px.
+   Font sizes bumped: th 11→12px, td base 13→14px (via body font). */
 th {
   background: var(--surface2);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.5px;
   text-transform: uppercase;
-  padding: 9px 13px;
+  padding: 6px 8px;
   text-align: left;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
 
 td {
-  padding: 9px 13px;
+  padding: 6px 8px;
+  font-size: 13px;
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
+}
+
+/* #79: checkbox column — minimal width so it hugs the device name */
+th:first-child, td:first-child {
+  width: 1px;
+  padding-right: 4px;
 }
 
 tr.clickable { cursor: pointer; }

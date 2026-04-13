@@ -259,6 +259,18 @@ def test_metadata_missing_web_server():
     assert meta["has_web_server"] is False
 
 
+def test_metadata_detects_web_server_with_no_value():
+    """#74: ESPHome allows `web_server:` with no value (enables with defaults).
+
+    YAML parses this as {"web_server": None}. The detection must check
+    for key PRESENCE, not key VALUE.
+    """
+    config = {"esphome": {"name": "dev"}, "web_server": None}
+    meta = _empty_meta()
+    _extract_metadata(config, meta)
+    assert meta["has_web_server"] is True
+
+
 def test_metadata_all_fields_none_for_minimal_config():
     """A minimal config with only esphome.name leaves the optional fields untouched."""
     config = {"esphome": {"name": "dev"}}

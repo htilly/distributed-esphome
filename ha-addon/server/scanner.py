@@ -509,8 +509,10 @@ def _extract_metadata(config: dict, result: dict) -> None:
             if pver:
                 result["project_version"] = str(pver)
 
-    # Detect presence of the web_server component
-    if config.get("web_server") is not None:
+    # #74: detect presence of the web_server component. ESPHome allows
+    # `web_server:` with no value (enables with defaults), which YAML
+    # parses as {"web_server": None}. Check key PRESENCE, not value.
+    if "web_server" in config:
         result["has_web_server"] = True
 
     # #14: detect a `button: - platform: restart` entry in the resolved config.
@@ -656,6 +658,11 @@ def _fill_missing_metadata(raw_config: dict, result: dict) -> None:
         sub_area = subs.get("area")
         if sub_area and _is_literal(str(sub_area)):
             result["area"] = str(sub_area)
+
+    # #74: detect web_server in raw config too (fallback when full resolution
+    # failed but top-level YAML has web_server:)
+    if not result["has_web_server"] and "web_server" in raw_config:
+        result["has_web_server"] = True
 
 
 def get_friendly_name(config_dir: str, target: str) -> Optional[str]:
