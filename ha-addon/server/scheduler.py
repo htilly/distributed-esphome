@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
 from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
@@ -22,7 +22,7 @@ import schedule_history
 logger = logging.getLogger(__name__)
 
 _scheduler: Optional[AsyncIOScheduler] = None
-_app = None  # aiohttp app reference for access to queue/config/device_poller
+_app: Any = None  # aiohttp app reference for access to queue/config/device_poller
 
 
 def _job_id(target: str) -> str:

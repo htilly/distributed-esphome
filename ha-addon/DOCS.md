@@ -14,11 +14,13 @@ Configuration options (token, timeouts, polling intervals) are available in the 
 
 ## Web UI
 
-**Devices** — all discovered ESPHome YAML configs with online/offline status (using HA connectivity where available), firmware version, config-changed indicator, and HA integration status. Compile individual, all, or only outdated devices. Inline Monaco YAML editor with ESPHome schema autocomplete and validation. Rename, delete, restart devices, copy API keys, and view live device logs. Configurable columns and search/filter.
+**Devices** — all discovered ESPHome YAML configs with online/offline status (using HA connectivity where available), firmware version, config-changed indicator, HA integration status (with deep-link to the device's HA page), and per-device version pinning. Compile individual, all, or only outdated devices. Create new devices from a stub or duplicate existing ones via "+ New Device". Inline Monaco YAML editor with ESPHome schema autocomplete and validation. Rename, delete, restart devices, copy API keys, and view live device logs. Configurable columns and search/filter.
 
-**Queue** — live job status with build logs. Retry failed jobs, cancel in-progress ones. Entries auto-prune after one hour.
+**Queue** — live job status with build logs. Retry failed/cancelled jobs, cancel in-progress ones. Clear individual jobs, all succeeded, all finished, or the entire queue. Entries auto-prune after one hour.
 
 **Workers** — connected build workers with online status, current jobs, system info (CPU, memory, disk), and ESPHome version. Adjust slot count per worker (0 = paused), clean per-worker or all build caches, or remove offline workers. Workers running an outdated Docker image are flagged with a clickable "image stale" badge that opens the Connect Worker modal so you can re-run the latest `docker run` command.
+
+**Schedules** — every device with a recurring or one-time scheduled upgrade. Set schedules from the device's hamburger menu ("Schedule Upgrade…") with friendly presets (Daily 2am, Weekly, Monthly) or a custom cron expression. Schedules respect each device's pinned ESPHome version. The schedule is stored in the YAML file's `# distributed-esphome:` comment block, so it travels with the file. Status (Active / Paused / One-time), next/last run, and recent fire history are all visible. Bulk Remove via the Actions dropdown.
 
 ## Troubleshooting
 

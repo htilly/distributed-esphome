@@ -57,9 +57,10 @@ To test pre-release builds from the `develop` branch, use the `:develop` tag ins
 
 Access via the HA sidebar (**ESPH Distributed**) or directly at `http://your-ha-host:8765`.
 
-- **Devices** — all ESPHome configs with online/offline status, firmware version, config-changed indicator, and HA integration status. Compile individual, all, or only outdated devices. Inline Monaco YAML editor with ESPHome schema autocomplete and validation. Rename, delete, restart devices, copy API keys, view live logs. Search/filter, configurable columns, bulk operations.
-- **Queue** — live job status with build logs. Retry failed jobs, cancel in-progress ones. Auto-prunes after one hour.
+- **Devices** — all ESPHome configs with online/offline status, firmware version, config-changed indicator, HA integration status (with one-click deep-link to the device's HA page), and per-device version pinning. Compile individual, all, or only outdated devices. Create new devices from a stub or duplicate existing ones. Inline Monaco YAML editor with ESPHome schema autocomplete and validation. Rename, delete, restart devices, copy API keys, view live logs. Search/filter, configurable columns, bulk operations.
+- **Queue** — live job status with build logs. Retry failed/cancelled jobs, cancel in-progress ones. Clear individual jobs, all succeeded, all finished, or the entire queue. Auto-prunes after one hour.
 - **Workers** — connected build workers with system info (CPU, memory, disk, ESPHome version). Adjust slot count (0 = paused), clean per-worker or all build caches, remove offline workers. **+ Connect Worker** provides a ready-to-run `docker run` command. Workers running an out-of-date Docker image are flagged with a clickable "image stale" badge.
+- **Schedules** — every device with a recurring cron schedule or one-time scheduled upgrade. Set schedules from the device hamburger menu (Daily 2am / Weekly / Monthly / custom cron / one-time datetime). Schedules are stored in the YAML file's `# distributed-esphome:` comment block — they travel with the file. Status (Active / Paused / One-time), next/last run, version pin, and recent fire history (✓ success / ✗ failed) are all visible. Bulk Remove via the Actions dropdown.
 
 Dark/light theme toggle in the header.
 

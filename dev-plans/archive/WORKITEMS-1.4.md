@@ -1,5 +1,7 @@
 # Work Items — 1.4.0
 
+**Status: SHIPPED 2026-04-13.** All planned work completed. See `ha-addon/CHANGELOG.md` for the user-facing release notes.
+
 Theme: **Fleet management and automation.** Novel features you can't get from the stock ESPHome dashboard — controlling many devices at scale, pinning versions, scheduling upgrades, and downloading compiled firmware.
 
 ## Version Pinning
@@ -172,21 +174,7 @@ Per-device cron scheduler for automatic compile+OTA. Schedule is stored in the d
 - [x] **83** *(1.4.0-dev.41)* — Schedules fire at the wrong time. Root cause: the cron builder stored the user's LOCAL time directly into the cron expression, but the scheduler evaluates in UTC. A PDT user (UTC-7) scheduling 18:15 got cron `15 18 * * 0` which fires at 18:15 UTC = 11:15 PDT — 7 hours early. Fix: `buildCron()` converts local→UTC; `parseCron()` converts UTC→local for display; `formatCronHuman()` also converts for the schedule columns.
 - [x] **84** *(1.4.0-dev.44)* — cyd-office-info.yaml validation fails because it's pinned to ESPHome 2026.4.0b1 but the server runs 2026.3.3. Fix: the validation endpoint now uses the `VersionManager` to install the pinned ESPHome version and runs `esphome config` with that binary. The version manager installs into `/data/esphome-versions/<version>/` (same cache the local worker uses). Falls back to the server default if install fails.
 - [x] **86** *(1.4.0-dev.45)* — Supervisor log noise. Two fixes: (a) Removed the tier-1 `/addons` listing call that returned 403 every 30s (requires `hassio_role: manager` which we don't have). The per-slug fallback handles all real installs. (b) Fixed `esphome_detected_version` read/write key mismatch (`app.get()` vs `app["_rt"]`) that caused "version changed: None → X" to fire on every poll. Also demoted steady-state log chatter (PyPI refresh, version detection) to DEBUG when unchanged.
-2026-04-12 19:33:47.705 INFO (MainThread) [supervisor.api.middleware.security] /addons/5c53de3b_esphome/info access from local_esphome_dist_server
-2026-04-12 19:34:17.711 WARNING (MainThread) [supervisor.api.middleware.security] /addons no role for local_esphome_dist_server
-2026-04-12 19:34:17.711 ERROR (MainThread) [supervisor.api.middleware.security] Invalid token for access /addons
-2026-04-12 19:34:17.713 INFO (MainThread) [supervisor.api.middleware.security] /addons/core_esphome/info access from local_esphome_dist_server
-2026-04-12 19:34:17.715 INFO (MainThread) [supervisor.api.middleware.security] /addons/local_esphome/info access from local_esphome_dist_server
-2026-04-12 19:34:17.716 INFO (MainThread) [supervisor.api.middleware.security] /addons/a0d7b954_esphome/info access from local_esphome_dist_server
-2026-04-12 19:34:17.718 INFO (MainThread) [supervisor.api.middleware.security] /addons/5c53de3b_esphome/info access from local_esphome_dist_server
-2026-04-12 19:34:47.724 WARNING (MainThread) [supervisor.api.middleware.security] /addons no role for local_esphome_dist_server
-2026-04-12 19:34:47.724 ERROR (MainThread) [supervisor.api.middleware.security] Invalid token for access /addons
-2026-04-12 19:34:47.725 INFO (MainThread) [supervisor.api.middleware.security] /addons/core_esphome/info access from local_esphome_dist_server
-2026-04-12 19:34:47.727 INFO (MainThread) [supervisor.api.middleware.security] /addons/local_esphome/info access from local_esphome_dist_server
-2026-04-12 19:34:47.729 INFO (MainThread) [supervisor.api.middleware.security] /addons/a0d7b954_esphome/info access from local_esphome_dist_server
-2026-04-12 19:34:47.730 INFO (MainThread) [supervisor.api.middleware.security] /addons/5c53de3b_esphome/info access from local_esphome_dist_server
 - [x] **85** *(1.4.0-dev.45)* — Scheduler now fires immediately when a schedule changes. APScheduler registers/removes jobs via `scheduler.sync_target()` on every schedule API mutation (set, delete, toggle, once). No more polling delay.
-- [x] **86-dup** *(see #86 above)* — Log noise fixes landed alongside #87.
 - [x] **87** *(1.4.0-dev.45)* — **Replaced DIY scheduler with APScheduler.** The DIY `schedule_checker` loop is removed. New `ha-addon/server/scheduler.py` wraps APScheduler's `AsyncIOScheduler` with `CronTrigger` (recurring) and `DateTrigger` (one-time). Key properties: (a) cron parsing + next-fire computation handled by APScheduler (tested library, not hand-rolled); (b) misfire_grace_time=300s (built-in); (c) coalesce=True + max_instances=1 (prevents double-fire); (d) `sync_target()` called on every schedule API mutation for immediate effect — no 60s polling delay; (e) `sync_all_from_yaml()` on startup rebuilds all jobs from YAML metadata. Schedule storage remains in YAML comment blocks (source of truth). APScheduler is the execution engine only. Added `apscheduler>=3.10,<4` to requirements.txt + regenerated lockfile. 6 new tests for sync logic, job registration, disable, once, replace, and info endpoint.
 - [x] **88** *(1.4.0-dev.46)* — **Toolbar consistency across tabs.** Standardized on: (1) "Add new" / primary creation action always FIRST with `variant="default"` (primary purple). (2) Tab-specific operation dropdowns (Upgrade/Retry/Clear) in the middle, keeping their identity. (3) `Actions ▾` dropdown LAST for bulk operations — always visible, items disabled when nothing selected (no more "button appears/disappears based on selection"). (4) Removed `7/7 online` status text from Workers toolbar (the count is already in the tab badge). (5) SchedulesTab now uses an `Actions ▾` dropdown with "Remove Selected" item instead of a conditional button. (6) WorkersTab `+ Connect Worker` moved to FIRST position (was last) and `Clean All Caches` moved into the new `Actions ▾` dropdown.
  

@@ -1,7 +1,7 @@
 name: "ESPHome Distributed Build Server"
-version: "1.4.0-dev.46"
+version: "1.4.0"
 slug: "esphome_dist_server"
-description: "Offload ESPHome firmware compilation to remote machines with a web UI for job management and OTA updates"
+description: "Manage large fleets of ESPHome devices with distributed compilation, per-device version pinning, and scheduled OTA upgrades"
 url: "https://github.com/weirded/distributed-esphome"
 arch: [aarch64, amd64, armhf, armv7, i386]
 startup: application
