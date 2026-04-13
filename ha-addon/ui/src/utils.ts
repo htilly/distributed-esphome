@@ -14,6 +14,21 @@ export function timeAgo(isoString: string): string {
  * in both DevicesTab and SchedulesTab (#40) so both tabs display schedules
  * identically.
  */
+/**
+ * #83: cron expressions are stored in UTC. This helper converts the UTC
+ * hour+minute to the user's local timezone for display. Returns the local
+ * hour and minute, and for weekly schedules, the local day-of-week.
+ */
+function _cronUtcToLocal(utcHour: number, utcMinute: number, utcDow?: number): { hour: number; minute: number; dow: number } {
+  const d = new Date();
+  if (utcDow !== undefined) {
+    const daysAhead = ((utcDow - d.getUTCDay()) % 7 + 7) % 7;
+    d.setUTCDate(d.getUTCDate() + daysAhead);
+  }
+  d.setUTCHours(utcHour, utcMinute, 0, 0);
+  return { hour: d.getHours(), minute: d.getMinutes(), dow: d.getDay() };
+}
+
 export function formatCronHuman(cron: string | null | undefined): string | null {
   if (!cron) return null;
   const parts = cron.trim().split(/\s+/);
@@ -26,17 +41,29 @@ export function formatCronHuman(cron: string | null | undefined): string | null 
     return n === 1 ? 'Hourly' : `Every ${n}h`;
   }
   if (dom === '*' && dow === '*' && !hour.includes('/') && !min.includes('/')) {
-    return `Daily ${hour.padStart(2, '0')}:${min.padStart(2, '0')}`;
+    const h = parseInt(hour, 10);
+    const m = parseInt(min, 10);
+    if (isNaN(h) || isNaN(m)) return cron;
+    const local = _cronUtcToLocal(h, m);
+    return `Daily ${String(local.hour).padStart(2, '0')}:${String(local.minute).padStart(2, '0')}`;
   }
   const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   if (dom === '*' && dow !== '*' && !hour.includes('/')) {
-    const dayNum = parseInt(dow, 10);
-    const day = dayNames[dayNum] ?? dow;
-    return `${day} ${hour.padStart(2, '0')}:${min.padStart(2, '0')}`;
+    const h = parseInt(hour, 10);
+    const m = parseInt(min, 10);
+    const utcDow = parseInt(dow, 10);
+    if (isNaN(h) || isNaN(m)) return cron;
+    const local = _cronUtcToLocal(h, m, utcDow);
+    const day = dayNames[local.dow] ?? dow;
+    return `${day} ${String(local.hour).padStart(2, '0')}:${String(local.minute).padStart(2, '0')}`;
   }
   if (dom !== '*' && dow === '*' && !hour.includes('/')) {
+    const h = parseInt(hour, 10);
+    const m = parseInt(min, 10);
+    if (isNaN(h) || isNaN(m)) return cron;
+    const local = _cronUtcToLocal(h, m);
     const suffix = dom === '1' ? 'st' : dom === '2' ? 'nd' : dom === '3' ? 'rd' : 'th';
-    return `${dom}${suffix} ${hour.padStart(2, '0')}:${min.padStart(2, '0')}`;
+    return `${dom}${suffix} ${String(local.hour).padStart(2, '0')}:${String(local.minute).padStart(2, '0')}`;
   }
   return cron;
 }

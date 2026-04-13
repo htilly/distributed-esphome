@@ -31,11 +31,32 @@ function buildCron(interval: string, every: number, time: string, dow: string): 
   const [hh, mm] = time.split(':').map(Number);
   const minute = isNaN(mm) ? 0 : mm;
   const hour = isNaN(hh) ? 2 : hh;
+
+  // #83: convert LOCAL time to UTC for the cron expression. The scheduler
+  // evaluates cron in UTC, so storing the user's local hour directly
+  // causes the schedule to fire at the wrong time.
+  if (interval === 'hours') {
+    // Hourly: only minute matters — timezone-agnostic within the hour
+    return every === 1 ? `${minute} * * * *` : `${minute} */${every} * * *`;
+  }
+
+  // Daily/weekly: convert local hour+minute → UTC
+  const d = new Date();
+  if (interval === 'weeks') {
+    // Set to the next occurrence of the user's picked local dow + time
+    const targetDow = parseInt(dow, 10);
+    const daysAhead = ((targetDow - d.getDay()) % 7 + 7) % 7;
+    d.setDate(d.getDate() + daysAhead);
+  }
+  d.setHours(hour, minute, 0, 0);
+  const utcMinute = d.getUTCMinutes();
+  const utcHour = d.getUTCHours();
+  const utcDow = d.getUTCDay();
+
   switch (interval) {
-    case 'hours': return every === 1 ? `${minute} * * * *` : `${minute} */${every} * * *`;
-    case 'days': return every === 1 ? `${minute} ${hour} * * *` : `${minute} ${hour} */${every} * *`;
-    case 'weeks': return `${minute} ${hour} * * ${dow}`;
-    default: return `${minute} ${hour} * * *`;
+    case 'days': return every === 1 ? `${utcMinute} ${utcHour} * * *` : `${utcMinute} ${utcHour} */${every} * *`;
+    case 'weeks': return `${utcMinute} ${utcHour} * * ${utcDow}`;
+    default: return `${utcMinute} ${utcHour} * * *`;
   }
 }
 
@@ -53,13 +74,26 @@ function parseCron(cron: string): { interval: string; every: number; time: strin
   }
   const h = parseInt(hour, 10);
   if (isNaN(h)) return null;
-  const timeStr = `${String(h).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+
+  // #83: cron is stored in UTC — convert back to local for display
+  const d = new Date();
+  if (dow !== '*') {
+    const utcDow = parseInt(dow, 10);
+    const daysAhead = ((utcDow - d.getUTCDay()) % 7 + 7) % 7;
+    d.setUTCDate(d.getUTCDate() + daysAhead);
+  }
+  d.setUTCHours(h, minute, 0, 0);
+  const localHour = d.getHours();
+  const localMinute = d.getMinutes();
+  const localDow = d.getDay();
+  const timeStr = `${String(localHour).padStart(2, '0')}:${String(localMinute).padStart(2, '0')}`;
+
   if (dow === '*') {
     if (dom === '*') return { interval: 'days', every: 1, time: timeStr, dow: '0' };
     if (dom.startsWith('*/')) return { interval: 'days', every: parseInt(dom.slice(2), 10), time: timeStr, dow: '0' };
     return null;
   }
-  if (dom === '*') return { interval: 'weeks', every: 1, time: timeStr, dow };
+  if (dom === '*') return { interval: 'weeks', every: 1, time: timeStr, dow: String(localDow) };
   return null;
 }
 
