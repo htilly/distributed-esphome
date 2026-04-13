@@ -674,11 +674,39 @@ async def validate_config(request: web.Request) -> web.Response:
     if config_path is None or not config_path.exists():
         return json_error("Target file not found", 404)
 
-    logger.info("Validating %s via esphome config (direct subprocess)", target)
+    # #84: use the correct ESPHome version for validation. If the device is
+    # pinned, install that version via the version manager and validate with
+    # its binary — not the server's default. This ensures pinned devices
+    # validate against the version they'll actually compile with.
+    meta = read_device_meta(cfg.config_dir, target)
+    pin = meta.get("pin_version")
+    esphome_bin = "esphome"  # default: server's installed version
+
+    if pin and pin != get_esphome_version():
+        try:
+            from pathlib import Path as _Path  # noqa: PLC0415
+            import sys as _sys  # noqa: PLC0415
+            # The version manager lives in the bundled client code
+            if "/app/client" not in _sys.path:
+                _sys.path.insert(0, "/app/client")
+            from version_manager import VersionManager  # noqa: PLC0415
+            vm = VersionManager(
+                versions_base=_Path("/data/esphome-versions"),
+                max_versions=5,
+            )
+            logger.info("Validating %s: ensuring ESPHome %s is installed for pinned version", target, pin)
+            esphome_bin = await _asyncio.get_event_loop().run_in_executor(
+                None, vm.ensure_version, pin,
+            )
+        except Exception as exc:
+            logger.warning("Could not install pinned ESPHome %s for validation: %s", pin, exc)
+            # Fall back to server default
+
+    logger.info("Validating %s via %s config (direct subprocess)", target, esphome_bin)
 
     try:
         proc = await _asyncio.create_subprocess_exec(
-            "esphome", "config", str(config_path),
+            esphome_bin, "config", str(config_path),
             stdout=_asyncio.subprocess.PIPE,
             stderr=_asyncio.subprocess.STDOUT,
             cwd=cfg.config_dir,
