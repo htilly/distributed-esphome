@@ -54,10 +54,10 @@ async def debug_scheduler(request: web.Request) -> web.Response:
             task_info["exception"] = f"{type(exc).__name__}: {exc}" if exc else None
     return web.json_response({
         "task": task_info,
-        "started_at": app.get("schedule_checker_started_at"),
-        "tick_count": app.get("schedule_checker_tick_count"),
-        "last_tick": app.get("schedule_checker_last_tick"),
-        "last_error": app.get("schedule_checker_last_error"),
+        "started_at": app["_rt"].get("schedule_checker_started_at"),
+        "tick_count": app["_rt"].get("schedule_checker_tick_count"),
+        "last_tick": app["_rt"].get("schedule_checker_last_tick"),
+        "last_error": app["_rt"].get("schedule_checker_last_error"),
     })
 
 
@@ -263,10 +263,10 @@ async def get_targets(request: web.Request) -> web.Response:
     cfg = _cfg(request)
     device_poller = request.app.get("device_poller")
     server_version = get_esphome_version()
-    ha_entity_status: dict[str, dict] = request.app.get("ha_entity_status", {})
-    ha_mac_set: set[str] = request.app.get("ha_mac_set", set())
-    ha_mac_to_device_id: dict[str, str] = request.app.get("ha_mac_to_device_id", {})
-    ha_name_to_device_id: dict[str, str] = request.app.get("ha_name_to_device_id", {})
+    ha_entity_status: dict[str, dict] = request.app["_rt"].get("ha_entity_status", {})
+    ha_mac_set: set[str] = request.app["_rt"].get("ha_mac_set", set())
+    ha_mac_to_device_id: dict[str, str] = request.app["_rt"].get("ha_mac_to_device_id", {})
+    ha_name_to_device_id: dict[str, str] = request.app["_rt"].get("ha_name_to_device_id", {})
 
     targets = scan_configs(cfg.config_dir)
 
@@ -564,10 +564,10 @@ async def get_devices(request: web.Request) -> web.Response:
     """
     device_poller = request.app.get("device_poller")
     server_version = get_esphome_version()
-    ha_entity_status: dict[str, dict] = request.app.get("ha_entity_status", {})
-    ha_mac_set: set[str] = request.app.get("ha_mac_set", set())
-    ha_mac_to_device_id: dict[str, str] = request.app.get("ha_mac_to_device_id", {})
-    ha_name_to_device_id: dict[str, str] = request.app.get("ha_name_to_device_id", {})
+    ha_entity_status: dict[str, dict] = request.app["_rt"].get("ha_entity_status", {})
+    ha_mac_set: set[str] = request.app["_rt"].get("ha_mac_set", set())
+    ha_mac_to_device_id: dict[str, str] = request.app["_rt"].get("ha_mac_to_device_id", {})
+    ha_name_to_device_id: dict[str, str] = request.app["_rt"].get("ha_name_to_device_id", {})
 
     if not device_poller:
         return web.json_response([])
@@ -607,8 +607,8 @@ async def get_devices(request: web.Request) -> web.Response:
 async def get_esphome_versions(request: web.Request) -> web.Response:
     """Return ESPHome version state: selected, detected, and available list."""
     selected = get_esphome_version()
-    detected = request.app.get("esphome_detected_version")
-    available = request.app.get("esphome_available_versions", [])
+    detected = request.app["_rt"].get("esphome_detected_version")
+    available = request.app["_rt"].get("esphome_available_versions", [])
 
     # If PyPI list is empty, at least include the currently selected version so
     # the UI has something to show.
@@ -1755,8 +1755,8 @@ async def clear_queue(request: web.Request) -> web.Response:
 async def debug_ha_status(request: web.Request) -> web.Response:
     """Debug endpoint: show HA entity status keys and matching info per target."""
     cfg = _cfg(request)
-    ha_entity_status: dict[str, dict] = request.app.get("ha_entity_status", {})
-    ha_mac_set: set[str] = request.app.get("ha_mac_set", set())
+    ha_entity_status: dict[str, dict] = request.app["_rt"].get("ha_entity_status", {})
+    ha_mac_set: set[str] = request.app["_rt"].get("ha_mac_set", set())
     device_poller = request.app.get("device_poller")
     targets = scan_configs(cfg.config_dir)
 

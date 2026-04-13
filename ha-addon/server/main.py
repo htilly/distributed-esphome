@@ -227,7 +227,7 @@ async def ha_entity_poller(app: web.Application) -> None:
     currently connected.
 
     Requires SUPERVISOR_TOKEN (injected automatically when hassio_api: true).
-    Stores results in app["ha_entity_status"]: dict[str, {configured, connected}]
+    Stores results in app["_rt"]["ha_entity_status"]: dict[str, {configured, connected}]
     keyed by normalised device name (hyphens replaced with underscores, lowercase).
     """
     import os  # noqa: PLC0415
@@ -460,11 +460,11 @@ async def ha_entity_poller(app: web.Application) -> None:
                 if name not in ha_status:
                     ha_status[name] = {"configured": True, "connected": None}
 
-            app["ha_entity_status"].clear()
-            app["ha_entity_status"].update(ha_status)
-            app["ha_mac_set"] = ha_mac_set
-            app["ha_mac_to_device_id"] = ha_mac_to_device_id
-            app["ha_name_to_device_id"] = ha_name_to_device_id
+            app["_rt"]["ha_entity_status"].clear()
+            app["_rt"]["ha_entity_status"].update(ha_status)
+            app["_rt"]["ha_mac_set"] = ha_mac_set
+            app["_rt"]["ha_mac_to_device_id"] = ha_mac_to_device_id
+            app["_rt"]["ha_name_to_device_id"] = ha_name_to_device_id
 
             # A full successful poll resets the suppression state so the next
             # transient failure gets its warning re-promoted.
@@ -550,10 +550,10 @@ async def schedule_checker(app: web.Application) -> None:
     queue: JobQueue = app["queue"]
     misfire_grace = getattr(cfg, "misfire_grace_seconds", 300)
 
-    app["schedule_checker_started_at"] = datetime.now(timezone.utc).isoformat()
-    app["schedule_checker_tick_count"] = 0
-    app["schedule_checker_last_tick"] = None
-    app["schedule_checker_last_error"] = None
+    app["_rt"]["schedule_checker_started_at"] = datetime.now(timezone.utc).isoformat()
+    app["_rt"]["schedule_checker_tick_count"] = 0
+    app["_rt"]["schedule_checker_last_tick"] = None
+    app["_rt"]["schedule_checker_last_error"] = None
 
     def _get_ota_address(target: str) -> str | None:
         device_poller = app.get("device_poller")
@@ -573,8 +573,8 @@ async def schedule_checker(app: web.Application) -> None:
         try:
             targets = scan_configs(cfg.config_dir)
             now = datetime.now(timezone.utc)
-            app["schedule_checker_tick_count"] += 1
-            app["schedule_checker_last_tick"] = now.isoformat()
+            app["_rt"]["schedule_checker_tick_count"] += 1
+            app["_rt"]["schedule_checker_last_tick"] = now.isoformat()
 
             for target in targets:
                 try:
@@ -678,7 +678,7 @@ async def schedule_checker(app: web.Application) -> None:
                     logger.exception("Schedule check failed for %s", target)
 
         except Exception as e:
-            app["schedule_checker_last_error"] = f"{type(e).__name__}: {e}"
+            app["_rt"]["schedule_checker_last_error"] = f"{type(e).__name__}: {e}"
             logger.exception("Error in schedule checker")
 
         # SU.7: next-fire-driven sleep — sleep until the earliest upcoming
@@ -878,7 +878,7 @@ async def pypi_version_refresher(app: web.Application) -> None:
                         "ESPHome add-on version changed: %s → %s",
                         old_detected, new_detected,
                     )
-                    app["esphome_detected_version"] = new_detected
+                    app["_rt"]["esphome_detected_version"] = new_detected
                     # Auto-update selected version to match
                     from scanner import set_esphome_version  # noqa: PLC0415
                     set_esphome_version(new_detected)
@@ -890,8 +890,8 @@ async def pypi_version_refresher(app: web.Application) -> None:
                     pypi_countdown = _PYPI_CACHE_TTL
                     versions = await _fetch_pypi_versions(session)
                     if versions:
-                        app["esphome_available_versions"] = versions
-                        app["esphome_versions_fetched_at"] = time.monotonic()
+                        app["_rt"]["esphome_available_versions"] = versions
+                        app["_rt"]["esphome_versions_fetched_at"] = time.monotonic()
                         logger.info("Refreshed PyPI ESPHome version list: %d versions", len(versions))
         except Exception:
             logger.exception("Error in version refresher")
@@ -962,20 +962,24 @@ def create_app() -> web.Application:
         if assets_dir.is_dir():
             app.router.add_static("/assets/", path=str(assets_dir), name="assets")
 
-    # Pre-initialize ALL dynamic keys so background tasks can update them
-    # without triggering aiohttp's DeprecationWarning ("Changing state of
-    # started or joined application is deprecated").
-    app["esphome_detected_version"] = None
-    app["esphome_available_versions"] = []
-    app["esphome_versions_fetched_at"] = 0.0
-    app["ha_entity_status"] = {}
-    app["ha_mac_set"] = set()
-    app["ha_mac_to_device_id"] = {}
-    app["ha_name_to_device_id"] = {}
-    app["schedule_checker_started_at"] = None
-    app["schedule_checker_tick_count"] = 0
-    app["schedule_checker_last_tick"] = None
-    app["schedule_checker_last_error"] = None
+    # Mutable runtime state dict — set ONCE before app.start() so background
+    # tasks can update its contents without triggering aiohttp's
+    # DeprecationWarning ("Changing state of started or joined application").
+    # All code that previously used app["key"] = value for these dynamic keys
+    # should use app["_rt"]["key"] = value instead.
+    app["_rt"] = {
+        "esphome_detected_version": None,
+        "esphome_available_versions": [],
+        "esphome_versions_fetched_at": 0.0,
+        "ha_entity_status": {},
+        "ha_mac_set": set(),
+        "ha_mac_to_device_id": {},
+        "ha_name_to_device_id": {},
+        "schedule_checker_started_at": None,
+        "schedule_checker_tick_count": 0,
+        "schedule_checker_last_tick": None,
+        "schedule_checker_last_error": None,
+    }
 
     # Startup/shutdown hooks
     async def on_startup(app: web.Application) -> None:

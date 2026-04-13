@@ -51,6 +51,12 @@ async def _run_one_schedule_tick(config_dir: Path, queue: JobQueue) -> None:
     app: dict = {
         "config": MagicMock(config_dir=str(config_dir), job_timeout=600, misfire_grace_seconds=300),
         "queue": queue,
+        "_rt": {
+            "schedule_checker_started_at": None,
+            "schedule_checker_tick_count": 0,
+            "schedule_checker_last_tick": None,
+            "schedule_checker_last_error": None,
+        },
     }
 
     # Patch asyncio.sleep to run exactly one iteration then cancel.

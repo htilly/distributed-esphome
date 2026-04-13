@@ -70,6 +70,19 @@ async def _make_ui_app(tmp_path: Path) -> _UiApp:
     app["queue"] = queue
     app["registry"] = registry
     app["log_subscribers"] = {}
+    app["_rt"] = {
+        "ha_entity_status": {},
+        "ha_mac_set": set(),
+        "ha_mac_to_device_id": {},
+        "ha_name_to_device_id": {},
+        "esphome_detected_version": None,
+        "esphome_available_versions": [],
+        "esphome_versions_fetched_at": 0.0,
+        "schedule_checker_started_at": None,
+        "schedule_checker_tick_count": 0,
+        "schedule_checker_last_tick": None,
+        "schedule_checker_last_error": None,
+    }
     app.router.add_routes(ui_api_module.routes)
 
     client = TestClient(TestServer(app))
