@@ -118,7 +118,11 @@ export function SchedulesTab({ targets, workers, onSchedule, onRefresh, onToast 
           label = '—';
         }
         return (
-          <span style={{ opacity: enabled ? 1 : 0.5 }} title={t.schedule ?? undefined}>
+          <span
+            style={{ cursor: 'pointer', color: 'var(--accent)', opacity: enabled ? 1 : 0.5 }}
+            title={`${t.schedule ?? ''} — click to edit`}
+            onClick={() => onSchedule(t.target)}
+          >
             {label}
             {!enabled && t.schedule && <span style={{ color: 'var(--text-muted)', marginLeft: 8 }}>(paused)</span>}
           </span>

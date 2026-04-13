@@ -291,8 +291,8 @@ export function WorkersTab({ workers, queue, serverClientVersion, minImageVersio
 
     const rowStyle: React.CSSProperties = {
       ...(paused ? { opacity: 0.6 } : {}),
-      ...(isLocal ? { background: 'var(--surface2)' } : {}),
     };
+    const rowClass = isLocal ? 'local-worker-row' : '';
 
     const displaySlots = Math.max(slots, 1); // show at least 1 row even if 0 slots
     for (let slot = 1; slot <= displaySlots; slot++) {
@@ -334,7 +334,7 @@ export function WorkersTab({ workers, queue, serverClientVersion, minImageVersio
 
       if (slot === 1) {
         rows.push(
-          <tr key={`${c.client_id}-1`} style={rowStyle}>
+          <tr key={`${c.client_id}-1`} style={rowStyle} className={rowClass}>
             <td>
               {slotNameEl}
               {isLocal && <span style={{ fontSize: 9, color: 'var(--accent)', marginLeft: 6, textTransform: 'uppercase', fontWeight: 600 }}>built-in</span>}
@@ -365,7 +365,7 @@ export function WorkersTab({ workers, queue, serverClientVersion, minImageVersio
         );
       } else {
         rows.push(
-          <tr key={`${c.client_id}-${slot}`} style={rowStyle}>
+          <tr key={`${c.client_id}-${slot}`} style={rowStyle} className={rowClass}>
             <td>{slotNameEl}</td>
             <td></td>
             <td></td>

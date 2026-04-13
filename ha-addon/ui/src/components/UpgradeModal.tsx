@@ -240,16 +240,31 @@ export function UpgradeModal({
                   value={versionSearch}
                   onChange={e => setVersionSearch(e.target.value)}
                   placeholder="Search versions..."
-                  className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-2.5 py-1 text-[12px] text-[var(--text)] outline-none placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] mb-1"
+                  className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface2)] px-2.5 py-1 text-[12px] text-[var(--text)] outline-none placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] mb-1"
                 />
-                <Select value={selectedVersion} onChange={e => setSelectedVersion(e.target.value)}>
-                  <option value="">
+                {/* #73: scrollable list matching the header dropdown style */}
+                <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] overflow-y-auto" style={{ maxHeight: 160 }}>
+                  <button
+                    type="button"
+                    className={`w-full text-left px-2.5 py-1.5 text-[12px] cursor-pointer hover:bg-[var(--surface2)] ${selectedVersion === '' ? 'text-[var(--accent)] font-semibold' : 'text-[var(--text)]'}`}
+                    onClick={() => setSelectedVersion('')}
+                  >
                     Current{defaultEsphomeVersion ? ` (${defaultEsphomeVersion})` : ''}
-                  </option>
+                  </button>
                   {filteredVersions.map(v => (
-                    <option key={v} value={v}>{v}</option>
+                    <button
+                      key={v}
+                      type="button"
+                      className={`w-full text-left px-2.5 py-1.5 text-[12px] cursor-pointer hover:bg-[var(--surface2)] ${selectedVersion === v ? 'text-[var(--accent)] font-semibold' : 'text-[var(--text)]'}`}
+                      onClick={() => setSelectedVersion(v)}
+                    >
+                      {v}
+                    </button>
                   ))}
-                </Select>
+                  {filteredVersions.length === 0 && (
+                    <div className="px-2.5 py-1.5 text-[12px] text-[var(--text-muted)]">No matches</div>
+                  )}
+                </div>
                 <label className="flex items-center gap-1.5 mt-1 text-[11px] text-[var(--text-muted)] cursor-pointer">
                   <input type="checkbox" checked={showBetas} onChange={e => setShowBetas(e.target.checked)} />
                   Show betas

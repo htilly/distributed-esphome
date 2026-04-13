@@ -590,10 +590,12 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
       id: 'schedule',
       header: ({ column }) => <SortHeader label="Schedule" column={column} />,
       cell: ({ row: { original: t } }) => {
+        // #72: schedule values are clickable → open upgrade modal in schedule mode
+        const handleClick = () => onSchedule(t.target);
         if (t.schedule_once && !t.schedule) {
           const when = new Date(t.schedule_once).toLocaleString();
           return (
-            <span style={{ fontSize: 12 }} title={`One-time: ${t.schedule_once}`}>
+            <span style={{ cursor: 'pointer', color: 'var(--accent)' }} title={`One-time: ${t.schedule_once} — click to edit`} onClick={handleClick}>
               Once: {when}
             </span>
           );
@@ -603,8 +605,9 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
         const enabled = t.schedule_enabled !== false;
         return (
           <span
-            style={{ fontSize: 12, opacity: enabled ? 1 : 0.5 }}
-            title={`${t.schedule}${enabled ? '' : ' (paused)'}`}
+            style={{ cursor: 'pointer', color: 'var(--accent)', opacity: enabled ? 1 : 0.5 }}
+            title={`${t.schedule}${enabled ? '' : ' (paused)'} — click to edit`}
+            onClick={handleClick}
           >
             {human}
             {!enabled && <span style={{ color: 'var(--text-muted)', marginLeft: 4 }}>(paused)</span>}
@@ -708,7 +711,7 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
       },
     }),
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [workers, onCompile, onUpgradeOne, onEdit, onLogs, onToast]);
+  ], [workers, onCompile, onUpgradeOne, onEdit, onLogs, onToast, onSchedule]);
 
   const table = useReactTable({
     data: filteredTargets,

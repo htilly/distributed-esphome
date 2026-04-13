@@ -182,6 +182,9 @@ td:last-child {
 }
 th:last-child { background: var(--surface2); }
 td:last-child { background: var(--surface); }
+/* #78: local-worker row highlight — applies to ALL cells including
+   the sticky last-child so the background is consistent across the row. */
+tr.local-worker-row td { background: var(--surface2); }
 
 .empty-row td {
   text-align: center;
