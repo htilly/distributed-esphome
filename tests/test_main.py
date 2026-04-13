@@ -228,81 +228,52 @@ class _FakeSession:
 
 
 async def test_fetch_ha_esphome_version_finds_hashed_slug(monkeypatch):
-    """A user-hashed slug like ``a0d7b954_esphome`` must be discovered via
-    /addons listing (regression for bug #4 — previously hardcoded to three
-    well-known slugs and silently failed for custom installs)."""
+    """A community-repo hashed slug like ``a0d7b954_esphome`` is discovered
+    via the per-slug /info probe.
+
+    #86: previously this used the /addons listing, but that requires
+    hassio_role: manager which we don't have. The listing call returned 403
+    every 30s and spammed the Supervisor log. Now the function probes a
+    known list of slug patterns directly via /addons/<slug>/info.
+    """
     from main import _fetch_ha_esphome_version
 
     monkeypatch.setenv("SUPERVISOR_TOKEN", "fake-token")
     routes = {
-        "http://supervisor/addons": _FakeResponse(200, {
-            "data": {
-                "addons": [
-                    {"slug": "core_configurator", "name": "File editor", "version": "5.6.0"},
-                    {"slug": "a0d7b954_esphome", "name": "ESPHome Device Builder", "version": "2026.3.3"},
-                    {"slug": "core_mosquitto", "name": "Mosquitto broker", "version": "6.4.1"},
-                ],
-            },
+        # Standard slugs return 404 (not installed)
+        "http://supervisor/addons/core_esphome/info": _FakeResponse(404, {}),
+        "http://supervisor/addons/local_esphome/info": _FakeResponse(404, {}),
+        # Community-repo hash returns the version
+        "http://supervisor/addons/a0d7b954_esphome/info": _FakeResponse(200, {
+            "data": {"version": "2026.3.3"},
         }),
     }
     session = _FakeSession(routes)
 
     version = await _fetch_ha_esphome_version(session)  # type: ignore[arg-type]
     assert version == "2026.3.3"
-    # The listing alone was enough — no per-slug /info round-trip needed.
-    assert session.calls == ["http://supervisor/addons"]
+    # No /addons listing call — that endpoint is no longer used.
+    assert "http://supervisor/addons" not in session.calls
 
 
 async def test_fetch_ha_esphome_version_returns_none_when_not_installed(monkeypatch):
-    """ESPHome add-on not installed — returns None cleanly, no guessing."""
+    """ESPHome add-on not installed — returns None cleanly. All per-slug
+    /info probes return 404 (default _FakeSession behavior)."""
     from main import _fetch_ha_esphome_version
 
     monkeypatch.setenv("SUPERVISOR_TOKEN", "fake-token")
-    routes = {
-        "http://supervisor/addons": _FakeResponse(200, {
-            "data": {
-                "addons": [
-                    {"slug": "core_mosquitto", "name": "Mosquitto broker", "version": "6.4.1"},
-                ],
-            },
-        }),
-    }
-    session = _FakeSession(routes)
+    session = _FakeSession({})  # all routes 404
 
     version = await _fetch_ha_esphome_version(session)  # type: ignore[arg-type]
     assert version is None
 
 
-async def test_fetch_ha_esphome_version_falls_back_to_info_probe_on_listing_403(monkeypatch):
-    """When /addons returns 403 (the common case — we don't have
-    hassio_role: manager), the per-slug /info probe over the known slug list
-    must take over silently. Regression for bug introduced after the
-    initial bug #4 fix: probing /addons-only spammed 403 every 30s and
-    never recovered.
-    """
-    from main import _fetch_ha_esphome_version
-
-    monkeypatch.setenv("SUPERVISOR_TOKEN", "fake-token")
-    routes = {
-        "http://supervisor/addons": _FakeResponse(403),
-        "http://supervisor/addons/a0d7b954_esphome/info": _FakeResponse(
-            200, {"data": {"version": "2026.4.0"}},
-        ),
-    }
-    session = _FakeSession(routes)
-
-    version = await _fetch_ha_esphome_version(session)  # type: ignore[arg-type]
-    assert version == "2026.4.0"
-    assert "http://supervisor/addons/a0d7b954_esphome/info" in session.calls
-
-
 async def test_fetch_ha_esphome_version_probes_core_slug(monkeypatch):
-    """Built-in core_esphome installs (no listing access) still resolve."""
+    """Built-in core_esphome installs resolve via the per-slug /info probe."""
     from main import _fetch_ha_esphome_version
 
     monkeypatch.setenv("SUPERVISOR_TOKEN", "fake-token")
     routes = {
-        "http://supervisor/addons": _FakeResponse(403),
         "http://supervisor/addons/core_esphome/info": _FakeResponse(
             200, {"data": {"version": "2026.3.3"}},
         ),
@@ -310,6 +281,8 @@ async def test_fetch_ha_esphome_version_probes_core_slug(monkeypatch):
     session = _FakeSession(routes)
     version = await _fetch_ha_esphome_version(session)  # type: ignore[arg-type]
     assert version == "2026.3.3"
+    # #86: never queries the /addons listing endpoint
+    assert "http://supervisor/addons" not in session.calls
 
 
 # ---------------------------------------------------------------------------

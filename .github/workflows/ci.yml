@@ -28,7 +28,7 @@ jobs:
           pip install \
             pytest pytest-asyncio pytest-cov pytest-xdist \
             aiohttp aioesphomeapi zeroconf \
-            requests psutil pydantic croniter \
+            requests psutil pydantic croniter apscheduler \
             esphome
 
       - name: Run all tests with coverage
