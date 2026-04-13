@@ -217,11 +217,13 @@ test.describe.serial('cyd-office-info hass-4 smoke', () => {
     });
     expect(saveResp.ok(), 'save endpoint should accept the edit').toBeTruthy();
 
-    // #21 / #25: validate the edit. Runs directly on the server as a
-    // subprocess (esphome config), no queue involvement. The response is
-    // immediate — { success: bool, output: string }.
+    // #21 / #25 / #84: validate the edit. Runs directly on the server.
+    // If the device is pinned to a different ESPHome version, the server
+    // installs it first via VersionManager — which can take 30-60s on
+    // first run (subsequent runs use the cached install).
     const validateResp = await request.post('./ui/api/validate', {
       data: { target: TARGET_FILENAME },
+      timeout: 120_000,
     });
     expect(validateResp.ok(), 'validate endpoint should return 2xx').toBeTruthy();
     const validateResult = await validateResp.json() as { success: boolean; output: string };
