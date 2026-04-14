@@ -119,6 +119,8 @@ Checked mechanically by `scripts/check-invariants.sh` (wired into the CI `test` 
 
 **PY-7 — Every `--ignore-vuln` must have an applicability assessment.** When adding a CVE ignore to `pip-audit` (or any audit tool), the inline comment must include: (1) why the fix version can't be pulled in (transitive bound, breaking change, etc.), (2) whether our code actually exercises the vulnerable code path, and (3) a date so staleness is visible. Don't just say "can't upgrade" — say whether the vulnerability matters for this codebase. If it does matter, track a follow-up in WORKITEMS rather than silently ignoring it.
 
+**PY-8 — Every direct dep in `requirements.txt` must also appear in `requirements.lock`.** Dockerfiles install from the lockfile with `--require-hashes`, so anything present only in `requirements.txt` is silently missing from the image. Root cause of bug #39: `croniter` was added to `ha-addon/server/requirements.txt` but `scripts/refresh-deps.sh` was never rerun — the production image had no croniter, `schedule_checker` caught the `ImportError` and returned, and no scheduled upgrade ever fired in prod. `scripts/check-invariants.sh` now verifies the lockfile covers every entry in the .txt file.
+
 ## Design Judgment (aspirational — reviewed, not enforced)
 
 These aren't grep-checkable but matter just as much. They're how the codebase stays coherent.
@@ -132,6 +134,15 @@ These aren't grep-checkable but matter just as much. They're how the codebase st
 - **Batch operations get one toast.** Bulk actions use `Promise.all` and a single summary toast — never one toast per item. Bulk actions live in `App.tsx`, not in child component loops.
 - **Think about the UX before shipping.** Walk through the change mentally: does the layout make sense on real data? Would it look sloppy to a user?
 - **Update `.gitignore` whenever a new tool is introduced.** Most tools generate cache/lock/build/report directories — add them in the same commit that introduces the tool.
+
+## Performance Expectations
+
+This is a home-lab tool used by one or two people intermittently, not a high-traffic web service. Optimize for **idle efficiency**, not peak throughput.
+
+- **Idle is the default state.** When no user has the UI open and no compile is running, the server should be close to zero CPU. Background tasks (scheduler, device poller, entity poller, PyPI refresher) sleep on long intervals — don't add tight loops or frequent timers without justification. Log noise is a proxy for wasted work.
+- **Active use can be expensive.** When a user is interacting with the UI or a compile is running, it's fine to do real work — scan configs, query devices, resolve YAML. Don't pre-compute or cache aggressively for a user who might not show up for days.
+- **Be mindful of payload size.** Users access the UI over home networks that may be slow (VPN, remote access, mobile tethering). Enable gzip/deflate on the web server for JSON and static assets. Don't send large blobs (full job logs, firmware binaries) in polling responses — stream them on demand via WebSocket or separate endpoints. The 1Hz SWR polls should be small JSON; strip heavy fields (like `log`) from list endpoints and let the UI fetch them individually when a modal opens.
+- **Don't over-optimize.** Shaving milliseconds off a response that runs once a second for one user is not worth the code complexity. Prefer simple, correct implementations over clever ones. If something is slow, measure before optimizing.
 
 ## Quality Standards (QG.1)
 
@@ -176,7 +187,7 @@ Everything lives in `dev-plans/`:
 
 - `dev-plans/README.md` — index.
 - `dev-plans/WORKITEMS-X.Y.md` — one file per release. Feature work items (checkboxes) + bug fixes (numbered). **Bug numbers are global and monotonic across releases** — never reset.
-- `dev-plans/WORKITEMS-1.4.md` — current release.
+- `dev-plans/WORKITEMS-1.4.1.md` — current release (UI quality sprint).
 - `dev-plans/archive/` — released WORKITEMS files from prior versions. Historical reference; don't edit.
 - `dev-plans/SECURITY_AUDIT.md` — security audit findings.
 - `dev-plans/RELEASE_CHECKLIST.md` — step-by-step release process.
@@ -184,7 +195,8 @@ Everything lives in `dev-plans/`:
 **Turn** = one user prompt → one assistant response cycle. At the end of every turn:
 1. Run `bash scripts/bump-dev.sh` — auto-increments `-dev.N`. Never skip.
 2. Run `./push-to-hass-4.sh` for the prod smoke test.
-3. Update `dev-plans/WORKITEMS-X.Y.md` immediately — check the box, add the specific dev.N tag. Don't batch.
+3. **Check add-on logs for errors/warnings** after deploy: `ssh root@hass-4.local "ha addons logs local_esphome_dist_server" | grep -iE "ERROR|WARNING|Traceback|DeprecationWarning" | tail -20`. Fix any new issues before moving on. Warnings that existed before this turn can be noted but don't block.
+4. Update `dev-plans/WORKITEMS-X.Y.md` immediately — check the box, add the specific dev.N tag. Don't batch.
 
 **Work item / bug checkbox format:** `- [x] **#NNN** *(X.Y.Z-dev.N)* — description` (the `#NNN` only applies to bugs). Use the exact dev.N, not a generic `dev`. For wontfix/duplicate/stale entries, use `~~**#NNN**~~ WONTFIX —` (strike-through bold ID + label).
 

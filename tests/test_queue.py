@@ -144,7 +144,7 @@ async def test_cancel_pending_job(queue):
     job = await _enqueue(queue, "device1.yaml")
     n = await queue.cancel([job.id])
     assert n == 1
-    assert queue.get(job.id).state == JobState.FAILED
+    assert queue.get(job.id).state == JobState.CANCELLED
 
 
 async def test_cancel_working_job(queue):
@@ -153,7 +153,7 @@ async def test_cancel_working_job(queue):
     assert job.state == JobState.WORKING
     n = await queue.cancel([job.id])
     assert n == 1
-    assert queue.get(job.id).state == JobState.FAILED
+    assert queue.get(job.id).state == JobState.CANCELLED
 
 
 async def test_cancel_already_finished_job(queue):

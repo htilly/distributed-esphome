@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import useSWR from 'swr';
 import {
   cancelJobs,
@@ -23,11 +23,18 @@ import {
   setEsphomeVersion,
   setInitialAddonVersion,
   validateConfig,
+  setTargetSchedule,
+  deleteTargetSchedule,
+  pinTargetVersion,
+  unpinTargetVersion,
 } from './api/client';
 import { ConnectWorkerModal } from './components/ConnectWorkerModal';
 import { DeviceLogModal } from './components/DeviceLogModal';
 import { DevicesTab, RenameModal } from './components/DevicesTab';
+import { NewDeviceModal } from './components/NewDeviceModal';
 import { UpgradeModal } from './components/UpgradeModal';
+// ScheduleModal retired in #22 — absorbed into the unified UpgradeModal.
+import { SchedulesTab } from './components/SchedulesTab';
 import { EditorModal } from './components/EditorModal';
 import { EsphomeVersionDropdown } from './components/EsphomeVersionDropdown';
 import { LogModal } from './components/LogModal';
@@ -39,7 +46,7 @@ import type { Device, Job, Target, Worker } from './types';
 import { stripYaml } from './utils';
 import './theme.css';
 
-type TabName = 'devices' | 'queue' | 'workers';
+type TabName = 'devices' | 'queue' | 'workers' | 'schedules';
 
 function getTabCount(
   tab: TabName,
@@ -66,6 +73,10 @@ function getTabCount(
     const online = workers.filter(c => c.online).length;
     return `${online}/${workers.length}`;
   }
+  if (tab === 'schedules') {
+    const scheduled = targets.filter(t => t.schedule || t.schedule_once).length;
+    return String(scheduled);
+  }
   return '';
 }
 
@@ -73,6 +84,21 @@ function getInitialTheme(): 'dark' | 'light' {
   const stored = localStorage.getItem('theme');
   if (stored === 'light' || stored === 'dark') return stored;
   return 'dark';
+}
+
+// #31: Reconcile the user's schedule-mode version choice with the device's
+// current pin. `desiredVersion === null` means "Latest" (ensure unpinned);
+// a specific string means "ensure pinned to this version".
+async function applyScheduleVersion(
+  target: string,
+  currentPin: string | null,
+  desiredVersion: string | null,
+): Promise<void> {
+  if (desiredVersion === null) {
+    if (currentPin) await unpinTargetVersion(target);
+  } else if (desiredVersion !== currentPin) {
+    await pinTargetVersion(target, desiredVersion);
+  }
 }
 
 export default function App() {
@@ -144,9 +170,18 @@ export default function App() {
   const [editorTarget, setEditorTarget] = useState<string | null>(null);
   const [connectModalOpen, setConnectModalOpen] = useState(false);
   const [connectModalPreset, setConnectModalPreset] = useState<import('./types').WorkerPreset | null>(null);
-  // #16: per-target Upgrade modal. Stores the target filename + display name.
-  const [upgradeModalTarget, setUpgradeModalTarget] = useState<{ target: string; displayName: string } | null>(null);
+  // #22: unified Upgrade modal. Stores target + display name + which mode to open in.
+  const [upgradeModalTarget, setUpgradeModalTarget] = useState<{ target: string; displayName: string; defaultMode: 'now' | 'schedule' } | null>(null);
   const [renameModalTarget, setRenameModalTarget] = useState<string | null>(null);
+  // CD.4-CD.6: shared "create / duplicate" modal state. null = closed, object = open.
+  // sourceTarget is set when duplicating an existing device.
+  const [newDeviceModal, setNewDeviceModal] = useState<{ mode: 'new' | 'duplicate'; sourceTarget?: string } | null>(null);
+  // #42: targets that were just created via the NewDeviceModal and haven't
+  // been saved yet. If the editor closes without a successful save, the
+  // stub/duplicated file is deleted so cancelled-out creates don't leave
+  // orphan YAMLs behind. Use a ref so synchronous onClose callbacks in the
+  // editor see the latest value.
+  const unsavedNewTargetsRef = useRef<Set<string>>(new Set());
 
   // Apply theme to <html> element on mount and on change
   useEffect(() => {
@@ -203,25 +238,34 @@ export default function App() {
     }
   }
 
-  // #16: open the Upgrade modal for a single target. The modal collects
-  // worker + ESPHome version preferences and calls handleUpgradeConfirm.
-  function handleOpenUpgradeModal(target: string) {
+  // #22: open the unified Upgrade modal. defaultMode controls whether it
+  // opens on "Now" or "Schedule" tab.
+  function handleOpenUpgradeModal(target: string, defaultMode: 'now' | 'schedule' = 'now') {
     const t = targets.find(x => x.target === target);
     const displayName = t?.friendly_name || stripYaml(target);
-    setUpgradeModalTarget({ target, displayName });
+    setUpgradeModalTarget({ target, displayName, defaultMode });
   }
 
-  async function handleUpgradeConfirm(params: { pinnedClientId: string | null; esphomeVersion: string | null }) {
+  async function handleUpgradeConfirm(params: {
+    pinnedClientId: string | null;
+    esphomeVersion: string | null;
+    updatePin?: string | null;
+  }) {
     const ctx = upgradeModalTarget;
     if (!ctx) return;
     setUpgradeModalTarget(null);
     try {
+      // #12: if the user changed the version on a pinned device, update the pin first.
+      if (params.updatePin) {
+        await pinTargetVersion(ctx.target, params.updatePin);
+      }
       await compile([ctx.target], params.pinnedClientId ?? undefined, params.esphomeVersion ?? undefined);
       const versionSuffix = params.esphomeVersion ? ` (ESPHome ${params.esphomeVersion})` : '';
       const workerSuffix = params.pinnedClientId
         ? ` on ${workers.find(w => w.client_id === params.pinnedClientId)?.hostname ?? params.pinnedClientId}`
         : '';
-      addToast(`Queued ${ctx.displayName}${workerSuffix}${versionSuffix}`, 'success');
+      const pinSuffix = params.updatePin ? ` (pin updated to ${params.updatePin})` : '';
+      addToast(`Queued ${ctx.displayName}${workerSuffix}${versionSuffix}${pinSuffix}`, 'success');
       switchTab('queue');
       mutateQueue();
       mutateDevices();
@@ -308,11 +352,28 @@ export default function App() {
 
   async function handleClearFinished() {
     try {
-      const data = await clearQueue(['success', 'failed', 'timed_out']);
+      const data = await clearQueue(['success', 'failed', 'timed_out', 'cancelled']);
       if (data.cleared > 0) {
         const msg = data.cleared === 1 ? 'Cleared 1 finished job' : `Cleared ${data.cleared} finished jobs`;
         addToast(msg, 'success');
       }
+      mutateQueue();
+    } catch {
+      addToast('Clear failed', 'error');
+    }
+  }
+
+  // #54: cancel all active + clear all terminal in one action
+  async function handleClearAll() {
+    try {
+      const activeIds = displayQueue
+        .filter(j => j.state === 'pending' || j.state === 'working')
+        .map(j => j.id);
+      if (activeIds.length > 0) {
+        await cancelJobs(activeIds);
+      }
+      await clearQueue(['success', 'failed', 'timed_out', 'cancelled']);
+      addToast('Queue cleared', 'success');
       mutateQueue();
     } catch {
       addToast('Clear failed', 'error');
@@ -402,6 +463,7 @@ export default function App() {
   const devicesCount = getTabCount('devices', targets, devices, displayQueue, workers);
   const queueCount = getTabCount('queue', targets, devices, displayQueue, workers);
   const workersCount = getTabCount('workers', targets, devices, displayQueue, workers);
+  const schedulesCount = getTabCount('schedules', targets, devices, displayQueue, workers);
 
   // Seed version for connect modal: prefer selected esphome version, fall back to server_version field
   const seedVersion = esphomeVersions.selected ||
@@ -425,6 +487,11 @@ export default function App() {
         <EsphomeVersionDropdown
           versions={esphomeVersions}
           onSelect={handleSelectEsphomeVersion}
+          onRefresh={async () => {
+            addToast('Refreshing ESPHome versions...', 'info');
+            await mutateEsphomeVersions();
+            addToast('ESPHome version list updated', 'success');
+          }}
         />
         <span
           className="rounded-full border border-[var(--border)] bg-[var(--surface2)] px-2 py-0.5 text-[11px] text-[var(--text-muted)] whitespace-nowrap"
@@ -453,18 +520,24 @@ export default function App() {
       </header>
 
       <nav className="sticky top-[52px] z-40 flex overflow-x-auto border-b border-[var(--border)] bg-[var(--surface)] px-5">
-        {(['devices', 'queue', 'workers'] as TabName[]).map(tab => (
-          <button
-            key={tab}
-            className={`inline-flex items-center gap-1.5 px-4 h-11 bg-transparent border-none border-b-[3px] border-b-transparent text-[13px] font-medium cursor-pointer whitespace-nowrap transition-colors ${activeTab === tab ? 'text-[var(--text)] border-b-[var(--accent)]' : 'text-[var(--text-muted)] hover:text-[var(--text)]'}`}
-            onClick={() => switchTab(tab)}
-          >
-            {tab.charAt(0).toUpperCase() + tab.slice(1)}{' '}
-            <span className={`inline-block rounded-full px-1.5 py-px text-[11px] font-semibold ${activeTab === tab ? 'bg-[var(--accent)] text-white' : 'bg-[var(--surface2)] text-[var(--text-muted)]'}`}>
-              {tab === 'devices' ? devicesCount : tab === 'queue' ? queueCount : workersCount}
-            </span>
-          </button>
-        ))}
+        {(['devices', 'queue', 'workers', 'schedules'] as TabName[]).map(tab => {
+          const count = tab === 'devices' ? devicesCount
+            : tab === 'queue' ? queueCount
+            : tab === 'workers' ? workersCount
+            : schedulesCount;
+          return (
+            <button
+              key={tab}
+              className={`inline-flex items-center gap-1.5 px-4 h-11 bg-transparent border-none border-b-[3px] border-b-transparent text-[13px] font-medium cursor-pointer whitespace-nowrap transition-colors ${activeTab === tab ? 'text-[var(--text)] border-b-[var(--accent)]' : 'text-[var(--text-muted)] hover:text-[var(--text)]'}`}
+              onClick={() => switchTab(tab)}
+            >
+              {tab.charAt(0).toUpperCase() + tab.slice(1)}{' '}
+              <span className={`inline-block rounded-full px-1.5 py-px text-[11px] font-semibold ${activeTab === tab ? 'bg-[var(--accent)] text-white' : 'bg-[var(--surface2)] text-[var(--text-muted)]'}`}>
+                {count}
+              </span>
+            </button>
+          );
+        })}
       </nav>
 
       <main>
@@ -482,6 +555,10 @@ export default function App() {
             onToast={addToast}
             onDelete={handleDeleteDevice}
             onRename={handleRenameDevice}
+            onSchedule={(t) => handleOpenUpgradeModal(t, 'schedule')}
+            onNewDevice={() => setNewDeviceModal({ mode: 'new' })}
+            onDuplicate={(sourceTarget) => setNewDeviceModal({ mode: 'duplicate', sourceTarget })}
+            onRefresh={() => mutateDevices()}
           />
         )}
         {activeTab === 'queue' && (
@@ -495,6 +572,7 @@ export default function App() {
             onRetryAllFailed={handleRetryAllFailed}
             onClearSucceeded={handleClearSucceeded}
             onClearFinished={handleClearFinished}
+            onClearAll={handleClearAll}
             onOpenLog={setLogJobId}
             onEdit={(target) => setEditorTarget(target)}
           />
@@ -510,6 +588,15 @@ export default function App() {
             onCleanCache={handleCleanWorkerCache}
             onCleanAllCaches={handleCleanAllCaches}
             onConnectWorker={(preset) => { setConnectModalPreset(preset ?? null); setConnectModalOpen(true); }}
+          />
+        )}
+        {activeTab === 'schedules' && (
+          <SchedulesTab
+            targets={targets}
+            workers={workers}
+            onSchedule={(t) => handleOpenUpgradeModal(t, 'schedule')}
+            onRefresh={() => mutateDevices()}
+            onToast={addToast}
           />
         )}
       </main>
@@ -536,7 +623,24 @@ export default function App() {
       {editorTarget && (
         <EditorModal
           target={editorTarget}
-          onClose={() => { setEditorTarget(null); mutateDevices(); }}
+          // #42: on close, if this target was a just-created (unsaved) new
+          // device, delete the stub file so cancelling out doesn't leave
+          // an orphan YAML behind. onSaved fires first for successful saves
+          // and removes the target from the unsaved set, so a saved close
+          // won't trip the delete.
+          onClose={() => {
+            const closed = editorTarget;
+            setEditorTarget(null);
+            if (closed && unsavedNewTargetsRef.current.has(closed)) {
+              unsavedNewTargetsRef.current.delete(closed);
+              deleteTarget(closed, false).catch((err: Error) => {
+                addToast('Cleanup of unsaved new device failed: ' + err.message, 'error');
+              }).finally(() => mutateDevices());
+            } else {
+              mutateDevices();
+            }
+          }}
+          onSaved={(target) => { unsavedNewTargetsRef.current.delete(target); }}
           onToast={addToast}
           onValidate={handleValidate}
           // #18: Save & Upgrade now goes through the same UpgradeModal as
@@ -560,17 +664,60 @@ export default function App() {
         />
       )}
 
-      {upgradeModalTarget && (
-        <UpgradeModal
-          target={upgradeModalTarget.target}
-          displayName={upgradeModalTarget.displayName}
-          workers={workers}
-          esphomeVersions={esphomeVersions.available}
-          defaultEsphomeVersion={esphomeVersions.selected ?? esphomeVersions.detected ?? null}
-          onConfirm={handleUpgradeConfirm}
-          onClose={() => setUpgradeModalTarget(null)}
-        />
-      )}
+      {/* #22: Unified Upgrade modal — handles both immediate upgrades and scheduling */}
+      {upgradeModalTarget && (() => {
+        const t = targets.find(x => x.target === upgradeModalTarget.target);
+        return (
+          <UpgradeModal
+            target={upgradeModalTarget.target}
+            displayName={upgradeModalTarget.displayName}
+            workers={workers}
+            esphomeVersions={esphomeVersions.available}
+            defaultEsphomeVersion={esphomeVersions.selected ?? esphomeVersions.detected ?? null}
+            pinnedVersion={t?.pinned_version}
+            currentSchedule={t?.schedule}
+            currentScheduleEnabled={t?.schedule_enabled}
+            currentScheduleTz={t?.schedule_tz}
+            currentOnce={t?.schedule_once}
+            defaultMode={upgradeModalTarget.defaultMode}
+            onUpgradeNow={handleUpgradeConfirm}
+            onSaveSchedule={async (cron, version, tz) => {
+              try {
+                await applyScheduleVersion(upgradeModalTarget.target, t?.pinned_version ?? null, version);
+                await setTargetSchedule(upgradeModalTarget.target, cron, tz);
+                addToast(`Schedule set for ${upgradeModalTarget.displayName}`, 'success');
+                setUpgradeModalTarget(null);
+                mutateDevices();
+              } catch (err) {
+                addToast('Schedule failed: ' + (err as Error).message, 'error');
+              }
+            }}
+            onSaveOnce={async (datetime, version) => {
+              try {
+                const { setTargetScheduleOnce } = await import('./api/client');
+                await applyScheduleVersion(upgradeModalTarget.target, t?.pinned_version ?? null, version);
+                await setTargetScheduleOnce(upgradeModalTarget.target, datetime);
+                addToast(`One-time upgrade scheduled for ${upgradeModalTarget.displayName}`, 'success');
+                setUpgradeModalTarget(null);
+                mutateDevices();
+              } catch (err) {
+                addToast('Schedule failed: ' + (err as Error).message, 'error');
+              }
+            }}
+            onDeleteSchedule={async () => {
+              try {
+                await deleteTargetSchedule(upgradeModalTarget.target);
+                addToast(`Schedule removed for ${upgradeModalTarget.displayName}`, 'success');
+                setUpgradeModalTarget(null);
+                mutateDevices();
+              } catch (err) {
+                addToast('Delete failed: ' + (err as Error).message, 'error');
+              }
+            }}
+            onClose={() => setUpgradeModalTarget(null)}
+          />
+        );
+      })()}
 
       {renameModalTarget && (
         <RenameModal
@@ -581,6 +728,25 @@ export default function App() {
             handleRenameDevice(t, newName);
           }}
           onClose={() => setRenameModalTarget(null)}
+        />
+      )}
+
+      {newDeviceModal && (
+        <NewDeviceModal
+          mode={newDeviceModal.mode}
+          sourceTarget={newDeviceModal.sourceTarget}
+          existingTargets={targets.map(t => t.target)}
+          onCreate={(target) => {
+            setNewDeviceModal(null);
+            mutateDevices();
+            // #42: remember this target is unsaved — if the editor closes
+            // without a successful save we'll delete the file.
+            unsavedNewTargetsRef.current.add(target);
+            // Open the editor on the new target so the user can add content.
+            setEditorTarget(target);
+          }}
+          onClose={() => setNewDeviceModal(null)}
+          onToast={addToast}
         />
       )}
     </>

@@ -98,6 +98,276 @@ def create_bundle(config_dir: str) -> bytes:
 # Cache resolved configs by (target, mtime) to avoid repeated git clones
 _config_cache: dict[str, tuple[float, dict]] = {}  # target → (mtime, resolved_config)
 
+# ---------------------------------------------------------------------------
+# Create / duplicate device helpers (CD.1 / CD.2)
+#
+# #43: ESPHome YAMLs use custom tags like ``!include``, ``!secret``, ``!extend``,
+# ``!remove``, and ``!lambda`` that stdlib ``yaml.safe_load`` refuses to parse
+# ("could not determine a constructor for the tag '!include'"). For duplicate
+# we want a plain round-trip that preserves these tags, so we build a custom
+# SafeLoader + SafeDumper pair that represents any ``!tag`` as a ``_Tagged``
+# opaque wrapper and re-emits it on dump.
+# ---------------------------------------------------------------------------
+
+
+class _Tagged:
+    """Opaque wrapper that preserves a YAML tag (e.g. ``!include``) on round-trip."""
+
+    __slots__ = ("tag", "value")
+
+    def __init__(self, tag: str, value: object) -> None:
+        self.tag = tag
+        self.value = value
+
+    def __repr__(self) -> str:
+        return f"_Tagged({self.tag!r}, {self.value!r})"
+
+
+def _build_tag_preserving_yaml():
+    """Return a (Loader, Dumper) pair that preserves arbitrary ``!tag`` markers.
+
+    Lazy import + closure so we only pay the yaml import cost on create/dup.
+    """
+    import yaml  # noqa: PLC0415
+
+    class _TagPreservingLoader(yaml.SafeLoader):
+        pass
+
+    class _TagPreservingDumper(yaml.SafeDumper):
+        pass
+
+    def _construct_tagged(loader, tag_suffix, node):
+        tag = node.tag
+        if isinstance(node, yaml.ScalarNode):
+            return _Tagged(tag, loader.construct_scalar(node))
+        if isinstance(node, yaml.SequenceNode):
+            return _Tagged(tag, loader.construct_sequence(node, deep=True))
+        return _Tagged(tag, loader.construct_mapping(node, deep=True))
+
+    def _represent_tagged(dumper, data):
+        if isinstance(data.value, list):
+            return dumper.represent_sequence(data.tag, data.value)
+        if isinstance(data.value, dict):
+            return dumper.represent_mapping(data.tag, data.value)
+        return dumper.represent_scalar(data.tag, str(data.value))
+
+    # Multi-constructor with prefix "!" catches !include, !secret, !lambda, etc.
+    _TagPreservingLoader.add_multi_constructor("!", _construct_tagged)
+    _TagPreservingDumper.add_representer(_Tagged, _represent_tagged)
+
+    return _TagPreservingLoader, _TagPreservingDumper
+
+
+def create_stub_yaml(name: str) -> str:
+    """Return a minimal ESPHome YAML stub with the given device name.
+
+    The stub contains only the ``esphome.name`` field so the new device shows
+    up in the Devices tab immediately. The user is expected to add board,
+    platform, and components via the editor. Routed through ``yaml.safe_dump``
+    per PY-1 — never hand-rolled string concatenation for YAML content.
+    """
+    import yaml  # noqa: PLC0415
+
+    body = yaml.safe_dump({"esphome": {"name": name}}, sort_keys=False, default_flow_style=False)
+    return body + "\n# Add board, platform, and components here.\n"
+
+
+def duplicate_device(config_dir: str, source: str, new_name: str) -> str:
+    """Read ``source`` YAML, rewrite ``esphome.name`` to ``new_name``, return YAML.
+
+    NOTE: ``yaml.safe_dump`` drops comments. That's deliberate for duplicate
+    — the user is starting from a template, not maintaining a shared file.
+    If ``esphome.name`` is resolved via ``${substitutions.name}`` in the
+    source, we rewrite the substitution instead so the indirection is
+    preserved. Raises FileNotFoundError if the source doesn't exist or
+    ValueError if the source is not a parseable YAML mapping.
+
+    #43: custom ``!include``/``!secret``/... tags are preserved on
+    round-trip via a tag-preserving Loader/Dumper pair.
+    """
+    import yaml  # noqa: PLC0415
+
+    src_path = Path(config_dir) / source
+    if not src_path.exists():
+        raise FileNotFoundError(f"Source file not found: {source}")
+
+    Loader, Dumper = _build_tag_preserving_yaml()
+
+    content = src_path.read_text(encoding="utf-8")
+    try:
+        data = yaml.load(content, Loader=Loader)  # noqa: S506 — custom SafeLoader subclass
+    except yaml.YAMLError as e:
+        raise ValueError(f"Source YAML is not parseable: {e}") from e
+
+    if not isinstance(data, dict):
+        raise ValueError("Source YAML is not a mapping at the top level")
+
+    # ESPHome convention: ``substitutions.name`` is almost always the device
+    # name, used by included packages as ``${name}``. If it exists, rewrite
+    # it — even if top-level ``esphome.name`` is a literal — so the rename
+    # propagates into every include that uses ${name}.
+    subs = data.get("substitutions")
+    if isinstance(subs, dict) and "name" in subs:
+        subs["name"] = new_name
+
+    esphome_block = data.get("esphome")
+    if isinstance(esphome_block, dict):
+        existing_name = esphome_block.get("name")
+        if isinstance(existing_name, str) and existing_name.startswith("${") and existing_name.endswith("}"):
+            # Top-level esphome.name is a ``${substitutions.foo}`` reference.
+            # If the reference target exists in substitutions, rewrite *that*
+            # entry (preserving the indirection). Otherwise clobber
+            # esphome.name directly so the file still names the device.
+            sub_key = existing_name[2:-1]
+            if isinstance(subs, dict) and sub_key in subs:
+                subs[sub_key] = new_name
+            else:
+                esphome_block["name"] = new_name
+        elif isinstance(existing_name, str):
+            # Literal name at top level — rewrite it.
+            esphome_block["name"] = new_name
+        # If esphome.name is absent we leave the top-level block alone: the
+        # real name probably lives in an included package under ${name},
+        # which we've already rewritten via substitutions.name above. Only
+        # inject a literal esphome.name when there's also no substitutions
+        # fallback to carry the rename.
+        elif not (isinstance(subs, dict) and "name" in subs):
+            esphome_block["name"] = new_name
+    elif isinstance(subs, dict) and "name" in subs:
+        # No esphome block at all but we did rewrite substitutions.name — the
+        # include pipeline will fill esphome.name from ${name}, so don't add
+        # a redundant top-level block.
+        pass
+    else:
+        data["esphome"] = {"name": new_name}
+
+    return yaml.dump(data, Dumper=Dumper, sort_keys=False, default_flow_style=False)
+
+
+# ---------------------------------------------------------------------------
+# Per-device metadata stored as a YAML comment block at the top of each file.
+# Format:
+#   # distributed-esphome:
+#   #   pin_version: 2026.3.3
+#   #   schedule: 0 2 * * 0
+#   #   schedule_enabled: true
+# The block is invisible to ESPHome's parser and travels with the file.
+# ---------------------------------------------------------------------------
+
+_META_MARKER = "# distributed-esphome:"
+
+
+def read_device_meta(config_dir: str, target: str) -> dict:
+    """Read the ``# distributed-esphome:`` comment block from the top of a YAML file.
+
+    The block must appear at the very top of the file (before any non-comment,
+    non-blank line) to avoid matching user comments deeper in the file.
+
+    Returns an empty dict if no block is found or if parsing fails.
+    """
+    import yaml  # noqa: PLC0415
+
+    path = Path(config_dir) / target
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (FileNotFoundError, OSError):
+        return {}
+
+    # Scan from the top for the marker. Skip blank lines before it.
+    marker_idx: int | None = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue  # skip blank lines at the top
+        if stripped == _META_MARKER.strip():
+            marker_idx = i
+            break
+        if not stripped.startswith("#"):
+            # Hit non-comment content before finding the marker → no block.
+            return {}
+
+    if marker_idx is None:
+        return {}
+
+    # Collect continuation lines: `#   key: value` (indented under the marker).
+    # A continuation line must start with `#` followed by at least 2 spaces of
+    # indent (so `#   ` — the marker has 0 indent, children have 2+).
+    block_lines: list[str] = []
+    for line in lines[marker_idx + 1:]:
+        # Continuation: starts with "# " + at least 2 spaces of indent
+        if line.startswith("#") and len(line) > 2 and line[1] == " " and line[2] == " ":
+            # Strip the "# " prefix (first 2 chars)
+            block_lines.append(line[2:])
+        else:
+            break  # end of block
+
+    if not block_lines:
+        return {}
+
+    yaml_text = "\n".join(block_lines)
+    try:
+        result = yaml.safe_load(yaml_text)
+        return result if isinstance(result, dict) else {}
+    except Exception:
+        logger.debug("Failed to parse device meta for %s", target, exc_info=True)
+        return {}
+
+
+def write_device_meta(config_dir: str, target: str, meta: dict) -> None:
+    """Write, replace, or remove the ``# distributed-esphome:`` comment block.
+
+    - Non-empty ``meta``: serializes to YAML, prefixes with ``# ``, inserts
+      at the top of the file (before the first non-comment non-blank line).
+    - Empty ``meta`` (``{}``): removes any existing block entirely.
+
+    Preserves all other content in the file. Invalidates ``_config_cache``.
+    """
+    import yaml  # noqa: PLC0415
+
+    path = Path(config_dir) / target
+    content = path.read_text(encoding="utf-8")
+    lines = content.splitlines(keepends=True)
+
+    # 1. Remove any existing block (marker + continuations).
+    new_lines: list[str] = []
+    in_block = False
+    for line in lines:
+        stripped = line.strip()
+        if not in_block and stripped == _META_MARKER.strip():
+            in_block = True
+            continue  # skip the marker line
+        if in_block:
+            # Continuation: "# " + 2+ spaces indent
+            raw = line.rstrip("\n").rstrip("\r")
+            if raw.startswith("#") and len(raw) > 2 and raw[1] == " " and raw[2] == " ":
+                continue  # skip continuation line
+            # Also skip the blank line we insert after the block (if any)
+            if stripped == "" and not new_lines:
+                continue
+            in_block = False
+        new_lines.append(line)
+
+    # 2. If meta is non-empty, build the new block and prepend.
+    if meta:
+        # Serialize the dict as YAML (no document markers, default flow off)
+        yaml_text = yaml.dump(meta, default_flow_style=False, sort_keys=False)
+        # Prefix each line with "#   " (2-space indent under the marker)
+        comment_lines = [_META_MARKER + "\n"]
+        for yaml_line in yaml_text.splitlines():
+            comment_lines.append(f"#   {yaml_line}\n")
+        comment_lines.append("\n")  # blank line separator
+
+        # Find insertion point: before the first non-blank non-comment line.
+        # If the file starts with other comments (e.g., a shebang or user
+        # comment), insert BEFORE them so our block is always first.
+        new_lines = comment_lines + new_lines
+
+    # 3. Write back.
+    path.write_text("".join(new_lines), encoding="utf-8")
+
+    # 4. Invalidate the config cache for this target.
+    _config_cache.pop(target, None)
+
 
 def _resolve_esphome_config(config_dir: str, target: str) -> Optional[dict]:
     """Fully resolve an ESPHome YAML config including packages and substitutions.
@@ -180,7 +450,25 @@ def get_device_metadata(config_dir: str, target: str) -> dict:
         "network_ipv6": False,       # top-level network.enable_ipv6 is true
         "network_ap_fallback": False,  # wifi.ap block configured
         "network_matter": False,     # matter: block present OR openthread: present
+        # Per-device metadata from the # distributed-esphome: comment block.
+        "pinned_version": None,      # pin_version from comment block
+        "schedule": None,            # cron expression (5-field)
+        "schedule_enabled": False,   # whether the schedule is active
+        "schedule_last_run": None,   # ISO datetime of last triggered run
+        "schedule_once": None,       # ISO datetime for one-time schedule
+        "tags": None,                # comma-separated tag string
     }
+    # Read the per-device metadata comment block FIRST — it's cheap (text scan,
+    # no YAML resolution) and provides fields the rest of this function doesn't.
+    device_meta = read_device_meta(config_dir, target)
+    if device_meta:
+        result["pinned_version"] = device_meta.get("pin_version")
+        result["schedule"] = device_meta.get("schedule")
+        result["schedule_enabled"] = device_meta.get("schedule_enabled", False)
+        result["schedule_last_run"] = device_meta.get("schedule_last_run")
+        result["schedule_once"] = device_meta.get("schedule_once")
+        result["tags"] = device_meta.get("tags")
+
     config = _resolve_esphome_config(config_dir, target)
     if config is not None:
         _extract_metadata(config, result)
@@ -221,8 +509,10 @@ def _extract_metadata(config: dict, result: dict) -> None:
             if pver:
                 result["project_version"] = str(pver)
 
-    # Detect presence of the web_server component
-    if config.get("web_server") is not None:
+    # #74: detect presence of the web_server component. ESPHome allows
+    # `web_server:` with no value (enables with defaults), which YAML
+    # parses as {"web_server": None}. Check key PRESENCE, not value.
+    if "web_server" in config:
         result["has_web_server"] = True
 
     # #14: detect a `button: - platform: restart` entry in the resolved config.
@@ -368,6 +658,11 @@ def _fill_missing_metadata(raw_config: dict, result: dict) -> None:
         sub_area = subs.get("area")
         if sub_area and _is_literal(str(sub_area)):
             result["area"] = str(sub_area)
+
+    # #74: detect web_server in raw config too (fallback when full resolution
+    # failed but top-level YAML has web_server:)
+    if not result["has_web_server"] and "web_server" in raw_config:
+        result["has_web_server"] = True
 
 
 def get_friendly_name(config_dir: str, target: str) -> Optional[str]:

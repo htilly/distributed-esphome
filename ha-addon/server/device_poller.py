@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -350,6 +350,25 @@ class DevicePoller:
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
+            # #60: TTL — remove devices that haven't been seen in 4 hours
+            # AND have no compile_target (no YAML file). Real configured
+            # devices persist even when offline; only stray mDNS discoveries
+            # from retired/unplugged/neighbor devices get purged.
+            ttl_cutoff = _utcnow() - timedelta(hours=4)
+            async with self._lock:
+                expired = [
+                    key for key, dev in self._devices.items()
+                    if dev.compile_target is None
+                    and not dev.online
+                    and dev.last_seen is not None
+                    and dev.last_seen < ttl_cutoff
+                ]
+                for key in expired:
+                    del self._devices[key]
+                if expired:
+                    logger.info("TTL expired %d stale device(s): %s", len(expired), expired)
+                    self._save_cache()
+
             await asyncio.sleep(self._poll_interval)
 
     async def _query_device(self, name: str, ip: str) -> None:
@@ -499,6 +518,20 @@ class DevicePoller:
         self._address_sources = address_sources or {}
         for dev in self._devices.values():
             dev.compile_target = self._map_target(dev.name)
+
+        # #59: remove stale proactive entries — devices that were pre-created
+        # for a YAML target that no longer exists and have never been seen
+        # on the network. A proactive entry has last_seen=None (never
+        # discovered via mDNS/API), vs a real device which got a timestamp
+        # when the poller first connected.
+        stale_keys = [
+            key for key, dev in self._devices.items()
+            if dev.compile_target is None
+            and dev.last_seen is None
+            and not dev.online
+        ]
+        for key in stale_keys:
+            del self._devices[key]
 
         # Proactively create Device entries for every YAML target. Now that
         # build_name_to_target_map populates address_overrides for ALL targets

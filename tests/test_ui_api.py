@@ -70,6 +70,19 @@ async def _make_ui_app(tmp_path: Path) -> _UiApp:
     app["queue"] = queue
     app["registry"] = registry
     app["log_subscribers"] = {}
+    app["_rt"] = {
+        "ha_entity_status": {},
+        "ha_mac_set": set(),
+        "ha_mac_to_device_id": {},
+        "ha_name_to_device_id": {},
+        "esphome_detected_version": None,
+        "esphome_available_versions": [],
+        "esphome_versions_fetched_at": 0.0,
+        "schedule_checker_started_at": None,
+        "schedule_checker_tick_count": 0,
+        "schedule_checker_last_tick": None,
+        "schedule_checker_last_error": None,
+    }
     app.router.add_routes(ui_api_module.routes)
 
     client = TestClient(TestServer(app))
@@ -245,7 +258,7 @@ async def test_delete_target_cancels_pending_jobs(tmp_path):
         assert resp.status == 200
 
         stored = ta.queue.get(job.id)
-        assert stored.state == JobState.FAILED  # cancel marks as FAILED
+        assert stored.state == JobState.CANCELLED  # #49: cancel marks as CANCELLED
     finally:
         await ta.close()
 
@@ -541,7 +554,7 @@ async def test_cancel_jobs(tmp_path):
         assert resp.status == 200
         data = await resp.json()
         assert data["cancelled"] == 1
-        assert ta.queue.get(job.id).state == JobState.FAILED
+        assert ta.queue.get(job.id).state == JobState.CANCELLED
     finally:
         await ta.close()
 
@@ -672,5 +685,116 @@ async def test_worker_clean_cache_sets_pending_flag(tmp_path):
         resp = await ta.post(f"/ui/api/workers/{client_id}/clean")
         assert resp.status == 200
         assert ta.registry.get(client_id).pending_clean is True
+    finally:
+        await ta.close()
+
+
+# ---------------------------------------------------------------------------
+# POST /ui/api/targets — CD.3 (create + duplicate device)
+# ---------------------------------------------------------------------------
+
+
+async def test_create_target_stub(tmp_path):
+    """POST /ui/api/targets with no source creates a staged dotfile."""
+    import yaml
+    ta = await _make_ui_app(tmp_path)
+    try:
+        resp = await ta.post("/ui/api/targets", json={"filename": "kitchen"})
+        assert resp.status == 200
+        data = await resp.json()
+        # #62: create returns a .pending. prefixed filename
+        assert data["target"] == ".pending.kitchen.yaml"
+        # File is staged as a dotfile at the config root (not the final name)
+        staged = ta.config_dir / ".pending.kitchen.yaml"
+        assert staged.exists()
+        parsed = yaml.safe_load(staged.read_text())
+        assert parsed["esphome"]["name"] == "kitchen"
+        # Final name does NOT exist yet (not written until first save)
+        assert not (ta.config_dir / "kitchen.yaml").exists()
+    finally:
+        await ta.close()
+
+
+async def test_create_target_accepts_yaml_extension(tmp_path):
+    """filename='kitchen.yaml' is normalised and accepted."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        resp = await ta.post("/ui/api/targets", json={"filename": "kitchen.yaml"})
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["target"] == ".pending.kitchen.yaml"
+    finally:
+        await ta.close()
+
+
+async def test_create_target_rejects_collision(tmp_path):
+    """Creating a filename that already exists returns 400."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        (ta.config_dir / "existing.yaml").write_text("esphome:\n  name: existing\n")
+        resp = await ta.post("/ui/api/targets", json={"filename": "existing"})
+        assert resp.status == 400
+        body = await resp.json()
+        assert "already exists" in body["error"]
+    finally:
+        await ta.close()
+
+
+async def test_create_target_rejects_path_traversal(tmp_path):
+    """A filename containing slashes is rejected by the slug regex."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        resp = await ta.post("/ui/api/targets", json={"filename": "../etc/passwd"})
+        assert resp.status == 400
+    finally:
+        await ta.close()
+
+
+async def test_create_target_rejects_invalid_slug(tmp_path):
+    """Underscores, uppercase, spaces all rejected by the slug regex."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        for bad in ("Kitchen", "my_device", "device 1", "-leading-hyphen", ""):
+            resp = await ta.post("/ui/api/targets", json={"filename": bad})
+            assert resp.status == 400, f"expected 400 for {bad!r}"
+    finally:
+        await ta.close()
+
+
+async def test_create_target_duplicate(tmp_path):
+    """POST /ui/api/targets with source duplicates and rewrites esphome.name."""
+    import yaml
+    ta = await _make_ui_app(tmp_path)
+    try:
+        (ta.config_dir / "source.yaml").write_text(
+            "esphome:\n  name: original\n  comment: Hello\n"
+            "wifi:\n  ssid: home\n"
+        )
+        resp = await ta.post(
+            "/ui/api/targets",
+            json={"filename": "copy", "source": "source.yaml"},
+        )
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["target"] == ".pending.copy.yaml"
+
+        created = ta.config_dir / ".pending.copy.yaml"
+        parsed = yaml.safe_load(created.read_text())
+        assert parsed["esphome"]["name"] == "copy"
+        assert parsed["esphome"]["comment"] == "Hello"
+        assert parsed["wifi"]["ssid"] == "home"
+    finally:
+        await ta.close()
+
+
+async def test_create_target_duplicate_missing_source(tmp_path):
+    """Duplicating from a non-existent source returns 404."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        resp = await ta.post(
+            "/ui/api/targets",
+            json={"filename": "new", "source": "nonexistent.yaml"},
+        )
+        assert resp.status == 404
     finally:
         await ta.close()

@@ -9,6 +9,13 @@ import {
 } from '@tanstack/react-table';
 import type { Job, SystemInfo, Worker } from '../types';
 import { Button } from './ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+} from './ui/dropdown-menu';
 import { stripYaml, timeAgo } from '../utils';
 import { StatusDot } from './StatusDot';
 
@@ -57,6 +64,15 @@ function workerPlatformHtml(si: SystemInfo): React.ReactNode {
     lines.push(
       <span key="disk" style={{ fontSize: 10, color: diskColor }} title={`Build volume: ${si.disk_free} free of ${si.disk_total} (${si.disk_used_pct ?? '?'}% used)`}>
         Disk: {si.disk_free} / {si.disk_total}{pctStr}
+      </span>
+    );
+  }
+  // 5.2: build cache stats
+  if (si.cached_targets != null) {
+    const cacheStr = si.cache_size_mb != null ? ` (${si.cache_size_mb} MB)` : '';
+    lines.push(
+      <span key="cache" style={{ fontSize: 10, color: 'var(--text-muted)' }} title={`Build cache: ${si.cached_targets} target(s) cached${cacheStr}`}>
+        Cache: {si.cached_targets} target{si.cached_targets !== 1 ? 's' : ''}{cacheStr}
       </span>
     );
   }
@@ -209,8 +225,6 @@ export function WorkersTab({ workers, queue, serverClientVersion, minImageVersio
   const [filter, setFilter] = useState('');
   const [sorting, setSorting] = useState<SortingState>([{ id: 'hostname', desc: false }]);
 
-  const online = workers.filter(c => c.online).length;
-  const countText = online + '/' + workers.length + ' online';
 
   // Filter before handing to TanStack — keeps filter state local, same as DevicesTab pattern
   const filteredWorkers = useMemo(() => {
@@ -282,8 +296,8 @@ export function WorkersTab({ workers, queue, serverClientVersion, minImageVersio
 
     const rowStyle: React.CSSProperties = {
       ...(paused ? { opacity: 0.6 } : {}),
-      ...(isLocal ? { background: 'var(--surface2)' } : {}),
     };
+    const rowClass = isLocal ? 'local-worker-row' : '';
 
     const displaySlots = Math.max(slots, 1); // show at least 1 row even if 0 slots
     for (let slot = 1; slot <= displaySlots; slot++) {
@@ -325,7 +339,7 @@ export function WorkersTab({ workers, queue, serverClientVersion, minImageVersio
 
       if (slot === 1) {
         rows.push(
-          <tr key={`${c.client_id}-1`} style={rowStyle}>
+          <tr key={`${c.client_id}-1`} style={rowStyle} className={rowClass}>
             <td>
               {slotNameEl}
               {isLocal && <span style={{ fontSize: 9, color: 'var(--accent)', marginLeft: 6, textTransform: 'uppercase', fontWeight: 600 }}>built-in</span>}
@@ -356,7 +370,7 @@ export function WorkersTab({ workers, queue, serverClientVersion, minImageVersio
         );
       } else {
         rows.push(
-          <tr key={`${c.client_id}-${slot}`} style={rowStyle}>
+          <tr key={`${c.client_id}-${slot}`} style={rowStyle} className={rowClass}>
             <td>{slotNameEl}</td>
             <td></td>
             <td></td>
@@ -419,9 +433,20 @@ export function WorkersTab({ workers, queue, serverClientVersion, minImageVersio
             )}
           </div>
           <div className="actions">
-            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{countText}</span>
-            <Button variant="outline" size="sm" onClick={onCleanAllCaches} disabled={!workers.some(w => w.online)}>Clean All Caches</Button>
+            {/* #88: standardized layout — primary "add new" action FIRST, Actions dropdown LAST */}
             <Button size="sm" onClick={() => onConnectWorker()}>+ Connect Worker</Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg border border-border bg-background px-2.5 h-7 text-[0.8rem] font-medium text-foreground hover:bg-muted cursor-pointer">
+                Actions <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuGroup>
+                  <DropdownMenuItem onClick={onCleanAllCaches} disabled={!workers.some(w => w.online)}>
+                    Clean All Caches
+                  </DropdownMenuItem>
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
         <div className="table-wrap">

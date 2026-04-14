@@ -27,6 +27,7 @@ class JobState(str, Enum):
     SUCCESS = "success"
     FAILED = "failed"
     TIMED_OUT = "timed_out"
+    CANCELLED = "cancelled"
 
 
 def _utcnow() -> datetime:
@@ -72,6 +73,10 @@ class Job:
     # enqueue calls update the existing follow-up's esphome_version /
     # pinned_client_id rather than creating new entries.
     is_followup: bool = False
+    scheduled: bool = False  # True if triggered by the cron scheduler (not a manual action)
+    # #92: when scheduled, distinguish recurring (cron) from one-time fires so
+    # the Queue tab can show which kind triggered the job. None for user-triggered.
+    schedule_kind: Optional[str] = None  # "recurring" | "once" | None
     status_text: Optional[str] = None  # transient; not persisted
     _streaming_log: str = field(default="", repr=False)  # transient; not persisted
 
@@ -97,6 +102,8 @@ class Job:
             "ota_address": self.ota_address,
             "pinned_client_id": self.pinned_client_id,
             "is_followup": self.is_followup,
+            "scheduled": self.scheduled,
+            "schedule_kind": self.schedule_kind,
             "status_text": self.status_text,
             "duration_seconds": self.duration_seconds(),
         }
@@ -128,6 +135,8 @@ class Job:
             ota_address=d.get("ota_address"),
             pinned_client_id=d.get("pinned_client_id"),
             is_followup=d.get("is_followup", False),
+            scheduled=d.get("scheduled", False),
+            schedule_kind=d.get("schedule_kind"),
         )
 
     def duration_seconds(self) -> Optional[float]:
@@ -204,7 +213,7 @@ class JobQueue:
                 job.assigned_client_id = None
                 job.assigned_at = None
             # Prune terminal jobs older than 1 hour on startup
-            if job.state in (JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT):
+            if job.state in (JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT, JobState.CANCELLED):
                 try:
                     created = job.created_at
                     if created.tzinfo is None:
@@ -309,7 +318,7 @@ class JobQueue:
             stale = [
                 jid for jid, j in self._jobs.items()
                 if j.target == target and j.state in (
-                    JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT
+                    JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT, JobState.CANCELLED
                 )
             ]
             for jid in stale:
@@ -388,7 +397,12 @@ class JobQueue:
                 job.assigned_at = now
                 job.worker_id = worker_id
                 self._persist()
-                logger.info("Job %s claimed by client %s worker %d", job.id, client_id, worker_id)
+                # #94: include target + hostname so the log line is useful at a
+                # glance without correlating IDs back to the registry/queue.
+                logger.info(
+                    "Job %s (%s) claimed by %s [%s] worker %d",
+                    job.id, job.target, hostname or "?", client_id, worker_id,
+                )
                 return job
             return None
 
@@ -419,12 +433,17 @@ class JobQueue:
                 job._streaming_log = ""
                 job.status_text = None
                 self._persist()
-                logger.info("Job %s OTA result: %s", job_id, ota_result)
+                # #94: include target + worker hostname in the log line.
+                logger.info(
+                    "Job %s (%s on %s) OTA result: %s",
+                    job_id, job.target, job.assigned_hostname or "?", ota_result,
+                )
                 return True
 
             if job.state != JobState.WORKING:
                 logger.warning(
-                    "submit_result: job %s in unexpected state %s", job_id, job.state
+                    "submit_result: job %s (%s) in unexpected state %s",
+                    job_id, job.target, job.state,
                 )
                 return False
             job.state = JobState.SUCCESS if status == "success" else JobState.FAILED
@@ -436,19 +455,24 @@ class JobQueue:
                 job.ota_result = ota_result
             job.finished_at = _utcnow()
             self._persist()
-            logger.info("Job %s finished with status %s", job_id, status)
+            # #94: include target + worker hostname so log readers can see
+            # which device on which worker just finished without joining IDs.
+            logger.info(
+                "Job %s (%s on %s) finished with status %s",
+                job_id, job.target, job.assigned_hostname or "?", status,
+            )
             return True
 
     async def cancel(self, job_ids: list[str]) -> int:
-        """Cancel jobs by id; transitions any non-terminal job to FAILED."""
+        """Cancel jobs by id; transitions any non-terminal job to CANCELLED."""
         async with self._lock:
             cancelled = 0
             for job_id in job_ids:
                 job = self._jobs.get(job_id)
                 if job is None:
                     continue
-                if job.state not in (JobState.SUCCESS, JobState.FAILED):
-                    job.state = JobState.FAILED
+                if job.state not in (JobState.SUCCESS, JobState.FAILED, JobState.CANCELLED):
+                    job.state = JobState.CANCELLED
                     job.finished_at = _utcnow()
                     job.log = (job.log or "") + "\nCancelled by user."
                     cancelled += 1
@@ -506,11 +530,16 @@ class JobQueue:
         esphome_version: str,
         run_id: str,
         timeout_seconds: int,
+        target_versions: dict[str, str] | None = None,
     ) -> list["Job"]:
-        """Re-enqueue failed/timed_out/success jobs as new PENDING jobs. Returns new jobs.
+        """Re-enqueue failed/timed_out/cancelled/success jobs as new PENDING jobs.
 
         The old job being retried is removed; any other terminal jobs for the
         same target are also cleared (same semantics as enqueue).
+
+        *target_versions* maps target filenames to per-device ESPHome versions
+        (#51). When a device is pinned to a specific version, the retry should
+        use that version instead of the *esphome_version* default.
         """
         async with self._lock:
             new_jobs: list[Job] = []
@@ -518,7 +547,7 @@ class JobQueue:
                 job = self._jobs.get(job_id)
                 if job is None:
                     continue
-                is_failed = job.state in (JobState.FAILED, JobState.TIMED_OUT)
+                is_failed = job.state in (JobState.FAILED, JobState.TIMED_OUT, JobState.CANCELLED)
                 is_ota_failed = job.state == JobState.SUCCESS and job.ota_result == "failed"
                 is_success = job.state == JobState.SUCCESS
                 if not (is_failed or is_ota_failed or is_success):
@@ -531,15 +560,16 @@ class JobQueue:
                 stale = [
                     jid for jid, j in self._jobs.items()
                     if j.target == target and j.state in (
-                        JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT
+                        JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT, JobState.CANCELLED
                     )
                 ]
                 for jid in stale:
                     del self._jobs[jid]
+                version_for_target = (target_versions or {}).get(target, esphome_version)
                 new_job = Job(
                     id=str(uuid.uuid4()),
                     target=target,
-                    esphome_version=esphome_version,
+                    esphome_version=version_for_target,
                     state=JobState.PENDING,
                     run_id=run_id,
                     timeout_seconds=timeout_seconds,
@@ -612,7 +642,7 @@ class JobQueue:
 
     async def prune_old_terminal(self, max_age_seconds: int = 3600) -> int:
         """Remove terminal jobs older than *max_age_seconds*. Returns count removed."""
-        terminal = {JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT}
+        terminal = {JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT, JobState.CANCELLED}
         cutoff = datetime.now(timezone.utc)
         async with self._lock:
             to_remove = []
@@ -636,7 +666,7 @@ class JobQueue:
 
     async def remove_jobs(self, job_ids: list[str]) -> int:
         """Remove terminal jobs by ID. Returns count removed."""
-        terminal = {JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT}
+        terminal = {JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT, JobState.CANCELLED}
         async with self._lock:
             removed = 0
             for job_id in job_ids:
@@ -654,7 +684,7 @@ class JobQueue:
         If *require_ota_success* is True, jobs with ota_result == 'failed' are
         kept even if their state matches (so "Clear Succeeded" leaves OTA-failed jobs).
         """
-        terminal = {JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT}
+        terminal = {JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT, JobState.CANCELLED}
         target_states = {JobState(s) for s in states if JobState(s) in terminal}
         async with self._lock:
             to_remove = []

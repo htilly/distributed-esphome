@@ -5,6 +5,88 @@ export function timeAgo(isoString: string): string {
   return Math.floor(ago / 3600) + 'h ago';
 }
 
+/**
+ * Format a 5-field cron expression as a human-readable string.
+ *
+ * Recognises the preset patterns produced by the UpgradeModal's cron builder:
+ * "every Nh", "Daily HH:MM", "<Weekday> HH:MM", "<N>th HH:MM". Falls back to
+ * the raw cron string for anything more exotic. Used by the Schedule column
+ * in both DevicesTab and SchedulesTab (#40) so both tabs display schedules
+ * identically.
+ */
+
+/**
+ * Format a 5-field cron expression for display.
+ *
+ * #91: cron is rendered literally — no tz conversion. Schedules with a
+ * `schedule_tz` are interpreted in that tz; legacy schedules without one
+ * are interpreted as UTC server-side. Callers add a "(<tz>)" qualifier.
+ */
+export function formatCronHuman(cron: string | null | undefined): string | null {
+  if (!cron) return null;
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) return cron;
+  const [min, hour, dom, _mon, dow] = parts;
+  void _mon;
+
+  if (min === '0' && hour.startsWith('*/')) {
+    const n = parseInt(hour.slice(2), 10);
+    return n === 1 ? 'Hourly' : `Every ${n}h`;
+  }
+  if (dom === '*' && dow === '*' && !hour.includes('/') && !min.includes('/')) {
+    const h = parseInt(hour, 10);
+    const m = parseInt(min, 10);
+    if (isNaN(h) || isNaN(m)) return cron;
+    return `Daily ${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  }
+  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  if (dom === '*' && dow !== '*' && !hour.includes('/')) {
+    const h = parseInt(hour, 10);
+    const m = parseInt(min, 10);
+    const dowNum = parseInt(dow, 10);
+    if (isNaN(h) || isNaN(m)) return cron;
+    const day = dayNames[dowNum] ?? dow;
+    return `${day} ${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  }
+  if (dom !== '*' && dow === '*' && !hour.includes('/')) {
+    const h = parseInt(hour, 10);
+    const m = parseInt(min, 10);
+    if (isNaN(h) || isNaN(m)) return cron;
+    const suffix = dom === '1' ? 'st' : dom === '2' ? 'nd' : dom === '3' ? 'rd' : 'th';
+    return `${dom}${suffix} ${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  }
+  return cron;
+}
+
+/**
+ * Build an absolute URL for a Home Assistant deep-link (#35).
+ *
+ * When the add-on is loaded via HA Ingress (the primary deployment), the
+ * parent window is HA itself, so we use `window.top.location.origin`. When
+ * accessed directly on the add-on's port (e.g. http://hass-4.local:8765),
+ * we fall back to the same hostname on the default HA port 8123.
+ *
+ * Returns null if window.top access throws (cross-origin) and we can't
+ * derive a reasonable fallback.
+ */
+export function haDeepLink(path: string): string | null {
+  try {
+    if (typeof window === 'undefined') return null;
+    const top = window.top;
+    if (top && top !== window) {
+      try {
+        return `${top.location.origin}${path}`;
+      } catch {
+        /* cross-origin parent — fall through */
+      }
+    }
+    const loc = window.location;
+    return `${loc.protocol}//${loc.hostname}:8123${path}`;
+  } catch {
+    return null;
+  }
+}
+
 export function stripYaml(s: string | undefined | null): string {
   return s ? s.replace(/\.ya?ml$/i, '') : (s ?? '');
 }
@@ -29,9 +111,14 @@ export function isJobInProgress(job: { state: string; ota_result?: string }): bo
   return false;
 }
 
-/** Job is in a terminal failed state (not running, not successful) */
+/** Job is in a terminal failed state (not running, not successful, not cancelled) */
 export function isJobFailed(job: { state: string; ota_result?: string }): boolean {
+  if (job.state === 'cancelled') return false;
   return !isJobInProgress(job) && !isJobSuccessful(job);
+}
+
+export function isJobCancelled(job: { state: string }): boolean {
+  return job.state === 'cancelled';
 }
 
 /** Job is in a terminal state (not running) */
@@ -51,6 +138,7 @@ const BADGE_VARIANTS: Record<string, string> = {
   success:   `${BADGE_BASE} bg-[#14532d] text-[#4ade80]`,
   failed:    `${BADGE_BASE} bg-[#450a0a] text-[#f87171]`,
   timed_out: `${BADGE_BASE} bg-[#431407] text-[#fb923c]`,
+  cancelled: `${BADGE_BASE} bg-[#374151] text-[#9ca3af]`,
 };
 
 export function getJobBadge(job: {
@@ -84,6 +172,8 @@ export function getJobBadge(job: {
     }
   } else if (job.state === 'timed_out') {
     return { label: 'Timed Out', cls: BADGE_VARIANTS.timed_out };
+  } else if (job.state === 'cancelled') {
+    return { label: 'Cancelled', cls: BADGE_VARIANTS.cancelled };
   } else {
     return { label: job.state, cls: BADGE_VARIANTS[job.state] || BADGE_VARIANTS.pending };
   }

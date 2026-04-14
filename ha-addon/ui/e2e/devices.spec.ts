@@ -85,3 +85,53 @@ test('theme toggle switches between dark and light', async ({ page }) => {
   // Should be back to dark (no data-theme attribute)
   await expect(html).not.toHaveAttribute('data-theme', 'light');
 });
+
+
+// ---------------------------------------------------------------------------
+// #61 — Button height consistency regression test
+// ---------------------------------------------------------------------------
+
+test('all toolbar buttons have identical height', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByText('Living Room Sensor')).toBeVisible({ timeout: 5000 });
+
+  // Measure every button/trigger in the Devices tab toolbar
+  const heights = await page.evaluate(() => {
+    const toolbar = document.querySelector('#tab-devices .actions');
+    if (!toolbar) return [];
+    return Array.from(toolbar.children).map(el => ({
+      text: el.textContent?.trim().slice(0, 25),
+      height: Math.round(el.getBoundingClientRect().height * 10) / 10,
+    }));
+  });
+
+  expect(heights.length).toBeGreaterThan(0);
+  const firstHeight = heights[0].height;
+  for (const btn of heights) {
+    expect(btn.height, `"${btn.text}" height ${btn.height} != ${firstHeight}`).toBe(firstHeight);
+  }
+});
+
+test('editor header buttons have identical height', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByText('Living Room Sensor')).toBeVisible({ timeout: 5000 });
+
+  // Open editor on first device
+  await page.locator('#tab-devices tbody tr').first().getByRole('button', { name: 'Edit' }).click();
+  await expect(page.locator('[class*="monaco"], [data-keybinding-context]')).toBeVisible({ timeout: 5000 });
+
+  const heights = await page.evaluate(() => {
+    const header = document.querySelector('.editor-header');
+    if (!header) return [];
+    return Array.from(header.querySelectorAll('button')).map(btn => ({
+      text: btn.textContent?.trim().slice(0, 25),
+      height: Math.round(btn.getBoundingClientRect().height * 10) / 10,
+    }));
+  });
+
+  expect(heights.length).toBeGreaterThanOrEqual(2);
+  const firstHeight = heights[0].height;
+  for (const btn of heights) {
+    expect(btn.height, `"${btn.text}" height ${btn.height} != ${firstHeight}`).toBe(firstHeight);
+  }
+});

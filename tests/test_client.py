@@ -411,6 +411,11 @@ def test_run_job_ota_retry_uses_upload_without_no_logs(tmp_path, monkeypatch):
     # construction logic runs.
     _add_fake_version(tmp_path, "2024.3.1")
 
+    # #13: run_job now uses a stable per-target build dir under
+    # _ESPHOME_VERSIONS_DIR. Point it at tmp_path so the test doesn't
+    # try to write to /esphome-versions/.
+    monkeypatch.setattr(client_module, "_ESPHOME_VERSIONS_DIR", str(tmp_path))
+
     commands: list[list[str]] = []
 
     def fake_run_subprocess(cmd, cwd, timeout, label, env=None, job_id=None):
@@ -486,3 +491,158 @@ def test_run_job_ota_retry_uses_upload_without_no_logs(tmp_path, monkeypatch):
     # The result submission records the OTA retry succeeded.
     assert submitted[-1][0] == "success"
     assert submitted[-1][1] == "success"
+
+
+# ---------------------------------------------------------------------------
+# #45 — Per-slot working dirs + shared per-target cache
+# ---------------------------------------------------------------------------
+
+
+def test_slot_and_cache_dir_helpers(tmp_path, monkeypatch):
+    """_slot_dir and _cache_dir compose the expected paths under the base."""
+    import client as client_module  # noqa: PLC0415
+    monkeypatch.setattr(client_module, "_ESPHOME_VERSIONS_DIR", str(tmp_path))
+    assert client_module._slot_dir(2, "kitchen") == str(tmp_path / "slots" / "2" / "kitchen")
+    assert client_module._cache_dir("kitchen") == str(tmp_path / "cache" / "kitchen")
+
+
+def test_copytree_replace_overwrites_existing(tmp_path):
+    """_copytree_replace wipes the destination tree before copying."""
+    import client as client_module  # noqa: PLC0415
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "new.txt").write_text("new")
+
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    (dst / "stale.txt").write_text("stale")
+
+    client_module._copytree_replace(str(src), str(dst))
+
+    # Old file is gone, new file is present
+    assert not (dst / "stale.txt").exists()
+    assert (dst / "new.txt").read_text() == "new"
+
+
+def test_copytree_replace_noop_when_src_missing(tmp_path):
+    """Missing source is a silent no-op (dst left intact)."""
+    import client as client_module  # noqa: PLC0415
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    (dst / "keep.txt").write_text("keep")
+    client_module._copytree_replace(str(tmp_path / "missing"), str(dst))
+    assert (dst / "keep.txt").read_text() == "keep"
+
+
+def test_sync_cache_into_slot_seeds_pio_on_first_compile(tmp_path, monkeypatch):
+    """Slot with no .pio/ pulls from the shared cache on sync-in."""
+    import client as client_module  # noqa: PLC0415
+    monkeypatch.setattr(client_module, "_ESPHOME_VERSIONS_DIR", str(tmp_path))
+
+    # Seed cache
+    cache_pio = tmp_path / "cache" / "dev" / ".pio" / "build"
+    cache_pio.mkdir(parents=True)
+    (cache_pio / "firmware.o").write_text("obj")
+
+    # Empty slot dir
+    slot_dir = tmp_path / "slots" / "1" / "dev"
+    slot_dir.mkdir(parents=True)
+
+    client_module._sync_cache_into_slot("dev", str(slot_dir))
+
+    # .pio/ is now populated in the slot dir
+    assert (slot_dir / ".pio" / "build" / "firmware.o").read_text() == "obj"
+
+
+def test_sync_cache_into_slot_skips_when_slot_already_has_pio(tmp_path, monkeypatch):
+    """If the slot already has its own .pio/, the sync-in is a no-op — the
+    slot's local cache is more relevant than the shared one."""
+    import client as client_module  # noqa: PLC0415
+    monkeypatch.setattr(client_module, "_ESPHOME_VERSIONS_DIR", str(tmp_path))
+
+    # Cache has one version
+    cache_pio = tmp_path / "cache" / "dev" / ".pio"
+    cache_pio.mkdir(parents=True)
+    (cache_pio / "shared.txt").write_text("cache")
+
+    # Slot already has its own version
+    slot_pio = tmp_path / "slots" / "1" / "dev" / ".pio"
+    slot_pio.mkdir(parents=True)
+    (slot_pio / "local.txt").write_text("slot")
+
+    client_module._sync_cache_into_slot("dev", str(slot_pio.parent))
+
+    # Slot kept its own state, didn't adopt shared cache
+    assert (slot_pio / "local.txt").exists()
+    assert not (slot_pio / "shared.txt").exists()
+
+
+def test_sync_slot_into_cache_promotes_to_shared(tmp_path, monkeypatch):
+    """After a successful compile, slot .pio/ is promoted to the shared cache."""
+    import client as client_module  # noqa: PLC0415
+    monkeypatch.setattr(client_module, "_ESPHOME_VERSIONS_DIR", str(tmp_path))
+
+    slot_pio = tmp_path / "slots" / "2" / "dev" / ".pio" / "build"
+    slot_pio.mkdir(parents=True)
+    (slot_pio / "firmware.bin").write_text("binary")
+
+    client_module._sync_slot_into_cache("dev", str(slot_pio.parent.parent))
+
+    cache_firmware = tmp_path / "cache" / "dev" / ".pio" / "build" / "firmware.bin"
+    assert cache_firmware.read_text() == "binary"
+
+
+def test_sync_slot_into_cache_replaces_old_cache(tmp_path, monkeypatch):
+    """Sync-out replaces the entire cache tree (stale files in cache removed)."""
+    import client as client_module  # noqa: PLC0415
+    monkeypatch.setattr(client_module, "_ESPHOME_VERSIONS_DIR", str(tmp_path))
+
+    # Old cache has a stale artifact
+    cache_build = tmp_path / "cache" / "dev" / ".pio" / "build"
+    cache_build.mkdir(parents=True)
+    (cache_build / "stale.o").write_text("stale")
+
+    # Slot has a fresh compile result
+    slot_build = tmp_path / "slots" / "1" / "dev" / ".pio" / "build"
+    slot_build.mkdir(parents=True)
+    (slot_build / "fresh.o").write_text("fresh")
+
+    client_module._sync_slot_into_cache("dev", str(slot_build.parent.parent))
+
+    # Stale gone, fresh present
+    assert not (cache_build / "stale.o").exists()
+    assert (cache_build / "fresh.o").read_text() == "fresh"
+
+
+def test_target_cache_lock_is_exclusive(tmp_path, monkeypatch):
+    """Two threads trying to acquire the same per-target lock are serialized."""
+    import client as client_module  # noqa: PLC0415
+    import threading as _threading
+    import time as _time
+    monkeypatch.setattr(client_module, "_ESPHOME_VERSIONS_DIR", str(tmp_path))
+
+    events: list[tuple[str, float]] = []
+    start = _threading.Event()
+
+    def worker(name: str, hold_for: float) -> None:
+        start.wait()
+        with client_module._target_cache_lock("dev"):
+            events.append((f"{name}-acquired", _time.monotonic()))
+            _time.sleep(hold_for)
+            events.append((f"{name}-released", _time.monotonic()))
+
+    t1 = _threading.Thread(target=worker, args=("a", 0.15))
+    t2 = _threading.Thread(target=worker, args=("b", 0.05))
+    t1.start()
+    t2.start()
+    start.set()
+    t1.join()
+    t2.join()
+
+    # Exactly 4 events, first-acquired then first-released then second-acquired then second-released
+    assert len(events) == 4
+    seq = [e[0].split("-")[1] for e in events]
+    assert seq == ["acquired", "released", "acquired", "released"], (
+        f"lock not exclusive, events: {events}"
+    )

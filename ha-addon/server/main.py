@@ -227,7 +227,7 @@ async def ha_entity_poller(app: web.Application) -> None:
     currently connected.
 
     Requires SUPERVISOR_TOKEN (injected automatically when hassio_api: true).
-    Stores results in app["ha_entity_status"]: dict[str, {configured, connected}]
+    Stores results in app["_rt"]["ha_entity_status"]: dict[str, {configured, connected}]
     keyed by normalised device name (hyphens replaced with underscores, lowercase).
     """
     import os  # noqa: PLC0415
@@ -305,14 +305,22 @@ async def ha_entity_poller(app: web.Application) -> None:
                         "Template API call failed", exc_info=True,
                     )
 
-                # 1b. Get MAC addresses for ESPHome devices via template API.
+                # 1b. Get MAC + device_id + entity_id for ESPHome devices via template API.
                 # ESPHome devices store MACs in device connections (not identifiers):
                 #   connections = [["mac", "50:02:91:3c:11:43"]]
+                # #35: we also grab the HA device_id so the UI can build a
+                # deep-link to /config/devices/device/<id>.
+                # #41: returns one row per entity so we can build
+                # entity_id→device_id AND name→device_id fallbacks for
+                # offline devices where the poller may not have a MAC.
                 ha_mac_set: set[str] = set()
+                ha_mac_to_device_id: dict[str, str] = {}
+                entity_to_device_id: dict[str, str] = {}
                 if esphome_entity_ids:
+                    # Query 1: MAC + device_id, deduped by device (small output)
                     try:
-                        tmpl = (
-                            "{%- set ns = namespace(macs=[], seen=[]) -%}"
+                        mac_tmpl = (
+                            "{%- set ns = namespace(pairs=[], seen=[]) -%}"
                             "{%- for eid in integration_entities('esphome') -%}"
                             "  {%- set did = device_id(eid) -%}"
                             "  {%- if did and did not in ns.seen -%}"
@@ -321,30 +329,66 @@ async def ha_entity_poller(app: web.Application) -> None:
                             "    {%- if conns -%}"
                             "      {%- for conn in conns -%}"
                             "        {%- if conn[0] == 'mac' -%}"
-                            "          {%- set ns.macs = ns.macs + [conn[1]] -%}"
+                            "          {%- set ns.pairs = ns.pairs + [[conn[1], did]] -%}"
                             "        {%- endif -%}"
                             "      {%- endfor -%}"
                             "    {%- endif -%}"
                             "  {%- endif -%}"
                             "{%- endfor -%}"
-                            "{{ ns.macs | unique | list | tojson }}"
+                            "{{ ns.pairs | tojson }}"
                         )
                         async with session.post(
                             "http://supervisor/core/api/template",
                             headers={**headers, "Content-Type": "application/json"},
-                            json={"template": tmpl},
+                            json={"template": mac_tmpl},
                             timeout=timeout,
                         ) as resp:
                             if resp.status == 200:
-                                raw_macs = await resp.text()
+                                raw = await resp.text()
                                 try:
-                                    parsed_macs = _json.loads(raw_macs)
-                                    if isinstance(parsed_macs, list):
-                                        ha_mac_set = {str(m).lower() for m in parsed_macs}
+                                    parsed = _json.loads(raw)
+                                    if isinstance(parsed, list):
+                                        for item in parsed:
+                                            if isinstance(item, list) and len(item) == 2:
+                                                mac_lc = str(item[0]).lower()
+                                                did_str = str(item[1])
+                                                ha_mac_set.add(mac_lc)
+                                                ha_mac_to_device_id[mac_lc] = did_str
                                 except (_json.JSONDecodeError, TypeError):
                                     pass
                     except Exception:
                         logger.debug("MAC template query failed", exc_info=True)
+
+                    # Query 2: entity_id → device_id mapping (for name-based fallback)
+                    try:
+                        eid_tmpl = (
+                            "{%- set ns = namespace(pairs=[]) -%}"
+                            "{%- for eid in integration_entities('esphome') -%}"
+                            "  {%- set did = device_id(eid) -%}"
+                            "  {%- if did -%}"
+                            "    {%- set ns.pairs = ns.pairs + [[eid, did]] -%}"
+                            "  {%- endif -%}"
+                            "{%- endfor -%}"
+                            "{{ ns.pairs | tojson }}"
+                        )
+                        async with session.post(
+                            "http://supervisor/core/api/template",
+                            headers={**headers, "Content-Type": "application/json"},
+                            json={"template": eid_tmpl},
+                            timeout=timeout,
+                        ) as resp:
+                            if resp.status == 200:
+                                raw = await resp.text()
+                                try:
+                                    parsed = _json.loads(raw)
+                                    if isinstance(parsed, list):
+                                        for item in parsed:
+                                            if isinstance(item, list) and len(item) == 2:
+                                                entity_to_device_id[str(item[0])] = str(item[1])
+                                except (_json.JSONDecodeError, TypeError):
+                                    pass
+                    except Exception:
+                        logger.debug("Entity→device_id template query failed", exc_info=True)
 
                 # 2. Fetch states for connectivity info
                 async with session.get(
@@ -380,22 +424,32 @@ async def ha_entity_poller(app: web.Application) -> None:
             # ESPHome entities follow the pattern: <domain>.<device_name>_<entity_suffix>
             # We collect all unique prefixes by stripping the domain and finding the
             # longest prefix that matches a connectivity key, or the full local part.
+            # #41: also build a norm_name → device_id map so offline devices
+            # (which may not have a MAC in the poller) can still get a deep link.
             esphome_device_names: set[str] = set()
+            ha_name_to_device_id: dict[str, str] = {}
             for eid in esphome_entity_ids:
                 if "." not in eid:
                     continue
                 local = eid.split(".", 1)[1]  # e.g. "nespresso_machine_temperature"
                 # Check if any connectivity key is a prefix of this entity
+                matched_name: str | None = None
                 for conn_name in connectivity:
                     if local == conn_name or local.startswith(conn_name + "_"):
                         esphome_device_names.add(conn_name)
+                        matched_name = conn_name
                         break
-                else:
+                if matched_name is None:
                     # No connectivity match — try to derive device name from entity ID.
                     # The _status entity would be the definitive prefix, but it may not
                     # exist. Store the full local as a candidate; _ha_status_for_target
                     # will match by prefix.
                     esphome_device_names.add(local)
+                    matched_name = local
+                # Record device_id keyed by the name prefix we'll use for matching.
+                did = entity_to_device_id.get(eid)
+                if did and matched_name not in ha_name_to_device_id:
+                    ha_name_to_device_id[matched_name] = did
 
             # All connectivity-matched devices get configured=True + connected state
             for name in connectivity:
@@ -406,9 +460,11 @@ async def ha_entity_poller(app: web.Application) -> None:
                 if name not in ha_status:
                     ha_status[name] = {"configured": True, "connected": None}
 
-            app["ha_entity_status"].clear()
-            app["ha_entity_status"].update(ha_status)
-            app["ha_mac_set"] = ha_mac_set
+            app["_rt"]["ha_entity_status"].clear()
+            app["_rt"]["ha_entity_status"].update(ha_status)
+            app["_rt"]["ha_mac_set"] = ha_mac_set
+            app["_rt"]["ha_mac_to_device_id"] = ha_mac_to_device_id
+            app["_rt"]["ha_name_to_device_id"] = ha_name_to_device_id
 
             # A full successful poll resets the suppression state so the next
             # transient failure gets its warning re-promoted.
@@ -465,6 +521,189 @@ async def config_scanner(app: web.Application) -> None:
             logger.exception("Error in config scanner")
 
 
+async def _legacy_schedule_checker_removed() -> None:
+    """Removed in #87 — replaced by APScheduler in scheduler.py."""
+
+
+async def schedule_checker(app: web.Application) -> None:
+    """LEGACY — kept as a no-op stub so tests that import it don't break.
+
+    The real scheduler is now APScheduler in scheduler.py, started via
+    scheduler.start(app) in on_startup.
+    """
+    return
+
+
+async def _old_schedule_checker(app: web.Application) -> None:
+    """Background task: check per-device cron schedules (SU.7 hardened).
+
+    SU.7 improvements over the original fixed-60s-tick approach:
+    - Next-fire-driven sleep: computes the earliest next-fire across all
+      schedules and sleeps until then (capped at 60s so config changes
+      land promptly). Eliminates up-to-60s latency.
+    - Misfire grace window (300s default): if a schedule was missed by more
+      than the grace window (e.g. server was down for hours), it's skipped
+      with a log warning rather than fired late.
+    - History ring buffer: records the last 50 fire events per target in
+      ``schedule_history`` for the SU.6 history view.
+    """
+    import uuid as _uuid  # noqa: PLC0415
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    import schedule_history  # noqa: PLC0415
+    from scanner import scan_configs, read_device_meta, write_device_meta, get_esphome_version  # noqa: PLC0415
+
+    try:
+        from croniter import croniter  # type: ignore[import-untyped]  # noqa: PLC0415
+    except ImportError:
+        logger.warning("croniter not installed — per-device scheduling disabled")
+        return
+
+    cfg: AppConfig = app["config"]
+    queue: JobQueue = app["queue"]
+    misfire_grace = getattr(cfg, "misfire_grace_seconds", 300)
+
+    app["_rt"]["schedule_checker_started_at"] = datetime.now(timezone.utc).isoformat()
+    app["_rt"]["schedule_checker_tick_count"] = 0
+    app["_rt"]["schedule_checker_last_tick"] = None
+    app["_rt"]["schedule_checker_last_error"] = None
+
+    def _get_ota_address(target: str) -> str | None:
+        device_poller = app.get("device_poller")
+        if not device_poller:
+            return None
+        for dev in device_poller.get_devices():
+            if dev.compile_target == target and dev.ip_address:
+                return device_poller._address_overrides.get(dev.name) or dev.ip_address
+        return None
+
+    next_sleep = 5.0  # first tick after 5s
+    logger.info("schedule_checker started (config_dir=%s)", cfg.config_dir)
+
+    while True:
+        await asyncio.sleep(next_sleep)
+        next_fires: list[datetime] = []
+        try:
+            targets = scan_configs(cfg.config_dir)
+            now = datetime.now(timezone.utc)
+            app["_rt"]["schedule_checker_tick_count"] += 1
+            app["_rt"]["schedule_checker_last_tick"] = now.isoformat()
+
+            for target in targets:
+                try:
+                    meta = read_device_meta(cfg.config_dir, target)
+
+                    # --- One-time schedule ---
+                    once_str = meta.get("schedule_once")
+                    if once_str:
+                        try:
+                            once_dt = datetime.fromisoformat(once_str)
+                            if once_dt.tzinfo is None:
+                                once_dt = once_dt.replace(tzinfo=timezone.utc)
+                            if once_dt > now:
+                                next_fires.append(once_dt)
+                            elif (now - once_dt).total_seconds() <= misfire_grace:
+                                version = meta.get("pin_version") or get_esphome_version()
+                                run_id = str(_uuid.uuid4())
+                                job = await queue.enqueue(
+                                    target=target,
+                                    esphome_version=version,
+                                    run_id=run_id,
+                                    timeout_seconds=cfg.job_timeout,
+                                    ota_address=_get_ota_address(target),
+                                )
+                                if job is not None:
+                                    job.scheduled = True
+                                    schedule_history.record(target, now, job.id)
+                                    logger.info("One-time schedule fired for %s (at=%s): job %s", target, once_str, job.id)
+                                fresh_meta = read_device_meta(cfg.config_dir, target)
+                                fresh_meta.pop("schedule_once", None)
+                                write_device_meta(cfg.config_dir, target, fresh_meta)
+                            else:
+                                logger.warning(
+                                    "One-time schedule for %s missed by %ds (grace=%ds) — clearing",
+                                    target, int((now - once_dt).total_seconds()), misfire_grace,
+                                )
+                                fresh_meta = read_device_meta(cfg.config_dir, target)
+                                fresh_meta.pop("schedule_once", None)
+                                write_device_meta(cfg.config_dir, target, fresh_meta)
+                            continue
+                        except Exception:
+                            logger.exception("One-time schedule parse failed for %s", target)
+
+                    # --- Recurring schedule ---
+                    cron_expr = meta.get("schedule")
+                    enabled = meta.get("schedule_enabled", False)
+                    if not cron_expr or not enabled:
+                        continue
+
+                    last_run_str = meta.get("schedule_last_run")
+                    if last_run_str:
+                        last_run = datetime.fromisoformat(last_run_str)
+                        if last_run.tzinfo is None:
+                            last_run = last_run.replace(tzinfo=timezone.utc)
+                    else:
+                        last_run = now
+
+                    cron = croniter(cron_expr, last_run)
+                    next_run = cron.get_next(datetime)
+                    if next_run.tzinfo is None:
+                        next_run = next_run.replace(tzinfo=timezone.utc)
+
+                    if next_run > now:
+                        next_fires.append(next_run)
+                        continue
+
+                    # SU.7: misfire grace — skip if missed by more than grace
+                    missed_by = (now - next_run).total_seconds()
+                    if missed_by > misfire_grace:
+                        logger.warning(
+                            "Schedule for %s missed by %ds (grace=%ds) — skipping",
+                            target, int(missed_by), misfire_grace,
+                        )
+                        fresh_meta = read_device_meta(cfg.config_dir, target)
+                        fresh_meta["schedule_last_run"] = now.isoformat()
+                        write_device_meta(cfg.config_dir, target, fresh_meta)
+                        continue
+
+                    version = meta.get("pin_version") or get_esphome_version()
+                    run_id = str(_uuid.uuid4())
+                    job = await queue.enqueue(
+                        target=target,
+                        esphome_version=version,
+                        run_id=run_id,
+                        timeout_seconds=cfg.job_timeout,
+                        ota_address=_get_ota_address(target),
+                    )
+                    if job is not None:
+                        job.scheduled = True
+                        schedule_history.record(target, now, job.id)
+                        logger.info(
+                            "Schedule fired for %s (cron=%s): job %s (version=%s)",
+                            target, cron_expr, job.id, version,
+                        )
+
+                    fresh_meta = read_device_meta(cfg.config_dir, target)
+                    fresh_meta["schedule_last_run"] = now.isoformat()
+                    write_device_meta(cfg.config_dir, target, fresh_meta)
+
+                except Exception:
+                    logger.exception("Schedule check failed for %s", target)
+
+        except Exception as e:
+            app["_rt"]["schedule_checker_last_error"] = f"{type(e).__name__}: {e}"
+            logger.exception("Error in schedule checker")
+
+        # SU.7: next-fire-driven sleep — sleep until the earliest upcoming
+        # fire time, capped at 60s so config changes land promptly.
+        if next_fires:
+            now_after = datetime.now(timezone.utc)
+            earliest = min(next_fires)
+            next_sleep = max(1.0, min(60.0, (earliest - now_after).total_seconds()))
+        else:
+            next_sleep = 60.0
+
+
 # ---------------------------------------------------------------------------
 # ESPHome version detection and PyPI version list
 # ---------------------------------------------------------------------------
@@ -500,50 +739,11 @@ async def _fetch_ha_esphome_version(session: aiohttp.ClientSession) -> Optional[
     #    installs without requiring an elevated role.
     auth = {"Authorization": f"Bearer {token}"}
 
-    # --- Tier 1: listing
-    listing_failed = False
-    try:
-        async with session.get(
-            "http://supervisor/addons",
-            headers=auth,
-            timeout=aiohttp.ClientTimeout(total=5),
-        ) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                addons: list[dict] = data.get("data", {}).get("addons", []) or []
-
-                def _is_esphome_addon(a: dict) -> bool:
-                    slug = str(a.get("slug", "")).lower()
-                    name = str(a.get("name", "")).lower()
-                    if slug in ("core_esphome", "local_esphome") or slug.endswith("_esphome"):
-                        return True
-                    return name == "esphome" or name.startswith("esphome ")
-
-                matches = [a for a in addons if _is_esphome_addon(a)]
-                for addon in matches:
-                    version = addon.get("version")
-                    slug = addon.get("slug", "")
-                    if version:
-                        logger.debug(
-                            "Detected HA ESPHome add-on version %s (slug: %s, via /addons listing)",
-                            version, slug,
-                        )
-                        return str(version)
-                # Listing succeeded but no match — try the fallback anyway in
-                # case the name heuristic missed it.
-                listing_failed = not matches
-            else:
-                # 403 is the common case (we don't have hassio_role: manager).
-                # Drop to the per-slug fallback silently.
-                listing_failed = True
-    except Exception as exc:
-        logger.debug("Supervisor /addons listing failed (%s); using slug fallback", exc)
-        listing_failed = True
-
-    if not listing_failed:
-        # Listing worked but the matched add-ons had no ``version`` field —
-        # fall through to the per-slug probe to fill it in.
-        pass
+    # #86: skip the tier-1 /addons listing entirely. It requires
+    # hassio_role: manager which we don't have (hassio_api: true only grants
+    # per-slug access). The 403 response was spamming the Supervisor log
+    # with "Invalid token for access /addons" every 30s. The per-slug
+    # fallback below covers all real installs.
 
     # --- Tier 2: per-slug probe over known patterns.
     candidate_slugs = (
@@ -577,8 +777,12 @@ async def _fetch_ha_esphome_version(session: aiohttp.ClientSession) -> Optional[
     return None
 
 
-async def _fetch_pypi_versions(session: aiohttp.ClientSession, limit: int = 50) -> list[str]:
-    """Return recent ESPHome versions from PyPI, newest first."""
+async def _fetch_pypi_versions(session: aiohttp.ClientSession) -> list[str]:
+    """Return ALL ESPHome versions from PyPI, newest first.
+
+    #69: no longer capped at 50 — returns every release so users can
+    access historic versions. The UI filters betas via a toggle (#64).
+    """
     try:
         async with session.get(
             "https://pypi.org/pypi/esphome/json",
@@ -588,11 +792,34 @@ async def _fetch_pypi_versions(session: aiohttp.ClientSession, limit: int = 50) 
                 data = await resp.json()
                 releases = list(data.get("releases", {}).keys())
 
-                def _version_key(v: str) -> list[int]:
-                    return [int(x) for x in v.split(".") if x.isdigit()]
+                def _version_key(v: str) -> tuple:
+                    # PEP440-ish sort: split on dots, parse numeric parts,
+                    # treat beta/alpha/rc as less-than the stable release.
+                    parts: list[object] = []
+                    for seg in v.split("."):
+                        if seg.isdigit():
+                            parts.append((0, int(seg)))
+                        else:
+                            # e.g. "0b1" → numeric prefix 0, beta suffix "b1"
+                            import re  # noqa: PLC0415
+                            m = re.match(r"(\d+)(.*)", seg)
+                            if m:
+                                parts.append((0, int(m.group(1))))
+                                suffix = m.group(2).lower()
+                                # a < b < rc < (empty=stable)
+                                order = {"a": -3, "b": -2, "rc": -1, "dev": -4}
+                                for tag, rank in order.items():
+                                    if suffix.startswith(tag):
+                                        parts.append((rank, 0))
+                                        break
+                                else:
+                                    parts.append((0, 0))
+                            else:
+                                parts.append((0, seg))
+                    return tuple(parts)
 
                 releases.sort(key=_version_key, reverse=True)
-                return releases[:limit]
+                return releases
     except Exception:
         logger.debug("Failed to fetch PyPI esphome versions", exc_info=True)
     return []
@@ -619,17 +846,15 @@ async def pypi_version_refresher(app: web.Application) -> None:
             async with aiohttp.ClientSession() as session:
                 # Re-check HA ESPHome add-on version
                 new_detected = await _fetch_ha_esphome_version(session)
-                old_detected = app.get("esphome_detected_version")
+                old_detected = app["_rt"].get("esphome_detected_version")
                 if new_detected and new_detected != old_detected:
-                    logger.info(
-                        "ESPHome add-on version changed: %s → %s",
-                        old_detected, new_detected,
-                    )
-                    app["esphome_detected_version"] = new_detected
-                    # Auto-update selected version to match
+                    app["_rt"]["esphome_detected_version"] = new_detected
                     from scanner import set_esphome_version  # noqa: PLC0415
                     set_esphome_version(new_detected)
-                    logger.info("Auto-selected ESPHome %s (matches updated add-on)", new_detected)
+                    if old_detected is None:
+                        logger.info("ESPHome add-on version detected: %s", new_detected)
+                    else:
+                        logger.info("ESPHome add-on version changed: %s → %s", old_detected, new_detected)
 
                 # Refresh PyPI list periodically
                 pypi_countdown -= check_interval
@@ -637,9 +862,13 @@ async def pypi_version_refresher(app: web.Application) -> None:
                     pypi_countdown = _PYPI_CACHE_TTL
                     versions = await _fetch_pypi_versions(session)
                     if versions:
-                        app["esphome_available_versions"] = versions
-                        app["esphome_versions_fetched_at"] = time.monotonic()
-                        logger.info("Refreshed PyPI ESPHome version list: %d versions", len(versions))
+                        old_count = len(app["_rt"]["esphome_available_versions"])
+                        app["_rt"]["esphome_available_versions"] = versions
+                        app["_rt"]["esphome_versions_fetched_at"] = time.monotonic()
+                        if old_count == 0 or len(versions) != old_count:
+                            logger.info("Refreshed PyPI ESPHome version list: %d versions", len(versions))
+                        else:
+                            logger.debug("Refreshed PyPI ESPHome version list: %d versions (unchanged)", len(versions))
         except Exception:
             logger.exception("Error in version refresher")
 
@@ -709,14 +938,24 @@ def create_app() -> web.Application:
         if assets_dir.is_dir():
             app.router.add_static("/assets/", path=str(assets_dir), name="assets")
 
-    # ESPHome version state — populated during startup
-    app["esphome_detected_version"] = None   # version from HA Supervisor (or None)
-    app["esphome_available_versions"] = []   # list of versions from PyPI
-    app["esphome_versions_fetched_at"] = 0.0
-
-    # HA entity status — populated by ha_entity_poller background task
-    # dict[str, {"configured": bool, "connected": bool | None}]
-    app["ha_entity_status"] = {}
+    # Mutable runtime state dict — set ONCE before app.start() so background
+    # tasks can update its contents without triggering aiohttp's
+    # DeprecationWarning ("Changing state of started or joined application").
+    # All code that previously used app["key"] = value for these dynamic keys
+    # should use app["_rt"]["key"] = value instead.
+    app["_rt"] = {
+        "esphome_detected_version": None,
+        "esphome_available_versions": [],
+        "esphome_versions_fetched_at": 0.0,
+        "ha_entity_status": {},
+        "ha_mac_set": set(),
+        "ha_mac_to_device_id": {},
+        "ha_name_to_device_id": {},
+        "schedule_checker_started_at": None,
+        "schedule_checker_tick_count": 0,
+        "schedule_checker_last_tick": None,
+        "schedule_checker_last_error": None,
+    }
 
     # Startup/shutdown hooks
     async def on_startup(app: web.Application) -> None:
@@ -754,6 +993,10 @@ def create_app() -> web.Application:
         app["config_scanner_task"] = asyncio.create_task(config_scanner(app))
         app["pypi_version_refresher_task"] = asyncio.create_task(pypi_version_refresher(app))
         app["ha_entity_poller_task"] = asyncio.create_task(ha_entity_poller(app))
+
+        # #87: APScheduler replaces the DIY schedule_checker
+        import scheduler as scheduler_module  # noqa: PLC0415
+        scheduler_module.start(app)
 
         # Start local worker if client code is bundled
         local_worker_script = Path("/app/client/client.py")
@@ -805,6 +1048,10 @@ def create_app() -> web.Application:
                     await task
                 except asyncio.CancelledError:
                     pass
+
+        # #87: stop APScheduler
+        import scheduler as scheduler_module  # noqa: PLC0415
+        scheduler_module.stop()
 
         await device_poller.stop()
 

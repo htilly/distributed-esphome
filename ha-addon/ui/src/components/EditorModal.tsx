@@ -93,6 +93,11 @@ function findParentComponent(
 interface Props {
   target: string | null;
   onClose: () => void;
+  /** #42: called right before onClose when the editor closes via a successful
+   *  save (Save or Save & Upgrade). Parent uses this to distinguish a
+   *  saved-close from a cancel/dismiss-close — cancelling out of a newly
+   *  created device with no save should clean up the leftover file. */
+  onSaved?: (target: string) => void;
   onToast: (msg: string, type?: ToastType) => void;
   onValidate?: (target: string) => Promise<{ success: boolean; output: string } | null>;
   onCompile?: (target: string) => void;
@@ -228,7 +233,7 @@ let _validationTimer: ReturnType<typeof setTimeout> | null = null;
 // Track dirty-line decorations (module-level so the callback closure can access it)
 let _dirtyDecorationIds: string[] = [];
 
-export function EditorModal({ target, onClose, onToast, onValidate, onCompile, onRename: _onRename, monacoTheme = 'vs-dark', esphomeVersion }: Props) {
+export function EditorModal({ target, onClose, onSaved, onToast, onValidate, onCompile, onRename: _onRename, monacoTheme = 'vs-dark', esphomeVersion }: Props) {
   void _onRename; // kept in Props interface for API compatibility
   const isOpen = target !== null;
   const [content, setContent] = useState('');
@@ -458,10 +463,12 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, o
     if (!editorRef.current || !target) return;
     const value = editorRef.current.getValue();
     try {
-      await saveTargetContent(target, value);
+      const { renamedTo } = await saveTargetContent(target, value);
+      const finalTarget = renamedTo ?? target;
       savedContentRef.current = value;
       if (editorRef.current) updateDirtyDecorations(editorRef.current).catch(() => {});
-      onToast('Saved ' + target, 'success');
+      onToast('Saved ' + finalTarget, 'success');
+      onSaved?.(target);
       onClose();
     } catch (err) {
       onToast('Save failed: ' + (err as Error).message, 'error');
@@ -472,10 +479,12 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, o
     if (!editorRef.current || !target) return;
     const value = editorRef.current.getValue();
     try {
-      await saveTargetContent(target, value);
+      const { renamedTo } = await saveTargetContent(target, value);
+      const finalTarget = renamedTo ?? target;
       savedContentRef.current = value;
-      onToast('Saved ' + target, 'success');
-      onCompile?.(target);
+      onToast('Saved ' + finalTarget, 'success');
+      onSaved?.(target);
+      onCompile?.(finalTarget);
       onClose();
     } catch (err) {
       onToast('Save failed: ' + (err as Error).message, 'error');
@@ -493,7 +502,7 @@ export function EditorModal({ target, onClose, onToast, onValidate, onCompile, o
     }}>
       <DialogContent className="dialog-xl" style={{ background: monacoTheme === 'vs' ? '#ffffff' : '#1e1e1e', border: monacoTheme === 'vs' ? '1px solid var(--border)' : '1px solid #3c3c3c' }}>
         <div className="editor-header">
-          <h3>{target || ''}</h3>
+          <h3>{(target || '').replace(/^\.pending\./, '')}</h3>
           <Button size="sm" onClick={handleSave}>Save</Button>
           {onCompile && target && target !== 'secrets.yaml' && (
             <Button

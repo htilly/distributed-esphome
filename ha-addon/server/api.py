@@ -208,8 +208,11 @@ async def _deregister_handler(request: web.Request) -> web.Response:
     assert msg is not None
 
     registry = request.app["registry"]
+    # #94: capture hostname before remove() drops it from the registry.
+    worker = registry.get(msg.client_id)
+    hostname = worker.hostname if worker else "?"
     if registry.remove(msg.client_id):
-        logger.info("Worker %s deregistered (clean shutdown)", msg.client_id)
+        logger.info("Worker %s [%s] deregistered (clean shutdown)", hostname, msg.client_id)
         return web.json_response(OkResponse().model_dump())
     return _protocol_error("unknown_client_id", status=404)
 

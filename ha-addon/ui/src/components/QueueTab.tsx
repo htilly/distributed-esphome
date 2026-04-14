@@ -31,6 +31,7 @@ interface Props {
   onRetryAllFailed: () => void;
   onClearSucceeded: () => void;
   onClearFinished: () => void;
+  onClearAll: () => void;
   onOpenLog: (jobId: string) => void;
   onEdit: (target: string) => void;
 }
@@ -40,7 +41,8 @@ const STATE_ORDER: Record<string, number> = {
   pending: 1,
   timed_out: 2,
   failed: 3,
-  success: 4,
+  cancelled: 4,
+  success: 5,
 };
 
 // Custom sorting function: sort by STATE_ORDER, break ties by created_at descending.
@@ -84,6 +86,7 @@ export function QueueTab({
   onRetryAllFailed,
   onClearSucceeded,
   onClearFinished,
+  onClearAll,
   onOpenLog,
   onEdit,
 }: Props) {
@@ -204,6 +207,15 @@ export function QueueTab({
         // pinned row regardless of state, so the user can audit history.
         return (
           <span style={{ fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            {job.scheduled && (
+              <span
+                title={job.schedule_kind === 'once' ? 'Triggered by one-time schedule' : 'Triggered by recurring schedule'}
+                aria-label={job.schedule_kind === 'once' ? 'one-time scheduled run' : 'recurring scheduled run'}
+                style={{ color: 'var(--accent)', fontSize: 11, lineHeight: 1 }}
+              >
+                {job.schedule_kind === 'once' ? '📅' : '🕐'}
+              </span>
+            )}
             {job.pinned_client_id && (
               <span
                 title={
@@ -234,11 +246,32 @@ export function QueueTab({
     columnHelper.accessor(row => row.esphome_version || '', {
       id: 'esphome_version',
       header: ({ column }) => <SortHeader label="Version" column={column} />,
-      cell: ({ row: { original: job } }) => (
-        <span style={{ fontSize: 12, fontFamily: 'monospace' }}>
-          {job.esphome_version || <span style={{ color: 'var(--text-muted)' }}>—</span>}
-        </span>
-      ),
+      cell: ({ row: { original: job } }) => {
+        const target = targets.find(t => t.target === job.target);
+        const isPinned = target?.pinned_version && target.pinned_version === job.esphome_version;
+        return (
+          <span style={{ fontSize: 12 }}>
+            {job.esphome_version || <span style={{ color: 'var(--text-muted)' }}>—</span>}
+            {isPinned && <span title={`Pinned to ${target.pinned_version}`} style={{ marginLeft: 4, fontSize: 10 }}>📌</span>}
+          </span>
+        );
+      },
+      sortingFn: 'alphanumeric',
+    }),
+    // #21/#92: triggered-by column — recurring schedule, one-time, or user.
+    columnHelper.accessor(row => row.scheduled ? (row.schedule_kind ?? 'schedule') : 'user', {
+      id: 'triggered_by',
+      header: ({ column }) => <SortHeader label="Triggered" column={column} />,
+      cell: ({ row: { original: job } }) => {
+        if (!job.scheduled) {
+          return <span style={{ fontSize: 12 }} title="Triggered by user action">👤 User</span>;
+        }
+        if (job.schedule_kind === 'once') {
+          return <span style={{ fontSize: 12 }} title="Triggered by one-time schedule">📅 One-time</span>;
+        }
+        // Default for scheduled (covers 'recurring' and legacy nulls).
+        return <span style={{ fontSize: 12 }} title="Triggered by recurring cron schedule">🕐 Recurring</span>;
+      },
       sortingFn: 'alphanumeric',
     }),
     columnHelper.accessor(row => new Date(row.created_at), {
@@ -370,8 +403,8 @@ export function QueueTab({
           <div className="actions">
             {/* Retry dropdown */}
             <DropdownMenu>
-              <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg bg-[#78350f] px-2.5 py-1 text-xs font-medium text-[#fcd34d] hover:bg-[#92400e] cursor-pointer">
-                Retry &#9662;
+              <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg border border-transparent bg-[#78350f] px-2.5 h-7 text-[0.8rem] font-medium text-[#fcd34d] hover:bg-[#92400e] cursor-pointer">
+                Retry <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 <DropdownMenuGroup>
@@ -391,8 +424,8 @@ export function QueueTab({
 
             {/* Clear dropdown */}
             <DropdownMenu>
-              <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface2)] px-2.5 py-1 text-xs font-medium text-[var(--text)] hover:bg-[var(--border)] cursor-pointer">
-                Clear &#9662;
+              <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg border border-border bg-background px-2.5 h-7 text-[0.8rem] font-medium text-foreground hover:bg-muted cursor-pointer">
+                Clear <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 <DropdownMenuGroup>
@@ -401,6 +434,10 @@ export function QueueTab({
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={onClearFinished} disabled={!hasFinishedJobs}>
                     Clear All Finished
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={onClearAll} disabled={queue.length === 0}>
+                    Clear Entire Queue
                   </DropdownMenuItem>
                 </DropdownMenuGroup>
               </DropdownMenuContent>

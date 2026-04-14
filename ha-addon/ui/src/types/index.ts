@@ -43,6 +43,12 @@ export interface Target {
   ha_configured?: boolean;
   ha_connected?: boolean | null;
   /**
+   * HA device registry ID — present when we matched the device to HA by MAC.
+   * Used by the UI to deep-link the HA column to /config/devices/device/<id>.
+   * (#35)
+   */
+  ha_device_id?: string | null;
+  /**
    * Primary network connectivity block (#10). Mirrors ESPHome's own
    * resolver precedence: wifi → ethernet → openthread. Null when none of
    * the three blocks is present in the resolved config.
@@ -61,6 +67,22 @@ export interface Target {
    * is treated as a Matter signal too).
    */
   network_matter?: boolean;
+  /** Per-device pinned ESPHome version from YAML metadata comment. */
+  pinned_version?: string | null;
+  /** Cron schedule expression (5-field). */
+  schedule?: string | null;
+  /** Whether the schedule is active. */
+  schedule_enabled?: boolean;
+  /** ISO datetime of last scheduled run. */
+  schedule_last_run?: string | null;
+  /** ISO datetime for a one-time scheduled upgrade. Auto-cleared after firing. */
+  schedule_once?: string | null;
+  /** IANA tz name (e.g. "America/Los_Angeles") that the cron expression is
+   * interpreted in. Absent for legacy schedules — the scheduler treats those
+   * as UTC. New schedules from the UI always carry the browser tz. */
+  schedule_tz?: string | null;
+  /** Comma-separated tags from YAML metadata comment. */
+  tags?: string | null;
 }
 
 export interface Device {
@@ -94,6 +116,8 @@ export interface Device {
    * Only meaningful when ha_configured is true.
    */
   ha_connected?: boolean | null;
+  /** HA device registry ID for deep-linking. See Target.ha_device_id (#35). */
+  ha_device_id?: string | null;
 }
 
 export interface SystemInfo {
@@ -108,6 +132,10 @@ export interface SystemInfo {
   disk_total?: string;
   disk_free?: string;
   disk_used_pct?: number;
+  /** Number of target build directories with cached .esphome/ artifacts. */
+  cached_targets?: number;
+  /** Total size of the build cache in MB. */
+  cache_size_mb?: number;
 }
 
 /**
@@ -152,6 +180,10 @@ export interface Job {
    * a "Queued" badge so the user can see "next compile is waiting".
    */
   is_followup?: boolean;
+  /** True when this job was triggered by the cron scheduler, not a manual action. */
+  scheduled?: boolean;
+  /** When `scheduled`, distinguishes recurring (cron) from one-time fires (#92). */
+  schedule_kind?: 'recurring' | 'once' | null;
   duration_seconds?: number | null;
   assigned_at?: string;
   created_at: string;

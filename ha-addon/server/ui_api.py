@@ -14,7 +14,16 @@ from app_config import AppConfig
 from helpers import safe_resolve, json_error
 from device_poller import Device
 from job_queue import JobState
-from scanner import scan_configs, get_esphome_version, set_esphome_version, get_device_metadata
+from scanner import (
+    create_stub_yaml,
+    duplicate_device,
+    get_device_metadata,
+    get_esphome_version,
+    read_device_meta,
+    scan_configs,
+    set_esphome_version,
+    write_device_meta,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +36,30 @@ _esphome_components_cache: list[str] | None = None
 
 def _cfg(request: web.Request) -> AppConfig:
     return request.app["config"]
+
+
+@routes.get("/ui/api/_debug/scheduler")
+async def debug_scheduler(request: web.Request) -> web.Response:
+    """Diagnostic endpoint — reports on the APScheduler state (#87)."""
+    import scheduler as scheduler_module  # noqa: PLC0415
+    return web.json_response({
+        "engine": "apscheduler",
+        "jobs": scheduler_module.get_jobs_info(),
+    })
+
+
+@routes.get("/ui/api/schedule-history")
+async def get_schedule_history(request: web.Request) -> web.Response:
+    """Return the schedule fire history for all targets (#81)."""
+    import schedule_history  # noqa: PLC0415
+    all_history = schedule_history.get_all()
+    result: dict[str, list[dict]] = {}
+    for target, entries in all_history.items():
+        result[target] = [
+            {"fired_at": fired_at.isoformat(), "job_id": job_id, "outcome": outcome}
+            for fired_at, job_id, outcome in entries
+        ]
+    return web.json_response(result)
 
 
 @routes.get("/ui/api/esphome-schema")
@@ -129,27 +162,37 @@ def _ha_status_for_target(
     meta: dict,
     device_mac: str | None = None,
     ha_mac_set: set[str] | None = None,
-) -> tuple[bool, bool | None]:
-    """Return (ha_configured, ha_connected) for a given compile target.
+    ha_mac_to_device_id: dict[str, str] | None = None,
+    ha_name_to_device_id: dict[str, str] | None = None,
+) -> tuple[bool, bool | None, str | None]:
+    """Return (ha_configured, ha_connected, ha_device_id) for a compile target.
 
     Matching priority:
     1. MAC address (most reliable — HA identifies ESPHome devices by MAC)
     2. Direct name lookup (friendly_name, esphome.name, filename)
     3. Prefix match against entity locals
 
-    Returns (False, None) when no match is found.
+    Returns (False, None, None) when no match is found.
+
+    #35: ha_device_id is resolved via MAC match (most reliable).
+    #41: falls back to the ha_name_to_device_id map (built from HA entity IDs)
+    when no MAC is available — e.g. offline devices that the local mDNS/API
+    poller can't reach right now.
     """
     # 1. MAC address match (authoritative — doesn't depend on naming)
     #    HA connections store MACs as "aa:bb:cc:dd:ee:ff" (lowercase with colons).
     #    Device poller MACs from aioesphomeapi are "AA:BB:CC:DD:EE:FF" (uppercase).
+    ha_device_id: str | None = None
     if device_mac and ha_mac_set:
         mac_lower = device_mac.lower()
         mac_confirmed = mac_lower in ha_mac_set
+        if mac_confirmed and ha_mac_to_device_id:
+            ha_device_id = ha_mac_to_device_id.get(mac_lower)
     else:
         mac_confirmed = False
 
     if not ha_entity_status and not mac_confirmed:
-        return False, None
+        return False, None, ha_device_id
 
     # 2. Name matching for connectivity state
     candidates: list[str] = []
@@ -161,18 +204,28 @@ def _ha_status_for_target(
         candidates.append(_normalize_for_ha(raw_name))
     candidates.append(_normalize_for_ha(target.replace(".yaml", "")))
 
+    # Helper: fall back to name-based device_id lookup when we don't have
+    # one from the MAC path. Offline devices commonly land here because the
+    # local poller has no MAC for them right now.
+    def _resolve_id(match_name: str) -> str | None:
+        if ha_device_id:
+            return ha_device_id
+        if ha_name_to_device_id:
+            return ha_name_to_device_id.get(match_name)
+        return None
+
     # Direct lookup
     for norm_name in candidates:
         entry = ha_entity_status.get(norm_name)
         if entry:
-            return True, entry.get("connected")
+            return True, entry.get("connected"), _resolve_id(norm_name)
 
     # Prefix match
     for norm_name in candidates:
         prefix = norm_name + "_"
         for key, entry in ha_entity_status.items():
             if key.startswith(prefix) or key == norm_name:
-                return True, entry.get("connected")
+                return True, entry.get("connected"), _resolve_id(key)
 
     # 3. MAC fragment match — some devices register with HA using internal names
     #    that include MAC fragments (e.g. screek_humen_sensor_1u_c76926 contains
@@ -182,13 +235,13 @@ def _ha_status_for_target(
         if mac_suffix and len(mac_suffix) == 6:
             for key, entry in ha_entity_status.items():
                 if mac_suffix in key:
-                    return True, entry.get("connected")
+                    return True, entry.get("connected"), _resolve_id(key)
 
     # 4. If MAC confirmed via HA device identifiers but name didn't match
     if mac_confirmed:
-        return True, None
+        return True, None, ha_device_id
 
-    return False, None
+    return False, None, ha_device_id
 
 
 @routes.get("/ui/api/targets")
@@ -197,8 +250,10 @@ async def get_targets(request: web.Request) -> web.Response:
     cfg = _cfg(request)
     device_poller = request.app.get("device_poller")
     server_version = get_esphome_version()
-    ha_entity_status: dict[str, dict] = request.app.get("ha_entity_status", {})
-    ha_mac_set: set[str] = request.app.get("ha_mac_set", set())
+    ha_entity_status: dict[str, dict] = request.app["_rt"].get("ha_entity_status", {})
+    ha_mac_set: set[str] = request.app["_rt"].get("ha_mac_set", set())
+    ha_mac_to_device_id: dict[str, str] = request.app["_rt"].get("ha_mac_to_device_id", {})
+    ha_name_to_device_id: dict[str, str] = request.app["_rt"].get("ha_name_to_device_id", {})
 
     targets = scan_configs(cfg.config_dir)
 
@@ -235,8 +290,10 @@ async def get_targets(request: web.Request) -> web.Response:
                     break
 
         device_mac = dev.mac_address if dev else None
-        ha_configured, ha_connected = _ha_status_for_target(
-            ha_entity_status, target, meta, device_mac=device_mac, ha_mac_set=ha_mac_set,
+        ha_configured, ha_connected, ha_device_id = _ha_status_for_target(
+            ha_entity_status, target, meta, device_mac=device_mac,
+            ha_mac_set=ha_mac_set, ha_mac_to_device_id=ha_mac_to_device_id,
+            ha_name_to_device_id=ha_name_to_device_id,
         )
 
         # 4.2c: Use HA connected state as additional online signal.
@@ -261,8 +318,11 @@ async def get_targets(request: web.Request) -> web.Response:
             "running_version": dev.running_version if dev else None,
             "compilation_time": dev.compilation_time if dev else None,
             "config_modified": config_modified,
+            # VP: if the device is pinned, compare against the pinned version
+            # instead of the global server version. A pinned device at its
+            # pinned version is NOT "outdated" even if the global version is newer.
             "needs_update": (
-                dev.running_version != server_version
+                dev.running_version != (meta.get("pinned_version") or server_version)
                 if dev and dev.running_version
                 else None
             ),
@@ -275,12 +335,23 @@ async def get_targets(request: web.Request) -> web.Response:
             "has_restart_button": meta.get("has_restart_button", False),
             "ha_configured": ha_configured,
             "ha_connected": ha_connected,
+            "ha_device_id": ha_device_id,
             # #10 — network facts surfaced by the toggleable Net/IP Mode/IPv6/AP columns
             "network_type": meta.get("network_type"),
             "network_static_ip": meta.get("network_static_ip", False),
             "network_ipv6": meta.get("network_ipv6", False),
             "network_ap_fallback": meta.get("network_ap_fallback", False),
             "network_matter": meta.get("network_matter", False),
+            # Per-device metadata from the # distributed-esphome: comment block.
+            "pinned_version": meta.get("pinned_version"),
+            "schedule": meta.get("schedule"),
+            "schedule_enabled": meta.get("schedule_enabled", False),
+            "schedule_last_run": meta.get("schedule_last_run"),
+            "schedule_once": meta.get("schedule_once"),
+            # #90: IANA tz name (e.g. "America/Los_Angeles"). Absent for
+            # legacy schedules; the scheduler interprets those as UTC.
+            "schedule_tz": meta.get("schedule_tz"),
+            "tags": meta.get("tags"),
         }
         result.append(entry)
 
@@ -483,8 +554,10 @@ async def get_devices(request: web.Request) -> web.Response:
     """
     device_poller = request.app.get("device_poller")
     server_version = get_esphome_version()
-    ha_entity_status: dict[str, dict] = request.app.get("ha_entity_status", {})
-    ha_mac_set: set[str] = request.app.get("ha_mac_set", set())
+    ha_entity_status: dict[str, dict] = request.app["_rt"].get("ha_entity_status", {})
+    ha_mac_set: set[str] = request.app["_rt"].get("ha_mac_set", set())
+    ha_mac_to_device_id: dict[str, str] = request.app["_rt"].get("ha_mac_to_device_id", {})
+    ha_name_to_device_id: dict[str, str] = request.app["_rt"].get("ha_name_to_device_id", {})
 
     if not device_poller:
         return web.json_response([])
@@ -503,15 +576,18 @@ async def get_devices(request: web.Request) -> web.Response:
         # can reuse the same matcher the targets endpoint uses — no
         # friendly_name, just the raw device name.
         meta = {"device_name_raw": dev.name}
-        ha_configured, ha_connected = _ha_status_for_target(
+        ha_configured, ha_connected, ha_device_id = _ha_status_for_target(
             ha_entity_status,
             target=dev.name,
             meta=meta,
             device_mac=dev.mac_address,
             ha_mac_set=ha_mac_set,
+            ha_mac_to_device_id=ha_mac_to_device_id,
+            ha_name_to_device_id=ha_name_to_device_id,
         )
         d["ha_configured"] = ha_configured
         d["ha_connected"] = ha_connected
+        d["ha_device_id"] = ha_device_id
         result.append(d)
 
     return web.json_response(result)
@@ -521,8 +597,8 @@ async def get_devices(request: web.Request) -> web.Response:
 async def get_esphome_versions(request: web.Request) -> web.Response:
     """Return ESPHome version state: selected, detected, and available list."""
     selected = get_esphome_version()
-    detected = request.app.get("esphome_detected_version")
-    available = request.app.get("esphome_available_versions", [])
+    detected = request.app["_rt"].get("esphome_detected_version")
+    available = request.app["_rt"].get("esphome_available_versions", [])
 
     # If PyPI list is empty, at least include the currently selected version so
     # the UI has something to show.
@@ -588,11 +664,39 @@ async def validate_config(request: web.Request) -> web.Response:
     if config_path is None or not config_path.exists():
         return json_error("Target file not found", 404)
 
-    logger.info("Validating %s via esphome config (direct subprocess)", target)
+    # #84: use the correct ESPHome version for validation. If the device is
+    # pinned, install that version via the version manager and validate with
+    # its binary — not the server's default. This ensures pinned devices
+    # validate against the version they'll actually compile with.
+    meta = read_device_meta(cfg.config_dir, target)
+    pin = meta.get("pin_version")
+    esphome_bin = "esphome"  # default: server's installed version
+
+    if pin and pin != get_esphome_version():
+        try:
+            from pathlib import Path as _Path  # noqa: PLC0415
+            import sys as _sys  # noqa: PLC0415
+            # The version manager lives in the bundled client code
+            if "/app/client" not in _sys.path:
+                _sys.path.insert(0, "/app/client")
+            from version_manager import VersionManager  # noqa: PLC0415
+            vm = VersionManager(
+                versions_base=_Path("/data/esphome-versions"),
+                max_versions=5,
+            )
+            logger.info("Validating %s: ensuring ESPHome %s is installed for pinned version", target, pin)
+            esphome_bin = await _asyncio.get_event_loop().run_in_executor(
+                None, vm.ensure_version, pin,
+            )
+        except Exception as exc:
+            logger.warning("Could not install pinned ESPHome %s for validation: %s", pin, exc)
+            # Fall back to server default
+
+    logger.info("Validating %s via %s config (direct subprocess)", target, esphome_bin)
 
     try:
         proc = await _asyncio.create_subprocess_exec(
-            "esphome", "config", str(config_path),
+            esphome_bin, "config", str(config_path),
             stdout=_asyncio.subprocess.PIPE,
             stderr=_asyncio.subprocess.STDOUT,
             cwd=cfg.config_dir,
@@ -622,6 +726,245 @@ async def validate_config(request: web.Request) -> web.Response:
     else:
         logger.warning("Validation failed for %s (exit %d)", target, proc.returncode or -1)
     return web.json_response({"success": success, "output": output})
+
+
+# ---------------------------------------------------------------------------
+# Per-device metadata + schedule + version pinning endpoints
+# ---------------------------------------------------------------------------
+
+@routes.post("/ui/api/targets/{filename}/pin")
+async def pin_target_version(request: web.Request) -> web.Response:
+    """Pin a device to a specific ESPHome version.
+
+    Body: ``{"version": "2026.3.3"}``
+    The pin is stored in the ``# distributed-esphome:`` comment block.
+    """
+    filename = request.match_info["filename"]
+    cfg = _cfg(request)
+    path = safe_resolve(Path(cfg.config_dir), filename)
+    if path is None or not path.exists():
+        return json_error("Target not found", 404)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    version = body.get("version", "").strip()
+    if not version:
+        return web.json_response({"error": "version required"}, status=400)
+
+    meta = read_device_meta(cfg.config_dir, filename)
+    meta["pin_version"] = version
+    write_device_meta(cfg.config_dir, filename, meta)
+    logger.info("Pinned %s to version %s", filename, version)
+    return web.json_response({"ok": True, "pinned_version": version})
+
+
+@routes.delete("/ui/api/targets/{filename}/pin")
+async def unpin_target_version(request: web.Request) -> web.Response:
+    """Remove the version pin from a device."""
+    filename = request.match_info["filename"]
+    cfg = _cfg(request)
+    path = safe_resolve(Path(cfg.config_dir), filename)
+    if path is None or not path.exists():
+        return json_error("Target not found", 404)
+
+    meta = read_device_meta(cfg.config_dir, filename)
+    meta.pop("pin_version", None)
+    write_device_meta(cfg.config_dir, filename, meta)
+    logger.info("Unpinned %s", filename)
+    return web.json_response({"ok": True})
+
+@routes.post("/ui/api/targets/{filename}/meta")
+async def update_target_meta(request: web.Request) -> web.Response:
+    """Update arbitrary per-device metadata stored in the YAML comment block.
+
+    Body: dict of key→value. ``null`` values delete the key.
+    E.g. ``{"pin_version": "2026.3.3", "tags": "office"}``
+    """
+    filename = request.match_info["filename"]
+    cfg = _cfg(request)
+    path = safe_resolve(Path(cfg.config_dir), filename)
+    if path is None or not path.exists():
+        return json_error("Target not found", 404)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "Expected a JSON object"}, status=400)
+
+    meta = read_device_meta(cfg.config_dir, filename)
+    for key, value in body.items():
+        if value is None:
+            meta.pop(key, None)
+        else:
+            meta[key] = value
+    write_device_meta(cfg.config_dir, filename, meta)
+    logger.info("Updated metadata for %s: %s", filename, list(body.keys()))
+    return web.json_response({"ok": True})
+
+
+@routes.post("/ui/api/targets/{filename}/schedule")
+async def set_target_schedule(request: web.Request) -> web.Response:
+    """Set a cron schedule for automatic compile+OTA on a device.
+
+    Body: ``{"cron": "0 2 * * 0"}``
+    Returns: ``{"ok": true, "schedule": "...", "schedule_enabled": true}``
+    """
+    filename = request.match_info["filename"]
+    cfg = _cfg(request)
+    path = safe_resolve(Path(cfg.config_dir), filename)
+    if path is None or not path.exists():
+        return json_error("Target not found", 404)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    cron_expr = body.get("cron", "").strip()
+    if not cron_expr:
+        return web.json_response({"error": "cron expression required"}, status=400)
+
+    # #90: optional `tz` (IANA name like "America/Los_Angeles"). When set,
+    # the scheduler interprets the cron expression in that tz. Absent → UTC.
+    tz = body.get("tz")
+    if tz is not None and not isinstance(tz, str):
+        return web.json_response({"error": "tz must be a string"}, status=400)
+    if tz:
+        try:
+            from zoneinfo import ZoneInfo  # noqa: PLC0415
+            ZoneInfo(tz)  # raises ZoneInfoNotFoundError if unknown
+        except Exception as exc:
+            return web.json_response({"error": f"Invalid tz: {exc}"}, status=400)
+
+    # Validate the cron expression.
+    try:
+        from croniter import croniter  # type: ignore[import-untyped]  # noqa: PLC0415
+        croniter(cron_expr)  # raises ValueError if invalid
+    except ValueError as exc:
+        return web.json_response({"error": f"Invalid cron expression: {exc}"}, status=400)
+    except ImportError:
+        # croniter not installed — accept the expression unvalidated rather
+        # than blocking the feature. The scheduler will log when it can't parse.
+        pass
+
+    meta = read_device_meta(cfg.config_dir, filename)
+    meta["schedule"] = cron_expr
+    meta["schedule_enabled"] = True
+    if tz:
+        meta["schedule_tz"] = tz
+    else:
+        # No tz sent: clear any stale tz so the scheduler falls back to UTC.
+        meta.pop("schedule_tz", None)
+    write_device_meta(cfg.config_dir, filename, meta)
+    import scheduler as _sched  # noqa: PLC0415
+    _sched.sync_target(filename)
+    logger.info("Schedule set for %s: %s (tz=%s)", filename, cron_expr, tz or "UTC")
+    return web.json_response({
+        "ok": True,
+        "schedule": cron_expr,
+        "schedule_enabled": True,
+        "schedule_tz": tz,
+    })
+
+
+@routes.delete("/ui/api/targets/{filename}/schedule")
+async def delete_target_schedule(request: web.Request) -> web.Response:
+    """Remove any schedule (recurring or one-time) from a device.
+
+    #37: previously this only removed the recurring ``schedule`` fields
+    (``schedule``, ``schedule_enabled``, ``schedule_last_run``) but left
+    ``schedule_once`` intact, so clicking "Remove schedule" on a device
+    that had a one-time schedule appeared to succeed but the schedule
+    stuck around. Now removes both types.
+    """
+    filename = request.match_info["filename"]
+    cfg = _cfg(request)
+    path = safe_resolve(Path(cfg.config_dir), filename)
+    if path is None or not path.exists():
+        return json_error("Target not found", 404)
+
+    meta = read_device_meta(cfg.config_dir, filename)
+    meta.pop("schedule", None)
+    meta.pop("schedule_enabled", None)
+    meta.pop("schedule_last_run", None)
+    meta.pop("schedule_once", None)
+    meta.pop("schedule_tz", None)
+    write_device_meta(cfg.config_dir, filename, meta)
+    import scheduler as _sched  # noqa: PLC0415
+    _sched.sync_target(filename)
+    logger.info("Schedule removed for %s", filename)
+    return web.json_response({"ok": True})
+
+
+@routes.post("/ui/api/targets/{filename}/schedule/toggle")
+async def toggle_target_schedule(request: web.Request) -> web.Response:
+    """Toggle the schedule enabled/disabled without clearing the expression."""
+    filename = request.match_info["filename"]
+    cfg = _cfg(request)
+    path = safe_resolve(Path(cfg.config_dir), filename)
+    if path is None or not path.exists():
+        return json_error("Target not found", 404)
+
+    meta = read_device_meta(cfg.config_dir, filename)
+    if not meta.get("schedule"):
+        return web.json_response({"error": "No schedule configured"}, status=400)
+    meta["schedule_enabled"] = not meta.get("schedule_enabled", False)
+    write_device_meta(cfg.config_dir, filename, meta)
+    import scheduler as _sched  # noqa: PLC0415
+    _sched.sync_target(filename)
+    logger.info("Schedule toggled for %s: enabled=%s", filename, meta["schedule_enabled"])
+    return web.json_response({"ok": True, "schedule_enabled": meta["schedule_enabled"]})
+
+
+@routes.post("/ui/api/targets/{filename}/schedule/once")
+async def set_target_schedule_once(request: web.Request) -> web.Response:
+    """Schedule a one-time upgrade at a specific date/time.
+
+    Body: ``{"datetime": "2026-04-15T14:00:00Z"}``
+
+    The scheduler fires the job when the datetime passes, then auto-clears
+    the ``schedule_once`` field (no recurring schedule created).
+    """
+    filename = request.match_info["filename"]
+    cfg = _cfg(request)
+    path = safe_resolve(Path(cfg.config_dir), filename)
+    if path is None or not path.exists():
+        return json_error("Target not found", 404)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    dt_str = body.get("datetime", "").strip()
+    if not dt_str:
+        return web.json_response({"error": "datetime required"}, status=400)
+
+    # Validate it's a parseable ISO datetime.  Allow up to 60s in the past
+    # so that "schedule for now" (immediate) doesn't get rejected due to
+    # network/processing latency.
+    try:
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td  # noqa: PLC0415
+        parsed_dt = _dt.fromisoformat(dt_str)
+        if parsed_dt.tzinfo is None:
+            parsed_dt = parsed_dt.replace(tzinfo=_tz.utc)
+        if parsed_dt < _dt.now(_tz.utc) - _td(seconds=60):
+            return web.json_response({"error": "Datetime must not be in the past"}, status=400)
+    except ValueError:
+        return web.json_response({"error": "Invalid datetime format (use ISO 8601)"}, status=400)
+
+    meta = read_device_meta(cfg.config_dir, filename)
+    meta["schedule_once"] = dt_str
+    write_device_meta(cfg.config_dir, filename, meta)
+    import scheduler as _sched  # noqa: PLC0415
+    _sched.sync_target(filename)
+    logger.info("One-time schedule set for %s at %s", filename, dt_str)
+    return web.json_response({"ok": True, "schedule_once": dt_str})
 
 
 @routes.post("/ui/api/compile")
@@ -693,9 +1036,22 @@ async def start_compile(request: web.Request) -> web.Response:
     run_id = str(uuid.uuid4())
     enqueued = 0
     for target in selected:
+        # VP.7: if the device is pinned to a specific version, use the pinned
+        # version for this job — not the global/override version. This ensures
+        # bulk "Upgrade All" doesn't accidentally flash pinned devices with
+        # the wrong firmware. The version_override from the UI (when set via
+        # the UpgradeModal) takes precedence over the pin, since the user
+        # explicitly chose it for this specific run.
+        effective_version = job_version
+        if not version_override:
+            device_meta = read_device_meta(cfg.config_dir, target)
+            pinned = device_meta.get("pin_version")
+            if pinned:
+                effective_version = pinned
+
         job = await queue.enqueue(
             target=target,
-            esphome_version=job_version,
+            esphome_version=effective_version,
             run_id=run_id,
             timeout_seconds=cfg.job_timeout,
             ota_address=ota_addresses.get(target),
@@ -733,7 +1089,13 @@ async def get_target_content(request: web.Request) -> web.Response:
 
 @routes.post("/ui/api/targets/{filename}/content")
 async def save_target_content(request: web.Request) -> web.Response:
-    """Write raw YAML content back to a config file."""
+    """Write raw YAML content back to a config file.
+
+    #53/#62: if the filename starts with ``.pending.``, the file is a staged
+    new-device. On first save, write the content to the final ``<name>.yaml``
+    (stripping the prefix) and delete the pending file. Returns
+    ``{"ok": true, "renamed_to": "<name>.yaml"}``.
+    """
     filename = request.match_info["filename"]
     cfg = _cfg(request)
     config_dir = Path(cfg.config_dir)
@@ -745,6 +1107,23 @@ async def save_target_content(request: web.Request) -> web.Response:
     except Exception:
         return json_error("Invalid JSON")
     content = body.get("content", "")
+
+    is_staged = filename.startswith(_PENDING_PREFIX)
+    if is_staged:
+        final_name = filename[len(_PENDING_PREFIX):]
+        final_path = safe_resolve(config_dir, final_name)
+        if final_path is None:
+            return json_error("Invalid filename")
+        if final_path.exists():
+            return json_error(f"{final_name} already exists")
+        try:
+            final_path.write_text(content, encoding="utf-8")
+            path.unlink(missing_ok=True)
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+        logger.info("Saved staged %s → %s (%d bytes)", filename, final_name, len(content))
+        return web.json_response({"ok": True, "renamed_to": final_name})
+
     try:
         path.write_text(content, encoding="utf-8")
     except Exception as exc:
@@ -754,6 +1133,89 @@ async def save_target_content(request: web.Request) -> web.Response:
     _config_cache.pop(filename, None)
     logger.info("Saved %s (%d bytes)", filename, len(content))
     return web.json_response({"ok": True})
+
+
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+_PENDING_PREFIX = ".pending."
+
+
+@routes.post("/ui/api/targets")
+async def create_target(request: web.Request) -> web.Response:
+    """Create a new device YAML file (CD.3).
+
+    Body: ``{"filename": "<slug>", "source"?: "<existing.yaml>"}``
+
+    - Without ``source``: creates a minimal stub YAML via ``create_stub_yaml``.
+    - With ``source``: duplicates the source file and rewrites ``esphome.name``
+      to the new filename via ``duplicate_device``.
+
+    #53/#62: the file is written as ``.pending.<name>.yaml`` (a dotfile at the
+    config root, invisible to the scanner which skips dotfiles). On first save,
+    the save endpoint detects the ``.pending.`` prefix and renames to the final
+    ``<name>.yaml``. If the user cancels, the #42 cleanup deletes the dotfile.
+
+    Returns ``{"target": ".pending.<name>.yaml"}`` on success.
+    """
+    cfg = _cfg(request)
+    config_dir = Path(cfg.config_dir)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    raw_name = str(body.get("filename", "")).strip()
+    source = body.get("source")
+
+    if not raw_name:
+        return json_error("filename required")
+
+    # Strip a ``.yaml`` extension if the caller included it, then validate
+    # the slug portion.
+    name = raw_name[:-5] if raw_name.lower().endswith(".yaml") else raw_name
+    if not _SLUG_RE.match(name):
+        return json_error(
+            "filename must be lowercase, start with a letter or digit, and "
+            "contain only letters, digits, and hyphens",
+        )
+    if len(name) > 64:
+        return json_error("filename too long (max 64 characters)")
+
+    new_filename = f"{name}.yaml"
+    # Check for collision with the FINAL name (not the staging name)
+    final_dest = safe_resolve(config_dir, new_filename)
+    if final_dest is None:
+        return json_error("Invalid filename")
+    if final_dest.exists():
+        return json_error(f"{new_filename} already exists")
+
+    if source:
+        src_name = str(source).strip()
+        src_path = safe_resolve(config_dir, src_name)
+        if src_path is None or not src_path.exists():
+            return json_error("Source file not found", 404)
+        try:
+            yaml_text = duplicate_device(str(config_dir), src_name, name)
+        except FileNotFoundError:
+            return json_error("Source file not found", 404)
+        except ValueError as e:
+            return json_error(f"Source invalid: {e}")
+    else:
+        yaml_text = create_stub_yaml(name)
+
+    # Write as a dotfile so the scanner doesn't pick it up
+    pending_filename = f"{_PENDING_PREFIX}{new_filename}"
+    staged_path = config_dir / pending_filename
+    try:
+        staged_path.write_text(yaml_text, encoding="utf-8")
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+    staged_target = pending_filename
+    logger.info("Created staged target %s (source=%s, %d bytes)", staged_target, source or "stub", len(yaml_text))
+    return web.json_response({"target": staged_target, "ok": True})
 
 
 @routes.delete("/ui/api/targets/{filename}")
@@ -1175,7 +1637,23 @@ async def retry_jobs(request: web.Request) -> web.Response:
     else:
         return web.json_response({"error": "job_ids must be a list or 'all_failed'"}, status=400)
 
-    new_jobs = await queue.retry(job_ids, server_version, str(uuid.uuid4()), cfg.job_timeout)
+    # #51: build a per-target version map that respects device pins.
+    # If a device is pinned to a specific ESPHome version, the retry should
+    # use that version — not blindly use the server default.
+    target_versions: dict[str, str] = {}
+    for jid in job_ids:
+        job = queue._jobs.get(jid)
+        if job is None:
+            continue
+        if job.target not in target_versions:
+            meta = read_device_meta(cfg.config_dir, job.target)
+            pinned = meta.get("pin_version")
+            target_versions[job.target] = pinned if pinned else server_version
+
+    new_jobs = await queue.retry(
+        job_ids, server_version, str(uuid.uuid4()), cfg.job_timeout,
+        target_versions=target_versions,
+    )
     return web.json_response({"retried": len(new_jobs)})
 
 
@@ -1322,8 +1800,8 @@ async def clear_queue(request: web.Request) -> web.Response:
 async def debug_ha_status(request: web.Request) -> web.Response:
     """Debug endpoint: show HA entity status keys and matching info per target."""
     cfg = _cfg(request)
-    ha_entity_status: dict[str, dict] = request.app.get("ha_entity_status", {})
-    ha_mac_set: set[str] = request.app.get("ha_mac_set", set())
+    ha_entity_status: dict[str, dict] = request.app["_rt"].get("ha_entity_status", {})
+    ha_mac_set: set[str] = request.app["_rt"].get("ha_mac_set", set())
     device_poller = request.app.get("device_poller")
     targets = scan_configs(cfg.config_dir)
 
@@ -1344,7 +1822,7 @@ async def debug_ha_status(request: web.Request) -> web.Response:
         meta = get_device_metadata(cfg.config_dir, target)
         dev = devices_by_target.get(target)
         device_mac = dev.mac_address if dev else None
-        ha_configured, ha_connected = _ha_status_for_target(
+        ha_configured, ha_connected, _ha_device_id = _ha_status_for_target(
             ha_entity_status, target, meta, device_mac=device_mac, ha_mac_set=ha_mac_set,
         )
         candidates = []

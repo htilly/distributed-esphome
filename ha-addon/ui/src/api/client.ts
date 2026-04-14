@@ -172,16 +172,25 @@ export async function getTargetContent(filename: string): Promise<string> {
   return data.content || '';
 }
 
-export async function saveTargetContent(filename: string, content: string): Promise<void> {
+/**
+ * Save YAML content to a target file. Returns the final target name,
+ * which may differ from *filename* when saving a staged new device
+ * (#62 — ``.pending.<name>.yaml`` → ``<name>.yaml`` on first save).
+ */
+export async function saveTargetContent(
+  filename: string,
+  content: string,
+): Promise<{ renamedTo: string | null }> {
   const r = await apiFetch(`./ui/api/targets/${encodeURIComponent(filename)}/content`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content }),
   });
+  const data = await r.json().catch(() => ({})) as { error?: string; renamed_to?: string };
   if (!r.ok) {
-    const data = await r.json().catch(() => ({})) as { error?: string };
     throw new Error(data.error || String(r.status));
   }
+  return { renamedTo: data.renamed_to ?? null };
 }
 
 export async function disableWorker(id: string, disabled: boolean): Promise<void> {
@@ -296,6 +305,30 @@ export async function deleteArchivedConfig(filename: string): Promise<void> {
   }
 }
 
+/**
+ * Create a new YAML target (CD.3). Without ``source``, creates a minimal
+ * stub YAML. With ``source``, duplicates the source file and rewrites
+ * ``esphome.name`` to the new filename. Returns the created target name,
+ * which is staged as ``.pending.<name>.yaml`` until the first save promotes
+ * it to ``<name>.yaml`` (#62). Cancelling the editor deletes the dotfile.
+ */
+export async function createTarget(
+  filename: string,
+  source?: string,
+): Promise<string> {
+  const body: Record<string, string> = { filename };
+  if (source) body.source = source;
+  const r = await apiFetch('./ui/api/targets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await r.json().catch(() => ({})) as { target?: string; error?: string };
+  if (!r.ok) throw new Error(data.error || String(r.status));
+  if (!data.target) throw new Error('Server did not return a target name');
+  return data.target;
+}
+
 export async function deleteTarget(filename: string, archive = true): Promise<void> {
   const r = await apiFetch(
     `./ui/api/targets/${encodeURIComponent(filename)}?archive=${archive}`,
@@ -335,4 +368,130 @@ export async function renameTarget(
     throw new Error(data.error || String(r.status));
   }
   return r.json() as Promise<{ new_filename: string }>;
+}
+
+// ---------------------------------------------------------------------------
+// Per-device metadata + schedule
+// ---------------------------------------------------------------------------
+
+export async function updateTargetMeta(
+  filename: string,
+  meta: Record<string, unknown>,
+): Promise<void> {
+  const r = await apiFetch(
+    `./ui/api/targets/${encodeURIComponent(filename)}/meta`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(meta),
+    },
+  );
+  if (!r.ok) {
+    const data = await r.json().catch(() => ({})) as { error?: string };
+    throw new Error(data.error || String(r.status));
+  }
+}
+
+export async function setTargetSchedule(
+  filename: string,
+  cron: string,
+  tz?: string,
+): Promise<{ schedule_enabled: boolean }> {
+  const r = await apiFetch(
+    `./ui/api/targets/${encodeURIComponent(filename)}/schedule`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(tz ? { cron, tz } : { cron }),
+    },
+  );
+  const data = await r.json() as { schedule_enabled?: boolean; error?: string };
+  if (!r.ok) throw new Error(data.error || String(r.status));
+  return { schedule_enabled: data.schedule_enabled ?? true };
+}
+
+export async function deleteTargetSchedule(filename: string): Promise<void> {
+  const r = await apiFetch(
+    `./ui/api/targets/${encodeURIComponent(filename)}/schedule`,
+    { method: 'DELETE' },
+  );
+  if (!r.ok) {
+    const data = await r.json().catch(() => ({})) as { error?: string };
+    throw new Error(data.error || String(r.status));
+  }
+}
+
+export async function toggleTargetSchedule(
+  filename: string,
+): Promise<{ schedule_enabled: boolean }> {
+  const r = await apiFetch(
+    `./ui/api/targets/${encodeURIComponent(filename)}/schedule/toggle`,
+    { method: 'POST' },
+  );
+  const data = await r.json() as { schedule_enabled?: boolean; error?: string };
+  if (!r.ok) throw new Error(data.error || String(r.status));
+  return { schedule_enabled: data.schedule_enabled ?? false };
+}
+
+// ---------------------------------------------------------------------------
+// Version pinning
+// ---------------------------------------------------------------------------
+
+export async function pinTargetVersion(
+  filename: string,
+  version: string,
+): Promise<void> {
+  const r = await apiFetch(
+    `./ui/api/targets/${encodeURIComponent(filename)}/pin`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version }),
+    },
+  );
+  if (!r.ok) {
+    const data = await r.json().catch(() => ({})) as { error?: string };
+    throw new Error(data.error || String(r.status));
+  }
+}
+
+export async function unpinTargetVersion(filename: string): Promise<void> {
+  const r = await apiFetch(
+    `./ui/api/targets/${encodeURIComponent(filename)}/pin`,
+    { method: 'DELETE' },
+  );
+  if (!r.ok) {
+    const data = await r.json().catch(() => ({})) as { error?: string };
+    throw new Error(data.error || String(r.status));
+  }
+}
+
+export async function setTargetScheduleOnce(
+  filename: string,
+  datetime: string,
+): Promise<void> {
+  const r = await apiFetch(
+    `./ui/api/targets/${encodeURIComponent(filename)}/schedule/once`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ datetime }),
+    },
+  );
+  if (!r.ok) {
+    const data = await r.json().catch(() => ({})) as { error?: string };
+    throw new Error(data.error || String(r.status));
+  }
+}
+
+export interface ScheduleHistoryEntry {
+  fired_at: string;
+  job_id: string;
+  outcome: string;
+}
+
+export async function getScheduleHistory(): Promise<Record<string, ScheduleHistoryEntry[]>> {
+  const r = await apiFetch('./ui/api/schedule-history');
+  if (!r.ok) return {};
+  return r.json() as Promise<Record<string, ScheduleHistoryEntry[]>>;
 }

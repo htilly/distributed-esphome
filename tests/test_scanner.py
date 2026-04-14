@@ -12,6 +12,8 @@ from scanner import (
     _extract_metadata,
     build_name_to_target_map,
     create_bundle,
+    create_stub_yaml,
+    duplicate_device,
     get_device_address,
     get_device_metadata,
     get_esphome_version,
@@ -257,6 +259,18 @@ def test_metadata_missing_web_server():
     assert meta["has_web_server"] is False
 
 
+def test_metadata_detects_web_server_with_no_value():
+    """#74: ESPHome allows `web_server:` with no value (enables with defaults).
+
+    YAML parses this as {"web_server": None}. The detection must check
+    for key PRESENCE, not key VALUE.
+    """
+    config = {"esphome": {"name": "dev"}, "web_server": None}
+    meta = _empty_meta()
+    _extract_metadata(config, meta)
+    assert meta["has_web_server"] is True
+
+
 def test_metadata_all_fields_none_for_minimal_config():
     """A minimal config with only esphome.name leaves the optional fields untouched."""
     config = {"esphome": {"name": "dev"}}
@@ -424,3 +438,383 @@ def test_static_ip_fixture_metadata():
     meta = get_device_metadata(str(FIXTURES), "static_ip_device.yaml")
     assert meta["friendly_name"] == "Static IP Device"
     assert meta["device_name_raw"] == "static-ip-device"
+
+
+# ---------------------------------------------------------------------------
+# Per-device metadata comment block (read_device_meta / write_device_meta)
+# ---------------------------------------------------------------------------
+
+from scanner import read_device_meta, write_device_meta
+
+
+def test_read_device_meta_empty_file(tmp_path):
+    """File with no metadata block returns empty dict."""
+    f = tmp_path / "device.yaml"
+    f.write_text("esphome:\n  name: test\n")
+    assert read_device_meta(str(tmp_path), "device.yaml") == {}
+
+
+def test_read_device_meta_basic(tmp_path):
+    """Reads a well-formed block with pin_version and schedule."""
+    f = tmp_path / "device.yaml"
+    f.write_text(
+        "# distributed-esphome:\n"
+        "#   pin_version: 2026.3.3\n"
+        "#   schedule: 0 2 * * 0\n"
+        "#   schedule_enabled: true\n"
+        "\n"
+        "esphome:\n"
+        "  name: test\n"
+    )
+    meta = read_device_meta(str(tmp_path), "device.yaml")
+    assert meta["pin_version"] == "2026.3.3"
+    assert meta["schedule"] == "0 2 * * 0"
+    assert meta["schedule_enabled"] is True
+
+
+def test_read_device_meta_with_tags(tmp_path):
+    """Tags field parses correctly."""
+    f = tmp_path / "device.yaml"
+    f.write_text(
+        "# distributed-esphome:\n"
+        "#   tags: office, sensors\n"
+        "\n"
+        "esphome:\n"
+        "  name: test\n"
+    )
+    meta = read_device_meta(str(tmp_path), "device.yaml")
+    assert meta["tags"] == "office, sensors"
+
+
+def test_read_device_meta_ignores_deep_comments(tmp_path):
+    """Block must be at the TOP of the file, before any YAML content."""
+    f = tmp_path / "device.yaml"
+    f.write_text(
+        "esphome:\n"
+        "  name: test\n"
+        "\n"
+        "# distributed-esphome:\n"
+        "#   pin_version: should-not-match\n"
+    )
+    assert read_device_meta(str(tmp_path), "device.yaml") == {}
+
+
+def test_read_device_meta_with_leading_blank_lines(tmp_path):
+    """Blank lines before the marker are OK."""
+    f = tmp_path / "device.yaml"
+    f.write_text(
+        "\n"
+        "\n"
+        "# distributed-esphome:\n"
+        "#   pin_version: 2026.3.3\n"
+        "\n"
+        "esphome:\n"
+        "  name: test\n"
+    )
+    meta = read_device_meta(str(tmp_path), "device.yaml")
+    assert meta["pin_version"] == "2026.3.3"
+
+
+def test_write_device_meta_adds_block(tmp_path):
+    """Adds a block to a file that has none."""
+    f = tmp_path / "device.yaml"
+    f.write_text("esphome:\n  name: test\n")
+
+    write_device_meta(str(tmp_path), "device.yaml", {"pin_version": "2026.3.3"})
+
+    content = f.read_text()
+    assert "# distributed-esphome:" in content
+    assert "#   pin_version: 2026.3.3" in content
+    # Original content is preserved
+    assert "esphome:" in content
+    assert "name: test" in content
+
+
+def test_write_device_meta_replaces_block(tmp_path):
+    """Replaces an existing block with new values."""
+    f = tmp_path / "device.yaml"
+    f.write_text(
+        "# distributed-esphome:\n"
+        "#   pin_version: old\n"
+        "\n"
+        "esphome:\n"
+        "  name: test\n"
+    )
+
+    write_device_meta(str(tmp_path), "device.yaml", {"pin_version": "new", "schedule": "0 2 * * *"})
+
+    content = f.read_text()
+    assert "old" not in content
+    assert "#   pin_version: new" in content
+    assert "#   schedule: 0 2 * * *" in content
+
+
+def test_write_device_meta_removes_block_when_empty(tmp_path):
+    """Empty dict removes the block entirely."""
+    f = tmp_path / "device.yaml"
+    f.write_text(
+        "# distributed-esphome:\n"
+        "#   pin_version: 2026.3.3\n"
+        "\n"
+        "esphome:\n"
+        "  name: test\n"
+    )
+
+    write_device_meta(str(tmp_path), "device.yaml", {})
+
+    content = f.read_text()
+    assert "distributed-esphome" not in content
+    assert "esphome:" in content
+
+
+def test_write_device_meta_preserves_other_comments(tmp_path):
+    """Other comment lines in the file survive the write."""
+    f = tmp_path / "device.yaml"
+    f.write_text(
+        "# My device config\n"
+        "esphome:\n"
+        "  name: test\n"
+        "# End of file\n"
+    )
+
+    write_device_meta(str(tmp_path), "device.yaml", {"schedule": "0 2 * * *"})
+
+    content = f.read_text()
+    assert "# My device config" in content
+    assert "# End of file" in content
+    assert "# distributed-esphome:" in content
+
+
+def test_write_device_meta_invalidates_cache(tmp_path):
+    """_config_cache entry is removed after write."""
+    from scanner import _config_cache
+
+    f = tmp_path / "device.yaml"
+    f.write_text("esphome:\n  name: test\n")
+    _config_cache["device.yaml"] = (0.0, {"fake": True})
+
+    write_device_meta(str(tmp_path), "device.yaml", {"pin_version": "1.0"})
+    assert "device.yaml" not in _config_cache
+
+
+def test_roundtrip_read_write(tmp_path):
+    """write then read returns the same dict."""
+    f = tmp_path / "device.yaml"
+    f.write_text("esphome:\n  name: test\n")
+
+    meta = {
+        "pin_version": "2026.3.3",
+        "schedule": "0 2 * * 0",
+        "schedule_enabled": True,
+        "tags": "office, sensors",
+    }
+    write_device_meta(str(tmp_path), "device.yaml", meta)
+    result = read_device_meta(str(tmp_path), "device.yaml")
+    assert result == meta
+
+
+
+# ---------------------------------------------------------------------------
+# create_stub_yaml (CD.1)
+# ---------------------------------------------------------------------------
+
+
+def test_create_stub_yaml_has_name():
+    """Stub YAML should contain esphome.name set to the provided name."""
+    import yaml
+    result = create_stub_yaml("kitchen-sensor")
+    data = yaml.safe_load(result)
+    assert data == {"esphome": {"name": "kitchen-sensor"}}
+
+
+def test_create_stub_yaml_round_trips():
+    """Stub YAML must parse via yaml.safe_load without errors (PY-1)."""
+    import yaml
+    result = create_stub_yaml("test-device")
+    # Should not raise
+    parsed = yaml.safe_load(result)
+    assert isinstance(parsed, dict)
+    assert parsed["esphome"]["name"] == "test-device"
+
+
+def test_create_stub_yaml_contains_guidance_comment():
+    """Stub should include a hint comment so the user knows where to add content."""
+    result = create_stub_yaml("foo")
+    assert "Add board" in result
+
+
+# ---------------------------------------------------------------------------
+# duplicate_device (CD.2)
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_device_rewrites_name(tmp_path):
+    """Duplicated YAML has esphome.name set to new_name."""
+    import yaml
+    src = tmp_path / "source.yaml"
+    src.write_text("esphome:\n  name: original\n  comment: Hello\n")
+
+    result = duplicate_device(str(tmp_path), "source.yaml", "duplicated")
+    data = yaml.safe_load(result)
+    assert data["esphome"]["name"] == "duplicated"
+    # Other fields preserved
+    assert data["esphome"]["comment"] == "Hello"
+
+
+def test_duplicate_device_preserves_other_fields(tmp_path):
+    """Duplicated YAML keeps substitutions, packages, sensors, etc."""
+    import yaml
+    src = tmp_path / "src.yaml"
+    src.write_text(
+        "esphome:\n"
+        "  name: my-device\n"
+        "wifi:\n"
+        "  ssid: home\n"
+        "sensor:\n"
+        "  - platform: dht\n"
+        "    pin: GPIO4\n"
+    )
+
+    result = duplicate_device(str(tmp_path), "src.yaml", "my-device-2")
+    data = yaml.safe_load(result)
+    assert data["esphome"]["name"] == "my-device-2"
+    assert data["wifi"]["ssid"] == "home"
+    assert data["sensor"][0]["platform"] == "dht"
+
+
+def test_duplicate_device_rewrites_substitution(tmp_path):
+    """When esphome.name is ${substitutions.name}, rewrite the substitution."""
+    import yaml
+    src = tmp_path / "src.yaml"
+    src.write_text(
+        "substitutions:\n"
+        "  name: old-name\n"
+        "  display_name: Old\n"
+        "esphome:\n"
+        "  name: ${name}\n"
+    )
+
+    result = duplicate_device(str(tmp_path), "src.yaml", "new-name")
+    data = yaml.safe_load(result)
+    # substitution is rewritten, esphome.name keeps the indirection
+    assert data["substitutions"]["name"] == "new-name"
+    assert data["esphome"]["name"] == "${name}"
+    # Other substitutions untouched
+    assert data["substitutions"]["display_name"] == "Old"
+
+
+def test_duplicate_device_missing_source(tmp_path):
+    """Missing source file raises FileNotFoundError."""
+    with pytest.raises(FileNotFoundError):
+        duplicate_device(str(tmp_path), "nonexistent.yaml", "new")
+
+
+def test_duplicate_device_invalid_yaml(tmp_path):
+    """Non-parseable source raises ValueError."""
+    src = tmp_path / "bad.yaml"
+    src.write_text("{{{invalid yaml")
+    with pytest.raises(ValueError):
+        duplicate_device(str(tmp_path), "bad.yaml", "new")
+
+
+def test_duplicate_device_no_esphome_block(tmp_path):
+    """Source YAML without esphome block gets one added with the new name."""
+    import yaml
+    src = tmp_path / "src.yaml"
+    src.write_text("wifi:\n  ssid: home\n")
+
+    result = duplicate_device(str(tmp_path), "src.yaml", "new-device")
+    data = yaml.safe_load(result)
+    assert data["esphome"]["name"] == "new-device"
+    assert data["wifi"]["ssid"] == "home"
+
+
+def test_duplicate_device_preserves_include_tags(tmp_path):
+    """#43: !include / !secret / custom ESPHome tags survive the round-trip."""
+    src = tmp_path / "src.yaml"
+    src.write_text(
+        "esphome:\n  name: device\n"
+        "packages:\n"
+        "  common: !include .common.yaml\n"
+        "  athom: !include .athom-plug.yaml\n"
+        "wifi:\n"
+        "  ap:\n"
+        "    password: !secret ap_password\n"
+    )
+
+    result = duplicate_device(str(tmp_path), "src.yaml", "new-device")
+    # name was rewritten
+    assert "name: new-device" in result
+    # All three custom tags preserved (we can't use yaml.safe_load to verify
+    # because that's exactly what used to choke — string-match the output).
+    assert "!include '.common.yaml'" in result or "!include .common.yaml" in result
+    assert "!include '.athom-plug.yaml'" in result or "!include .athom-plug.yaml" in result
+    assert "!secret 'ap_password'" in result or "!secret ap_password" in result
+
+
+def test_duplicate_device_preserves_use_address(tmp_path):
+    """#53: wifi.use_address is preserved in the clone (reverted from #47)."""
+    import yaml
+    src = tmp_path / "src.yaml"
+    src.write_text(
+        "esphome:\n  name: device\n"
+        "wifi:\n  use_address: 192.168.1.100\n  ssid: home\n"
+    )
+    result = duplicate_device(str(tmp_path), "src.yaml", "device-copy")
+    data = yaml.safe_load(result)
+    assert data["wifi"]["use_address"] == "192.168.1.100"
+    assert data["wifi"]["ssid"] == "home"
+
+
+def test_duplicate_device_preserves_includes_with_substitution_rewrite(tmp_path):
+    """Combined: substitution rewrite + !include preservation."""
+    src = tmp_path / "src.yaml"
+    src.write_text(
+        "substitutions:\n  name: old\n"
+        "packages:\n"
+        "  common: !include .common.yaml\n"
+        "esphome:\n  name: ${name}\n"
+    )
+
+    result = duplicate_device(str(tmp_path), "src.yaml", "fresh")
+    # substitution rewritten
+    assert "name: fresh" in result
+    # esphome.name still references the substitution
+    assert "name: ${name}" in result
+    # include preserved
+    assert "!include" in result
+
+
+def test_duplicate_device_rewrites_substitutions_name_with_implicit_esphome_name(tmp_path):
+    """#43 follow-up: source has substitutions.name AND top-level esphome block
+    without a name field (the actual device name comes from an included
+    package that uses ${name}). Duplicate should rewrite substitutions.name
+    so the rename propagates into the includes, and leave the top-level
+    esphome block alone (no redundant literal name)."""
+    src = tmp_path / "src.yaml"
+    src.write_text(
+        "substitutions:\n"
+        "  name: athom-plug-1\n"
+        "  display_name: Office Speakers\n"
+        "esphome:\n"
+        "  area: Office\n"
+        "packages:\n"
+        "  common: !include .common.yaml\n"
+        "  athom: !include .athom-plug.yaml\n"
+    )
+
+    result = duplicate_device(str(tmp_path), "src.yaml", "athom-plug-1-copy")
+    # substitutions.name rewritten — this is the key fix
+    assert "name: athom-plug-1-copy" in result
+    assert "athom-plug-1" not in result.replace("athom-plug-1-copy", "")
+    # No literal esphome.name injected (the includes will pull it from ${name})
+    # Rough check: esphome block doesn't gain an explicit name line.
+    # The resulting esphome block should still be just "area: Office".
+    import yaml as _yaml
+    class _Loader(_yaml.SafeLoader):
+        pass
+    _Loader.add_multi_constructor("!", lambda loader, suf, node: None)
+    parsed = _yaml.load(result, Loader=_Loader)
+    assert "name" not in parsed["esphome"]
+    # Other substitutions preserved
+    assert parsed["substitutions"]["display_name"] == "Office Speakers"

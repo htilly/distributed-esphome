@@ -57,9 +57,10 @@ To test pre-release builds from the `develop` branch, use the `:develop` tag ins
 
 Access via the HA sidebar (**ESPH Distributed**) or directly at `http://your-ha-host:8765`.
 
-- **Devices** — all ESPHome configs with online/offline status, firmware version, config-changed indicator, and HA integration status. Compile individual, all, or only outdated devices. Inline Monaco YAML editor with ESPHome schema autocomplete and validation. Rename, delete, restart devices, copy API keys, view live logs. Search/filter, configurable columns, bulk operations.
-- **Queue** — live job status with build logs. Retry failed jobs, cancel in-progress ones. Auto-prunes after one hour.
-- **Workers** — connected build workers with system info (CPU, memory, disk, ESPHome version). Adjust slot count (0 = paused), clean per-worker or all build caches, remove offline workers. **+ Connect Worker** provides a ready-to-run `docker run` command. Workers running an out-of-date Docker image are flagged with a clickable "image stale" badge.
+- **Devices** — every ESPHome config in one place, with online status, current firmware version, and a one-click link to its Home Assistant page. Compile individual devices, everything that's outdated, or your whole fleet. Create new devices or duplicate existing ones, edit YAML inline with autocomplete and validation, pin individual devices to a specific ESPHome version, and view live device logs.
+- **Queue** — live job status and build logs. Retry, cancel, or clear jobs individually or in bulk.
+- **Workers** — connected build workers with their slot count, cache size, and system info. Includes a built-in local worker and a one-click setup command for adding remote workers.
+- **Schedules** — every scheduled upgrade in one view. Set recurring schedules (daily, weekly, monthly, custom cron) or one-time future upgrades. Schedules are stored alongside the YAML so they travel with your config.
 
 Dark/light theme toggle in the header.
 

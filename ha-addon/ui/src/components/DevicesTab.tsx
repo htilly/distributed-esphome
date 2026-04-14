@@ -9,9 +9,10 @@ import {
   type VisibilityState,
   type RowSelectionState,
 } from '@tanstack/react-table';
-import { getApiKey, restartDevice } from '../api/client';
+import { getApiKey, restartDevice, pinTargetVersion, unpinTargetVersion, setTargetSchedule } from '../api/client';
+import { UpgradeModal } from './UpgradeModal';
 import type { Device, Job, Target, Worker } from '../types';
-import { stripYaml, timeAgo } from '../utils';
+import { stripYaml, timeAgo, haDeepLink, formatCronHuman } from '../utils';
 import { StatusDot } from './StatusDot';
 import { Button } from './ui/button';
 import {
@@ -33,7 +34,7 @@ import {
 } from './ui/dialog';
 
 /* ---- Column configuration ---- */
-type OptionalColumnId = 'status' | 'ha' | 'ip' | 'running' | 'area' | 'comment' | 'project' | 'net' | 'ipconfig' | 'ap';
+type OptionalColumnId = 'status' | 'ha' | 'ip' | 'running' | 'area' | 'comment' | 'project' | 'net' | 'ipconfig' | 'ap' | 'schedule';
 
 interface OptionalColumnDef {
   id: OptionalColumnId;
@@ -49,6 +50,7 @@ const OPTIONAL_COLUMNS: OptionalColumnDef[] = [
   { id: 'running', label: 'Version', defaultVisible: true },
   { id: 'ipconfig', label: 'IP Config', defaultVisible: false },
   { id: 'ap', label: 'AP', defaultVisible: false },
+  { id: 'schedule', label: 'Schedule', defaultVisible: true },
   { id: 'area', label: 'Area', defaultVisible: false },
   { id: 'comment', label: 'Comment', defaultVisible: false },
   { id: 'project', label: 'Project', defaultVisible: false },
@@ -97,6 +99,13 @@ interface Props {
   onToast: (msg: string, type?: 'info' | 'success' | 'error') => void;
   onDelete: (target: string, archive: boolean) => void;
   onRename: (oldTarget: string, newName: string) => void;
+  onSchedule: (target: string) => void;
+  /** CD.5: open the NewDeviceModal in "new" mode (called from toolbar button). */
+  onNewDevice: () => void;
+  /** CD.6: open the NewDeviceModal in "duplicate" mode, pre-filling the source. */
+  onDuplicate: (sourceTarget: string) => void;
+  /** Trigger an immediate SWR revalidation of the devices/targets data. */
+  onRefresh: () => void;
 }
 
 function matchesFilter(filter: string, ...fields: (string | null | undefined)[]): boolean {
@@ -114,6 +123,10 @@ function matchesFilter(filter: string, ...fields: (string | null | undefined)[])
  * Render a short display label for the device's primary network type (#10).
  * Returns null when the YAML didn't declare any of wifi/ethernet/openthread —
  * the column shows a dash in that case.
+ */
+/**
+ * Convert a 5-field cron expression to a short human-readable string.
+ * Covers common presets; falls back to the raw expression for complex ones.
  */
 function formatNetworkType(t: 'wifi' | 'ethernet' | 'thread' | null | undefined): string | null {
   switch (t) {
@@ -227,7 +240,7 @@ function DeleteModal({ target, onConfirm, onClose }: {
   );
 }
 
-export function DevicesTab({ targets, devices, workers, streamerMode, activeJobsByTarget, onCompile, onUpgradeOne, onEdit, onLogs, onToast, onDelete, onRename }: Props) {
+export function DevicesTab({ targets, devices, workers, streamerMode, activeJobsByTarget, onCompile, onUpgradeOne, onEdit, onLogs, onToast, onDelete, onRename, onSchedule, onNewDevice, onDuplicate, onRefresh }: Props) {
   const [filter, setFilter] = useState('');
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(loadColumnVisibility);
@@ -237,6 +250,33 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [showUnmanaged, setShowUnmanaged] = useState(() => localStorage.getItem('showUnmanaged') !== 'false');
+
+  // VP.4: pin/unpin version from the hamburger menu.
+  async function handlePin(target: string) {
+    // Pin to the device's current running version (from the poller), or the
+    // global server version if the device hasn't reported a version yet.
+    const t = targets.find(x => x.target === target);
+    const version = t?.running_version || t?.server_version;
+    if (!version) {
+      onToast('No version available to pin to', 'error');
+      return;
+    }
+    try {
+      await pinTargetVersion(target, version);
+      onToast(`Pinned ${stripYaml(target)} to ${version}`, 'success');
+    } catch (err) {
+      onToast('Pin failed: ' + (err as Error).message, 'error');
+    }
+  }
+
+  async function handleUnpin(target: string) {
+    try {
+      await unpinTargetVersion(target);
+      onToast(`Unpinned ${stripYaml(target)}`, 'success');
+    } catch (err) {
+      onToast('Unpin failed: ' + (err as Error).message, 'error');
+    }
+  }
 
   // Persist column visibility and unmanaged toggle to localStorage
   useEffect(() => {
@@ -344,7 +384,15 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
         ),
         cell: ({ row: { original: t } }) => (
           <>
-            <span className="device-name">{t.friendly_name || t.device_name || stripYaml(t.target)}</span>
+            <span className="device-name">
+              {t.friendly_name || t.device_name || stripYaml(t.target)}
+              {t.schedule && t.schedule_enabled && (
+                <span title={`Recurring schedule: ${t.schedule}`} style={{ marginLeft: 4, fontSize: 11, opacity: 0.7 }}>🕐</span>
+              )}
+              {t.schedule_once && (
+                <span title={`One-time schedule: ${t.schedule_once}`} style={{ marginLeft: 4, fontSize: 11, opacity: 0.7 }}>📅</span>
+              )}
+            </span>
             <div className="device-filename">{stripYaml(t.target)}</div>
           </>
         ),
@@ -390,13 +438,32 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
       {
         id: 'ha',
         header: ({ column }) => <SortHeader label="HA" column={column} />,
-        cell: ({ row: { original: t } }) => (
-          <span style={{ fontSize: 12 }}>
-            {t.ha_configured
-              ? <span style={{ color: 'var(--success)' }}>Yes</span>
-              : <span style={{ color: 'var(--text-muted)' }}>—</span>}
-          </span>
-        ),
+        cell: ({ row: { original: t } }) => {
+          if (!t.ha_configured) {
+            return <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>—</span>;
+          }
+          // #35: when we have a device_id (matched via MAC), make "Yes" a
+          // clickable deep-link to the HA device page. If we don't have a
+          // device_id (matched only via name), just show the text.
+          if (t.ha_device_id) {
+            const href = haDeepLink(`/config/devices/device/${t.ha_device_id}`);
+            if (href) {
+              return (
+                <a
+                  href={href}
+                  target="_blank"
+                  rel="noopener"
+                  title="Open device in Home Assistant"
+                  style={{ fontSize: 12, color: 'var(--success)', textDecoration: 'none' }}
+                  className="hover:underline"
+                >
+                  Yes ↗
+                </a>
+              );
+            }
+          }
+          return <span style={{ fontSize: 12, color: 'var(--success)' }}>Yes</span>;
+        },
         sortingFn: 'alphanumeric',
       }
     ),
@@ -518,12 +585,53 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
       ),
       sortingFn: 'alphanumeric',
     }),
+    // #5/#40/#92: human-readable schedule column. Renders BOTH the recurring
+    // cron and any one-time schedule when both are set, stacked. Toggleable
+    // (default off).
+    columnHelper.accessor(row => row.schedule || row.schedule_once || '', {
+      id: 'schedule',
+      header: ({ column }) => <SortHeader label="Schedule" column={column} />,
+      cell: ({ row: { original: t } }) => {
+        // #72: schedule values are clickable → open upgrade modal in schedule mode
+        const handleClick = () => onSchedule(t.target);
+        if (!t.schedule && !t.schedule_once) {
+          return <span style={{ color: 'var(--text-muted)' }}>—</span>;
+        }
+        const enabled = t.schedule_enabled !== false;
+        const tzLabel = ` (${t.schedule_tz || 'UTC'})`;
+        const cronHuman = t.schedule ? formatCronHuman(t.schedule) : null;
+        const onceWhen = t.schedule_once ? new Date(t.schedule_once).toLocaleString() : null;
+        const titleParts: string[] = [];
+        if (t.schedule) titleParts.push(`${t.schedule}${tzLabel}${enabled ? '' : ' (paused)'}`);
+        if (t.schedule_once) titleParts.push(`One-time: ${t.schedule_once}`);
+        return (
+          <span
+            style={{ cursor: 'pointer', color: 'var(--accent)' }}
+            title={`${titleParts.join(' • ')} — click to edit`}
+            onClick={handleClick}
+          >
+            {cronHuman && (
+              <span style={{ opacity: enabled ? 1 : 0.5 }}>
+                🕐 {cronHuman}
+                {!enabled && <span style={{ color: 'var(--text-muted)', marginLeft: 4 }}>(paused)</span>}
+              </span>
+            )}
+            {cronHuman && onceWhen && <br />}
+            {onceWhen && <span>📅 Once: {onceWhen}</span>}
+          </span>
+        );
+      },
+      sortingFn: 'alphanumeric',
+    }),
     columnHelper.accessor(row => row.running_version || '', {
       id: 'running',
       header: ({ column }) => <SortHeader label="Version" column={column} />,
       cell: ({ row: { original: t } }) => (
         <span style={{ fontSize: 12 }}>
           {t.running_version || '—'}
+          {t.pinned_version && (
+            <span title={`Pinned to ${t.pinned_version}`} style={{ marginLeft: 4, fontSize: 10 }}>📌</span>
+          )}
           {t.config_modified && <div className="config-modified">config changed</div>}
         </span>
       ),
@@ -610,7 +718,7 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
       },
     }),
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [workers, onCompile, onUpgradeOne, onEdit, onLogs, onToast]);
+  ], [workers, onCompile, onUpgradeOne, onEdit, onLogs, onToast, onSchedule]);
 
   const table = useReactTable({
     data: filteredTargets,
@@ -639,6 +747,35 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
   function handleCompileSelected() {
     if (selectedTargets.length === 0) return;
     onCompile(selectedTargets);
+  }
+
+  // #2: "Schedule Selected" — open the schedule modal in multi-target mode.
+  // We reuse the same ScheduleModal but apply the result to all selected targets.
+  const [bulkScheduleOpen, setBulkScheduleOpen] = useState(false);
+  function handleScheduleSelected() {
+    if (selectedTargets.length === 0) return;
+    setBulkScheduleOpen(true);
+  }
+
+  // #15: bulk remove schedule from selected devices.
+  // #37: include devices with a one-time schedule, not just recurring.
+  async function handleRemoveScheduleSelected() {
+    const scheduled = selectedTargets.filter(t => {
+      const target = targets.find(x => x.target === t);
+      return target?.schedule || target?.schedule_once;
+    });
+    if (scheduled.length === 0) {
+      onToast('No selected devices have a schedule', 'info');
+      return;
+    }
+    try {
+      const { deleteTargetSchedule } = await import('../api/client');
+      await Promise.all(scheduled.map(t => deleteTargetSchedule(t)));
+      onToast(`Removed schedule from ${scheduled.length} device(s)`, 'success');
+      onRefresh();
+    } catch (err) {
+      onToast('Remove failed: ' + (err as Error).message, 'error');
+    }
   }
 
   // Column visibility for unmanaged rows — derive from TanStack state
@@ -675,10 +812,16 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
             )}
           </div>
           <div className="actions">
+            {/* CD.5: "+ New Device" button. #46: use default variant (primary
+                styling) so it reads as a real action button, matching the visual
+                weight of the Upgrade/Actions dropdown triggers next to it. */}
+            <Button size="sm" onClick={onNewDevice} title="Create a new device YAML">
+              + New Device
+            </Button>
             {/* Upgrade dropdown */}
             <DropdownMenu>
-              <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg bg-[var(--accent)] px-2.5 py-1 text-xs font-medium text-white hover:bg-[var(--accent-hover)] cursor-pointer">
-                Upgrade &#9662;
+              <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg border border-transparent bg-primary px-2.5 h-7 text-[0.8rem] font-medium text-primary-foreground hover:bg-primary/80 cursor-pointer">
+                Upgrade <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="min-w-[180px]">
                 <DropdownMenuGroup>
@@ -708,9 +851,29 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
               </DropdownMenuContent>
             </DropdownMenu>
 
+            {/* #8: Actions dropdown — non-compile bulk operations */}
+            <DropdownMenu>
+              <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg border border-border bg-background px-2.5 h-7 text-[0.8rem] font-medium text-foreground hover:bg-muted cursor-pointer">
+                Actions <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuGroup>
+                  <DropdownMenuItem onClick={handleScheduleSelected} disabled={Object.keys(rowSelection).length === 0}>
+                    Schedule Selected...
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={handleRemoveScheduleSelected}
+                    disabled={Object.keys(rowSelection).length === 0}
+                  >
+                    Remove Schedule from Selected
+                  </DropdownMenuItem>
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+
             {/* Column picker (gear icon) */}
             <DropdownMenu>
-              <DropdownMenuTrigger className="inline-flex items-center rounded-lg border border-[var(--border)] bg-[var(--surface2)] px-2 py-1 text-base text-[var(--text)] hover:bg-[var(--border)] cursor-pointer" title="Toggle columns">
+              <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg border border-border bg-background px-2.5 h-7 text-[0.8rem] font-medium text-foreground hover:bg-muted cursor-pointer" title="Toggle columns">
                 &#9881;
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
@@ -807,6 +970,42 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
         />
       )}
 
+      {bulkScheduleOpen && (
+        <UpgradeModal
+          target="(multiple)"
+          displayName={`${selectedTargets.length} device${selectedTargets.length > 1 ? 's' : ''}`}
+          workers={workers}
+          esphomeVersions={[]}
+          defaultEsphomeVersion={null}
+          scheduleOnly
+          defaultMode="schedule"
+          onUpgradeNow={() => {}}
+          onSaveSchedule={async (cron, _version, tz) => {
+            try {
+              await Promise.all(selectedTargets.map(t => setTargetSchedule(t, cron, tz)));
+              onToast(`Schedule set for ${selectedTargets.length} device(s)`, 'success');
+              setBulkScheduleOpen(false);
+              onRefresh();
+            } catch (err) {
+              onToast('Schedule failed: ' + (err as Error).message, 'error');
+            }
+          }}
+          onSaveOnce={async (datetime, _version) => {
+            try {
+              const { setTargetScheduleOnce } = await import('../api/client');
+              await Promise.all(selectedTargets.map(t => setTargetScheduleOnce(t, datetime)));
+              onToast(`One-time upgrade scheduled for ${selectedTargets.length} device(s)`, 'success');
+              setBulkScheduleOpen(false);
+              onRefresh();
+            } catch (err) {
+              onToast('Schedule failed: ' + (err as Error).message, 'error');
+            }
+          }}
+          onDeleteSchedule={() => setBulkScheduleOpen(false)}
+          onClose={() => setBulkScheduleOpen(false)}
+        />
+      )}
+
       {menuTarget && menuPos && (
         <DeviceMenu
           target={menuTarget}
@@ -814,7 +1013,10 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
           onToast={onToast}
           onDelete={(t) => { setMenuTarget(null); setMenuPos(null); setDeleteTarget(t); }}
           onRename={(t) => { setMenuTarget(null); setMenuPos(null); setRenameTarget(t); }}
+          onDuplicate={(t) => { setMenuTarget(null); setMenuPos(null); onDuplicate(t.target); }}
           onLogs={(t) => { setMenuTarget(null); setMenuPos(null); onLogs(t); }}
+          onPin={(t) => { setMenuTarget(null); setMenuPos(null); handlePin(t); }}
+          onUnpin={(t) => { setMenuTarget(null); setMenuPos(null); handleUnpin(t); }}
           onClose={() => { setMenuTarget(null); setMenuPos(null); }}
         />
       )}
@@ -844,7 +1046,10 @@ function DeviceMenu({
   onToast,
   onDelete,
   onRename,
+  onDuplicate,
   onLogs,
+  onPin,
+  onUnpin,
   onClose,
 }: {
   target: Target;
@@ -852,7 +1057,10 @@ function DeviceMenu({
   onToast: (msg: string, type?: 'info' | 'success' | 'error') => void;
   onDelete: (target: string) => void;
   onRename: (target: string) => void;
+  onDuplicate: (target: Target) => void;
   onLogs: (target: string) => void;
+  onPin: (target: string) => void;
+  onUnpin: (target: string) => void;
   onClose: () => void;
 }) {
   useEffect(() => {
@@ -885,7 +1093,7 @@ function DeviceMenu({
       {/* Backdrop to close on outside click */}
       <div className="fixed inset-0 z-50" onClick={onClose} />
       <div
-        className="fixed z-50 min-w-[160px] rounded-lg border border-[var(--border)] bg-[var(--popover)] p-1 text-[var(--popover-foreground)] shadow-md ring-1 ring-[var(--foreground)]/10"
+        className="fixed z-50 min-w-[200px] w-max max-w-[320px] rounded-lg border border-[var(--border)] bg-[var(--popover)] p-1 text-[var(--popover-foreground)] shadow-md ring-1 ring-[var(--foreground)]/10"
         ref={(el) => {
           if (!el) return;
           const rect = el.getBoundingClientRect();
@@ -920,7 +1128,15 @@ function DeviceMenu({
         <div className="-mx-1 my-1 h-px bg-[var(--border)]" />
 
         <div className="px-1.5 py-1 text-xs font-medium text-[var(--text-muted)]">Config</div>
+        {/* #93: "Schedule Upgrade…" removed — accessible via the Upgrade
+            button by switching to "Scheduled" mode. */}
+        {t.pinned_version
+          ? <button className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-sm cursor-pointer hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]" onClick={() => onUnpin(t.target)}>Unpin version ({t.pinned_version})</button>
+          : <button className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-sm cursor-pointer hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]" onClick={() => onPin(t.target)}>Pin to current version</button>
+        }
         <button className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-sm cursor-pointer hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]" onClick={() => onRename(t.target)}>Rename</button>
+        {/* CD.6: duplicate this device into a new file */}
+        <button className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-sm cursor-pointer hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]" onClick={() => onDuplicate(t)}>Duplicate…</button>
         <button className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-sm cursor-pointer text-[var(--destructive)] hover:bg-[var(--destructive)]/10" onClick={() => onDelete(t.target)}>Delete</button>
 
         {/*
@@ -960,7 +1176,23 @@ function UnmanagedRow({ device: d, isVisible }: { device: Device; isVisible: (co
       {isVisible('ha') && (
         <td style={{ fontSize: 12 }}>
           {d.ha_configured
-            ? <span style={{ color: 'var(--success)' }}>Yes</span>
+            ? (d.ha_device_id
+                ? (() => {
+                    const href = haDeepLink(`/config/devices/device/${d.ha_device_id}`);
+                    return href ? (
+                      <a
+                        href={href}
+                        target="_blank"
+                        rel="noopener"
+                        title="Open device in Home Assistant"
+                        style={{ color: 'var(--success)', textDecoration: 'none' }}
+                        className="hover:underline"
+                      >
+                        Yes ↗
+                      </a>
+                    ) : <span style={{ color: 'var(--success)' }}>Yes</span>;
+                  })()
+                : <span style={{ color: 'var(--success)' }}>Yes</span>)
             : dash}
         </td>
       )}
@@ -988,6 +1220,7 @@ function UnmanagedRow({ device: d, isVisible }: { device: Device; isVisible: (co
       {isVisible('net') && <td style={{ fontSize: 12 }}>{dash}</td>}
       {isVisible('ipconfig') && <td style={{ fontSize: 12 }}>{dash}</td>}
       {isVisible('ap') && <td style={{ fontSize: 12 }}>{dash}</td>}
+      {isVisible('schedule') && <td style={{ fontSize: 12 }}>{dash}</td>}
       {isVisible('running') && <td style={{ fontSize: 12 }}>{d.running_version || '—'}</td>}
       {isVisible('area') && <td style={{ fontSize: 12 }}>{dash}</td>}
       {isVisible('comment') && <td style={{ fontSize: 12 }}>{dash}</td>}

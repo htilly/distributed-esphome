@@ -14,11 +14,13 @@ Configuration options (token, timeouts, polling intervals) are available in the 
 
 ## Web UI
 
-**Devices** — all discovered ESPHome YAML configs with online/offline status (using HA connectivity where available), firmware version, config-changed indicator, and HA integration status. Compile individual, all, or only outdated devices. Inline Monaco YAML editor with ESPHome schema autocomplete and validation. Rename, delete, restart devices, copy API keys, and view live device logs. Configurable columns and search/filter.
+**Devices** — every ESPHome config in one place, with online status, current firmware version, and a one-click link to its Home Assistant page. Compile individual devices, everything that's outdated, or your whole fleet. Create new devices or duplicate existing ones, edit YAML inline with autocomplete and validation, pin individual devices to a specific ESPHome version, and view live device logs.
 
-**Queue** — live job status with build logs. Retry failed jobs, cancel in-progress ones. Entries auto-prune after one hour.
+**Queue** — live job status and build logs. Retry, cancel, or clear jobs individually or in bulk.
 
-**Workers** — connected build workers with online status, current jobs, system info (CPU, memory, disk), and ESPHome version. Adjust slot count per worker (0 = paused), clean per-worker or all build caches, or remove offline workers. Workers running an outdated Docker image are flagged with a clickable "image stale" badge that opens the Connect Worker modal so you can re-run the latest `docker run` command.
+**Workers** — connected build workers with their slot count, cache size, and system info. Includes a built-in local worker and a one-click setup command for adding remote workers. Workers running an outdated image are flagged with an "image stale" badge.
+
+**Schedules** — every scheduled upgrade in one view. Set recurring schedules (daily, weekly, monthly, custom cron) or one-time future upgrades from the device hamburger menu. Schedules are stored alongside the YAML so they travel with your config, and respect each device's pinned ESPHome version.
 
 ## Troubleshooting
 
@@ -51,3 +53,9 @@ cosign verify \
 ```
 
 A successful verification prints the signature payload + the OIDC claims (workflow ref, run ID, commit SHA) — confirming the image was built by the official workflow on this repo and hasn't been tampered with in transit. Run this after `docker pull` and before any production deployment.
+
+## Support
+
+If this add-on has saved you time or frustration, you can support continued development:
+
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-orange?logo=buy-me-a-coffee&logoColor=white&style=for-the-badge)](https://buymeacoffee.com/weirded)
