@@ -93,43 +93,45 @@ _SECURITY_HEADERS = {
 
 @web.middleware
 async def compression_middleware(request: web.Request, handler):
-    """SP.1: opportunistic gzip on JSON responses.
+    """SP.1: opportunistic gzip on UI JSON responses.
 
-    Scope: plain `web.Response` objects (which is what `web.json_response()`
-    returns). A typical /ui/api/targets response on a 50-device fleet is
-    ~40-50 KB of JSON; gzip cuts it to ~5-10 KB. Adds up across 1 Hz polls
-    for devices/queue/workers over slow uplinks (HA Ingress over mobile,
-    VPN, etc.).
+    Scope: /ui/api/* responses that are plain `web.Response` (what
+    `web.json_response()` returns). A typical /ui/api/targets response on
+    a 50-device fleet is ~40-50 KB; gzip cuts it to ~5-10 KB. Adds up
+    across 1 Hz polls for devices/queue/workers over slow uplinks (HA
+    Ingress from mobile / VPN).
 
-    Deliberately excluded:
-      - WebSocketResponse (no body to compress, and prepare() has run).
-      - FileResponse (aiohttp's static handler runs its own Range/cache/
-        compression logic that conflicts with enable_compression's
-        `assert self._payload_writer is not None` in _start_compression).
-        Static JS/CSS are already minified + SWR-cached; the ~300 KB JS
-        bundle is served once per page load so compression there is nice
-        but not critical.
+    Explicitly skipped:
+      - /api/v1/* (worker tier). Worker↔server runs on a local network
+        and the job-claim response carries a base64-encoded tarball of
+        the whole config dir (~46 MB for a full ESPHome workspace);
+        synchronously gzipping that blocks the event loop and saves
+        little on a LAN.
+      - FileResponse (static/). aiohttp's file handler has its own
+        Range/cache/compression logic that conflicts with
+        enable_compression's `assert self._payload_writer is not None`.
+      - WebSocketResponse, status 204/304, and empty-body responses —
+        nothing meaningful to compress, and aiohttp's second assert
+        `self._body is not None` fires on them otherwise.
     """
     response = await handler(request)
-    # Note: `web.Response` is a subclass of StreamResponse; we want ONLY
-    # plain Response (what json_response/Response returns), not FileResponse
-    # / WebSocketResponse / custom StreamResponse subclasses.
-    if type(response) is web.Response and not response.headers.get("Content-Encoding"):
-        # Skip bodyless responses: 204 No Content / 304 Not Modified, plus
-        # any response with no body set. aiohttp's _do_start_compression
-        # asserts `self._body is not None`, which we'd trip on
-        # `web.Response(status=204)` returned by the worker REST API.
-        # Note: `response.body` can be bytes OR a Payload streamer; only
-        # bytes has a meaningful len(), so we special-case bytes only.
-        body = response.body
-        if response.status in (204, 304) or body is None:
-            return response
-        if isinstance(body, (bytes, bytearray)) and len(body) == 0:
-            return response
-        try:
-            response.enable_compression()
-        except Exception:
-            logger.debug("enable_compression failed; sending uncompressed", exc_info=True)
+    if not request.path.startswith("/ui/api/"):
+        return response
+    if type(response) is not web.Response:
+        return response
+    if response.headers.get("Content-Encoding"):
+        return response
+    if response.status in (204, 304):
+        return response
+    body = response.body
+    if body is None:
+        return response
+    if isinstance(body, (bytes, bytearray)) and len(body) == 0:
+        return response
+    try:
+        response.enable_compression()
+    except Exception:
+        logger.debug("enable_compression failed; sending uncompressed", exc_info=True)
     return response
 
 
