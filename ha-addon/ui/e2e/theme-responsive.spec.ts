@@ -18,7 +18,7 @@ test('theme toggle switches data-theme attribute', async ({ page }) => {
   // Default is dark — no data-theme attribute set
   await expect(html).not.toHaveAttribute('data-theme', 'light');
 
-  const toggle = page.locator('header span[title*="Switch to"]');
+  const toggle = page.locator('header button[title*="Switch to"]');
   await toggle.click();
   await expect(html).toHaveAttribute('data-theme', 'light');
 
@@ -29,7 +29,7 @@ test('theme toggle switches data-theme attribute', async ({ page }) => {
 test('theme preference persists across reloads', async ({ page }) => {
   await page.goto('/');
   // Switch to light
-  await page.locator('header span[title*="Switch to"]').click();
+  await page.locator('header button[title*="Switch to"]').click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
 
   // Reload and confirm light mode is restored from localStorage
@@ -37,7 +37,7 @@ test('theme preference persists across reloads', async ({ page }) => {
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
 
   // Switch back so we don't leave the test browser in a non-default state
-  await page.locator('header span[title*="Switch to"]').click();
+  await page.locator('header button[title*="Switch to"]').click();
 });
 
 test('streamer mode toggle adds .streamer class to html', async ({ page }) => {
@@ -45,8 +45,8 @@ test('streamer mode toggle adds .streamer class to html', async ({ page }) => {
   await expect(page.getByText('Living Room Sensor')).toBeVisible({ timeout: 5000 });
 
   const html = page.locator('html');
-  // The streamer toggle button is the only header span whose title mentions "streamer mode"
-  const streamerToggle = page.locator('header span[title*="streamer mode" i]');
+  // The streamer toggle is the only header button whose title mentions "streamer mode"
+  const streamerToggle = page.locator('header button[title*="streamer mode" i]');
   await streamerToggle.click();
   await expect(html).toHaveClass(/streamer/);
 

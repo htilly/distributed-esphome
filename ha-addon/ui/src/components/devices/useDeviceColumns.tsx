@@ -3,9 +3,8 @@ import { createColumnHelper } from '@tanstack/react-table';
 import type { Job, Target } from '../../types';
 import { stripYaml, timeAgo, haDeepLink, formatCronHuman } from '../../utils';
 import { StatusDot } from '../StatusDot';
-import { Button } from '../ui/button';
 import { SortHeader } from '../ui/sort-header';
-import { DeviceContextMenu } from './DeviceContextMenu';
+import { ActionsCell } from './ActionsCell';
 
 /**
  * TanStack column defs for the Devices tab (QS.17).
@@ -404,38 +403,23 @@ export function useDeviceColumns(options: Options) {
     columnHelper.display({
       id: 'actions',
       enableHiding: false,
-      cell: ({ row: { original: t } }) => {
-        const upgradeVariant = t.needs_update ? 'success' : 'secondary';
-        const inFlight = activeJobsByTarget.has(t.target);
-        const upgradeTitle = inFlight
-          ? `A build is already running. Click to queue the next compile (will use the latest YAML at the time it starts).`
-          : undefined;
-        return (
-          <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-            <Button
-              variant={upgradeVariant as 'success' | 'secondary'}
-              size="sm"
-              title={upgradeTitle}
-              onClick={() => onUpgradeOne(t.target)}
-            >
-              Upgrade
-            </Button>
-            <Button variant="secondary" size="sm" onClick={() => onEdit(t.target)}>Edit</Button>
-            <DeviceContextMenu
-              target={t}
-              onToast={onToast}
-              onRename={onRequestRename}
-              onDuplicate={(tg) => onDuplicate(tg.target)}
-              onDelete={onRequestDelete}
-              onLogs={onLogs}
-              onPin={onPin}
-              onUnpin={onUnpin}
-              open={menuOpenTarget === t.target}
-              onOpenChange={(o) => setMenuOpenTarget(o ? t.target : null)}
-            />
-          </div>
-        );
-      },
+      cell: ({ row: { original: t } }) => (
+        <ActionsCell
+          target={t}
+          inFlight={activeJobsByTarget.has(t.target)}
+          menuOpen={menuOpenTarget === t.target}
+          onUpgradeOne={onUpgradeOne}
+          onEdit={onEdit}
+          onLogs={onLogs}
+          onToast={onToast}
+          onDuplicate={onDuplicate}
+          onRequestRename={onRequestRename}
+          onRequestDelete={onRequestDelete}
+          onPin={onPin}
+          onUnpin={onUnpin}
+          onMenuOpenChange={(o) => setMenuOpenTarget(o ? t.target : null)}
+        />
+      ),
     }),
   ], [
     activeJobsByTarget,

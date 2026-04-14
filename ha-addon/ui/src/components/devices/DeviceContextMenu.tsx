@@ -88,7 +88,16 @@ function DeviceContextMenuImpl({
       >
         &#8942;
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-[200px] w-max max-w-[320px]">
+      <DropdownMenuContent
+        align="end"
+        /* #4: disable the Base-UI close animation for this menu instance.
+           Across SWR polls, even small layout shifts in the row can cause
+           Base-UI's Positioner to fire, and if the `data-closed` state
+           toggles briefly the animate-out+animate-in sequence is visible
+           as a "twitch". The open-in animation on first open is preserved;
+           only the close animation is suppressed. */
+        className="min-w-[200px] w-max max-w-[320px] data-[state=closed]:!animate-none"
+      >
         <DropdownMenuGroup>
           <DropdownMenuLabel>Device</DropdownMenuLabel>
           <DropdownMenuItem onClick={() => onLogs(t.target)}>Live Logs</DropdownMenuItem>

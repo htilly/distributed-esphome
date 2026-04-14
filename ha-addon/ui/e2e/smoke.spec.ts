@@ -50,7 +50,7 @@ test('secrets button is present', async ({ page }) => {
 test('theme toggle is present', async ({ page }) => {
   await page.goto('/');
   // Sun or moon icon for theme toggle
-  const toggle = page.locator('header span[title*="Switch to"]');
+  const toggle = page.locator('header button[title*="Switch to"]');
   await expect(toggle).toBeVisible();
 });
 
