@@ -22,13 +22,8 @@ The fleet management release. Schedule upgrades, pin device versions, and create
 
 **Bug fixes**
 
-- Schedules fire at the correct local time (timezone bug could shift fires by hours in non-UTC timezones).
-- Schedules created for the first time wait for the next occurrence instead of firing immediately.
-- The "Remove Schedule" action now removes both recurring and one-time schedules.
-- Web server links work for devices using `web_server:` with default settings.
-- Validation uses the device's pinned ESPHome version, installing it on demand if needed.
-- Cancelled jobs can be retried; retries honor per-device pins.
-- Ghost device rows from deleted clones, and devices that have been offline for more than 4 hours, are now cleaned up automatically.
+- Web server links now appear for devices that enable `web_server:` with default settings.
+- Devices that have been offline for more than 4 hours are now cleaned up automatically, so the Devices tab doesn't fill up with ghost entries from retired or unplugged hardware.
 
 ## 1.3.1
 
