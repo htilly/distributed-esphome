@@ -7,6 +7,8 @@ import {
   DialogFooter,
 } from '../ui/dialog';
 import { Button } from '../ui/button';
+import { Input } from '../ui/input';
+import { Label } from '../ui/label';
 import { stripYaml } from '../../utils';
 
 /**
@@ -36,19 +38,19 @@ export function RenameModal({ currentName, onConfirm, onClose }: {
         <DialogHeader>
           <DialogTitle>Rename Device</DialogTitle>
         </DialogHeader>
-        <div style={{ padding: '16px' }}>
-          <label style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6, display: 'block' }}>
+        <div className="p-4">
+          <Label htmlFor="rename-device-name" className="text-[12px] normal-case tracking-normal mb-1.5">
             New device name
-          </label>
-          <input
+          </Label>
+          <Input
+            id="rename-device-name"
             ref={inputRef}
             type="text"
             value={name}
             onChange={e => setName(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && name.trim() && name.trim() !== stripYaml(currentName) && onConfirm(name.trim())}
-            style={{ width: '100%', padding: '8px 12px', background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', color: 'var(--text)', fontSize: 14 }}
           />
-          <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 8 }}>
+          <p className="text-[12px] text-[var(--text-muted)] mt-2">
             This will update the config file, rename it, and compile + upgrade the device with the new name via OTA.
           </p>
         </div>

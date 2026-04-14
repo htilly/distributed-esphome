@@ -7,6 +7,7 @@ import {
 } from './ui/dialog';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
+import { Label } from './ui/label';
 import { Select } from './ui/select';
 import type { Worker } from '../types';
 
@@ -248,7 +249,7 @@ export function UpgradeModal({
           {!scheduleOnly && (
             <>
               <div>
-                <label className="block text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)] mb-1">Worker</label>
+                <Label>Worker</Label>
                 <Select value={selectedWorker} onChange={e => setSelectedWorker(e.target.value)}>
                   <option value="">&lt;any&gt; — let the scheduler pick</option>
                   {eligibleWorkers.map(w => (
@@ -258,7 +259,7 @@ export function UpgradeModal({
               </div>
 
               <div>
-                <label className="block text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)] mb-1">ESPHome version</label>
+                <Label>ESPHome version</Label>
                 <input
                   type="text"
                   value={versionSearch}

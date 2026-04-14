@@ -7,7 +7,9 @@ import {
   DialogTitle,
 } from './ui/dialog';
 import { Button } from './ui/button';
+import { ButtonGroup } from './ui/button-group';
 import { Input } from './ui/input';
+import { Label } from './ui/label';
 import { Select } from './ui/select';
 
 interface Props {
@@ -139,13 +141,13 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
         <div className="p-[18px]">
           <div className="connect-form">
             <div>
-              <label className="block text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)] mb-1">Server URL</label>
+              <Label>Server URL</Label>
               <Select value={serverUrl} onChange={e => setServerUrl(e.target.value)}>
                 {urlOptions.map(u => <option key={u} value={u}>{u}</option>)}
               </Select>
             </div>
             <div>
-              <label className="block text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)] mb-1">Server Token</label>
+              <Label>Server Token</Label>
               <Input
                 className="sensitive text-[var(--text-muted)] cursor-default"
                 type="text"
@@ -154,7 +156,7 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
               />
             </div>
             <div>
-              <label className="block text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)] mb-1">Container Name</label>
+              <Label>Container Name</Label>
               <Input
                 type="text"
                 value={containerName}
@@ -162,7 +164,7 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
               />
             </div>
             <div>
-              <label className="block text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)] mb-1">Hostname</label>
+              <Label>Hostname</Label>
               <Input
                 type="text"
                 value={hostname}
@@ -171,7 +173,7 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
               />
             </div>
             <div>
-              <label className="block text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)] mb-1">Max Parallel Jobs</label>
+              <Label>Max Parallel Jobs</Label>
               <Input
                 type="number"
                 value={maxJobs}
@@ -181,7 +183,7 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
               />
             </div>
             <div>
-              <label className="block text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)] mb-1">ESPHome Seed Version</label>
+              <Label>ESPHome Seed Version</Label>
               <Input
                 type="text"
                 value={seedVersion}
@@ -189,10 +191,10 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
               />
             </div>
             <div>
-              <label className="block text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)] mb-1">
+              <Label>
                 Host Platform{' '}
                 <span className="text-[var(--text-muted)] font-normal normal-case">(optional)</span>
-              </label>
+              </Label>
               <Input
                 type="text"
                 value={hostPlatform}
@@ -201,7 +203,7 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
               />
             </div>
             <div>
-              <label className="block text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)] mb-1">Restart Policy</label>
+              <Label>Restart Policy</Label>
               <Select value={restartPolicy} onChange={e => setRestartPolicy(e.target.value)}>
                 <option value="unless-stopped">unless-stopped</option>
                 <option value="always">always</option>
@@ -209,13 +211,12 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
               </Select>
             </div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-            <span style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600, letterSpacing: '0.03em' }}>Shell</span>
-            <div style={{ display: 'flex', gap: 0, border: '1px solid var(--border)', borderRadius: 'var(--radius)', overflow: 'hidden' }}>
+          <div className="flex items-center gap-2 mb-2">
+            <Label className="mb-0">Shell</Label>
+            <ButtonGroup>
               <Button
                 variant={shell === 'bash' ? 'default' : 'secondary'}
                 size="sm"
-                style={{ borderRadius: 0, border: 'none' }}
                 onClick={() => setShell('bash')}
               >
                 Bash
@@ -223,12 +224,11 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
               <Button
                 variant={shell === 'powershell' ? 'default' : 'secondary'}
                 size="sm"
-                style={{ borderRadius: 0, border: 'none', borderLeft: '1px solid var(--border)' }}
                 onClick={() => setShell('powershell')}
               >
                 PowerShell
               </Button>
-            </div>
+            </ButtonGroup>
           </div>
           <div className="docker-cmd-wrap">
             <pre className="docker-cmd sensitive">{dockerCmd}</pre>
