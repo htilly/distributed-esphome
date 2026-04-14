@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Calendar, Check, Circle, Clock, Pin, X } from 'lucide-react';
 import {
   useReactTable,
   getCoreRowModel,
@@ -129,13 +130,19 @@ export function SchedulesTab({ targets, workers, onSchedule, onRefresh, onToast 
             onClick={() => onSchedule(t.target)}
           >
             {cronHuman && (
-              <span style={{ opacity: enabled ? 1 : 0.5 }}>
-                🕐 {cronHuman}
+              <span className="inline-flex items-center gap-1" style={{ opacity: enabled ? 1 : 0.5 }}>
+                <Clock className="size-3" aria-hidden="true" />
+                {cronHuman}
                 {!enabled && <span style={{ color: 'var(--text-muted)', marginLeft: 8 }}>(paused)</span>}
               </span>
             )}
             {cronHuman && onceWhen && <br />}
-            {onceWhen && <span>📅 Once: {onceWhen}</span>}
+            {onceWhen && (
+              <span className="inline-flex items-center gap-1">
+                <Calendar className="size-3" aria-hidden="true" />
+                Once: {onceWhen}
+              </span>
+            )}
             {!cronHuman && !onceWhen && <span style={{ color: 'var(--text-muted)' }}>—</span>}
           </span>
         );
@@ -181,9 +188,15 @@ export function SchedulesTab({ targets, workers, onSchedule, onRefresh, onToast 
             {lastEntry
               ? <>
                   {timeAgo(lastEntry.fired_at)}
-                  {lastEntry.outcome === 'enqueued' && <span style={{ color: 'var(--accent)', marginLeft: 4 }}>●</span>}
-                  {lastEntry.outcome === 'success' && <span style={{ color: 'var(--success)', marginLeft: 4 }}>✓</span>}
-                  {lastEntry.outcome === 'failed' && <span style={{ color: 'var(--destructive)', marginLeft: 4 }}>✗</span>}
+                  {lastEntry.outcome === 'enqueued' && (
+                    <Circle className="ml-1 inline size-3 align-text-bottom" fill="currentColor" style={{ color: 'var(--accent)' }} aria-label="enqueued" />
+                  )}
+                  {lastEntry.outcome === 'success' && (
+                    <Check className="ml-1 inline size-3 align-text-bottom" style={{ color: 'var(--success)' }} aria-label="success" />
+                  )}
+                  {lastEntry.outcome === 'failed' && (
+                    <X className="ml-1 inline size-3 align-text-bottom" style={{ color: 'var(--destructive)' }} aria-label="failed" />
+                  )}
                 </>
               : <span style={{ color: 'var(--text-muted)' }}>{formatNextRun(t.schedule, t.schedule_last_run, t.schedule_once)}</span>
             }
@@ -199,7 +212,11 @@ export function SchedulesTab({ targets, workers, onSchedule, onRefresh, onToast 
         return (
           <span style={{ fontSize: 12 }}>
             {version}
-            {t.pinned_version && <span title={`Pinned to ${t.pinned_version}`} style={{ marginLeft: 4, fontSize: 10 }}>📌</span>}
+            {t.pinned_version && (
+              <span title={`Pinned to ${t.pinned_version}`} className="ml-1 inline-flex align-text-bottom">
+                <Pin className="size-3" aria-label="Pinned version" />
+              </span>
+            )}
           </span>
         );
       },

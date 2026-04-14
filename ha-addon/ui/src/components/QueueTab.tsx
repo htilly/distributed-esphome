@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { Calendar, Clock, Pin, User } from 'lucide-react';
 import {
   useReactTable,
   getCoreRowModel,
@@ -194,10 +195,12 @@ export function QueueTab({
             {job.scheduled && (
               <span
                 title={job.schedule_kind === 'once' ? 'Triggered by one-time schedule' : 'Triggered by recurring schedule'}
-                aria-label={job.schedule_kind === 'once' ? 'one-time scheduled run' : 'recurring scheduled run'}
-                style={{ color: 'var(--accent)', fontSize: 11, lineHeight: 1 }}
+                className="inline-flex"
+                style={{ color: 'var(--accent)' }}
               >
-                {job.schedule_kind === 'once' ? '📅' : '🕐'}
+                {job.schedule_kind === 'once'
+                  ? <Calendar className="size-3" aria-label="one-time scheduled run" />
+                  : <Clock className="size-3" aria-label="recurring scheduled run" />}
               </span>
             )}
             {job.pinned_client_id && (
@@ -207,10 +210,10 @@ export function QueueTab({
                     ? `Pinned to ${pinnedHostname} via Upgrade modal`
                     : 'Pinned to a specific worker via Upgrade modal'
                 }
-                aria-label="pinned to specific worker"
-                style={{ color: 'var(--accent)', fontSize: 11, lineHeight: 1 }}
+                className="inline-flex"
+                style={{ color: 'var(--accent)' }}
               >
-                📌
+                <Pin className="size-3" aria-label="pinned to specific worker" />
               </span>
             )}
             <span>
@@ -236,7 +239,11 @@ export function QueueTab({
         return (
           <span style={{ fontSize: 12 }}>
             {job.esphome_version || <span style={{ color: 'var(--text-muted)' }}>—</span>}
-            {isPinned && <span title={`Pinned to ${target.pinned_version}`} style={{ marginLeft: 4, fontSize: 10 }}>📌</span>}
+            {isPinned && (
+              <span title={`Pinned to ${target.pinned_version}`} className="ml-1 inline-flex align-text-bottom">
+                <Pin className="size-3" aria-label="Pinned version" />
+              </span>
+            )}
           </span>
         );
       },
@@ -248,13 +255,25 @@ export function QueueTab({
       header: ({ column }) => <SortHeader label="Triggered" column={column} />,
       cell: ({ row: { original: job } }) => {
         if (!job.scheduled) {
-          return <span style={{ fontSize: 12 }} title="Triggered by user action">👤 User</span>;
+          return (
+            <span className="inline-flex items-center gap-1" style={{ fontSize: 12 }} title="Triggered by user action">
+              <User className="size-3" aria-hidden="true" /> User
+            </span>
+          );
         }
         if (job.schedule_kind === 'once') {
-          return <span style={{ fontSize: 12 }} title="Triggered by one-time schedule">📅 One-time</span>;
+          return (
+            <span className="inline-flex items-center gap-1" style={{ fontSize: 12 }} title="Triggered by one-time schedule">
+              <Calendar className="size-3" aria-hidden="true" /> One-time
+            </span>
+          );
         }
         // Default for scheduled (covers 'recurring' and legacy nulls).
-        return <span style={{ fontSize: 12 }} title="Triggered by recurring cron schedule">🕐 Recurring</span>;
+        return (
+          <span className="inline-flex items-center gap-1" style={{ fontSize: 12 }} title="Triggered by recurring cron schedule">
+            <Clock className="size-3" aria-hidden="true" /> Recurring
+          </span>
+        );
       },
       sortingFn: 'alphanumeric',
     }),

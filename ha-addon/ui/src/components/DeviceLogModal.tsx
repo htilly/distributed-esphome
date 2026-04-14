@@ -1,5 +1,6 @@
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
+import { Download } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { buildWsUrl } from '../api/client';
 import { stripYaml } from '../utils';
@@ -117,7 +118,7 @@ export function DeviceLogModal({ target, onClose }: Props) {
             Copy
           </Button>
           <Button variant="secondary" size="sm" onClick={handleDownload} title="Download log as file">
-            &#8595; Download
+            <Download className="size-3.5 mr-1" aria-hidden="true" /> Download
           </Button>
         </DialogHeader>
         <div style={{ flex: 1, padding: 0, overflow: 'hidden' }}>

@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import { Calendar, Clock, ExternalLink, Pin } from 'lucide-react';
 import { createColumnHelper } from '@tanstack/react-table';
 import type { Job, Target } from '../../types';
 import { stripYaml, timeAgo, haDeepLink, formatCronHuman } from '../../utils';
@@ -138,10 +139,14 @@ export function useDeviceColumns(options: Options) {
             <span className="device-name">
               {t.friendly_name || t.device_name || stripYaml(t.target)}
               {t.schedule && t.schedule_enabled && (
-                <span title={`Recurring schedule: ${t.schedule}`} style={{ marginLeft: 4, fontSize: 11, opacity: 0.7 }}>🕐</span>
+                <span title={`Recurring schedule: ${t.schedule}`} className="ml-1 inline-flex align-text-bottom opacity-70">
+                  <Clock className="size-3" aria-label="Recurring schedule" />
+                </span>
               )}
               {t.schedule_once && (
-                <span title={`One-time schedule: ${t.schedule_once}`} style={{ marginLeft: 4, fontSize: 11, opacity: 0.7 }}>📅</span>
+                <span title={`One-time schedule: ${t.schedule_once}`} className="ml-1 inline-flex align-text-bottom opacity-70">
+                  <Calendar className="size-3" aria-label="One-time schedule" />
+                </span>
               )}
             </span>
             <div className="device-filename">{stripYaml(t.target)}</div>
@@ -198,9 +203,9 @@ export function useDeviceColumns(options: Options) {
                   rel="noopener"
                   title="Open device in Home Assistant"
                   style={{ fontSize: 12, color: 'var(--success)', textDecoration: 'none' }}
-                  className="hover:underline"
+                  className="inline-flex items-center gap-0.5 hover:underline"
                 >
-                  Yes ↗
+                  Yes <ExternalLink className="size-3" aria-hidden="true" />
                 </a>
               );
             }
@@ -226,7 +231,7 @@ export function useDeviceColumns(options: Options) {
                   rel="noopener"
                   className="ip-link"
                 >
-                  {t.ip_address}<span style={{ fontSize: 10 }}>&#8599;</span>
+                  {t.ip_address}<ExternalLink className="inline ml-0.5 size-3 align-text-bottom" aria-hidden="true" />
                 </a>
               )
               : <span style={{ color: 'var(--text-muted)' }}>{t.ip_address || '—'}</span>}
@@ -336,13 +341,19 @@ export function useDeviceColumns(options: Options) {
             onClick={handleClick}
           >
             {cronHuman && (
-              <span style={{ opacity: enabled ? 1 : 0.5 }}>
-                🕐 {cronHuman}
+              <span className="inline-flex items-center gap-1" style={{ opacity: enabled ? 1 : 0.5 }}>
+                <Clock className="size-3" aria-hidden="true" />
+                {cronHuman}
                 {!enabled && <span style={{ color: 'var(--text-muted)', marginLeft: 4 }}>(paused)</span>}
               </span>
             )}
             {cronHuman && onceWhen && <br />}
-            {onceWhen && <span>📅 Once: {onceWhen}</span>}
+            {onceWhen && (
+              <span className="inline-flex items-center gap-1">
+                <Calendar className="size-3" aria-hidden="true" />
+                Once: {onceWhen}
+              </span>
+            )}
           </span>
         );
       },
@@ -355,7 +366,9 @@ export function useDeviceColumns(options: Options) {
         <span style={{ fontSize: 12 }}>
           {t.running_version || '—'}
           {t.pinned_version && (
-            <span title={`Pinned to ${t.pinned_version}`} style={{ marginLeft: 4, fontSize: 10 }}>📌</span>
+            <span title={`Pinned to ${t.pinned_version}`} className="ml-1 inline-flex align-text-bottom">
+              <Pin className="size-3" aria-label="Pinned version" />
+            </span>
           )}
           {t.config_modified && <div className="config-modified">config changed</div>}
         </span>

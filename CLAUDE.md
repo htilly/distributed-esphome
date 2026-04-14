@@ -131,6 +131,7 @@ These aren't grep-checkable but matter just as much. They're how the codebase st
 - **Server state in SWR, UI state in React.** SWR is the cache — read from it, don't copy it into `useState`.
 - **One component per file, colocate related code.** Types/helpers/constants used by a single component live near that component, not in a global utils grab-bag.
 - **Semantic HTML.** `<button>` not `<div onClick>`, `<table>` for tabular data.
+- **Icons: Lucide only.** All UI icons come from `lucide-react`. No emoji glyphs (🕐 📅 📌), no HTML entities (`&#8942;`, `&#9881;`), no custom SVGs inline. Sized with Tailwind (`size-3`, `size-3.5`, `size-4`) to match the shadcn convention. Wrap icon-only buttons with `aria-label` (see QS.2); when the icon carries meaning beyond decoration (status indicator, stateful toggle), wrap in a `<span title="…">` so hover reveals the semantic.
 - **Batch operations get one toast.** Bulk actions use `Promise.all` and a single summary toast — never one toast per item. Bulk actions live in `App.tsx`, not in child component loops.
 - **Think about the UX before shipping.** Walk through the change mentally: does the layout make sense on real data? Would it look sloppy to a user?
 - **Update `.gitignore` whenever a new tool is introduced.** Most tools generate cache/lock/build/report directories — add them in the same commit that introduces the tool.

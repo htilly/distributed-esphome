@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Settings2 } from 'lucide-react';
 import {
   useReactTable,
   getCoreRowModel,
@@ -385,7 +386,7 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
                 aria-label="Toggle columns"
                 title="Toggle columns"
               >
-                &#9881;
+                <Settings2 className="size-3.5" />
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 <DropdownMenuGroup>

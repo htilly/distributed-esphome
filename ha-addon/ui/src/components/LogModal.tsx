@@ -1,5 +1,6 @@
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
+import { Download } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { buildWsUrl, getJobLog } from '../api/client';
 import { copyTerminalText, downloadTerminalText } from '../utils/terminal';
@@ -246,7 +247,7 @@ export function LogModal({ jobId, queue, workers, onClose, onRetry, onEdit, stac
             Copy
           </Button>
           <Button variant="secondary" size="sm" onClick={handleDownload} title="Download log as file">
-            &#8595; Download
+            <Download className="size-3.5 mr-1" aria-hidden="true" /> Download
           </Button>
         </DialogHeader>
         <div style={{ flex: 1, padding: 0, overflow: 'hidden' }}>

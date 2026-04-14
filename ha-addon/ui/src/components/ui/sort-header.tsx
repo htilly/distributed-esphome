@@ -10,6 +10,8 @@
  * on the element with role="columnheader" (implicit on <th>), not on a child.
  */
 
+import { ChevronDown, ChevronUp } from "lucide-react";
+
 type SortState = false | 'asc' | 'desc';
 
 interface SortableColumn {
@@ -20,7 +22,6 @@ interface SortableColumn {
 
 export function SortHeader({ label, column }: { label: string; column: SortableColumn }) {
   const sorted = column.getIsSorted();
-  const indicator = sorted === 'asc' ? ' \u25b2' : sorted === 'desc' ? ' \u25bc' : '';
   const title =
     sorted === 'asc' ? 'Click to sort descending'
     : sorted === 'desc' ? 'Click to reset sort'
@@ -30,9 +31,11 @@ export function SortHeader({ label, column }: { label: string; column: SortableC
       type="button"
       onClick={() => column.toggleSorting(sorted === 'asc')}
       title={title}
-      className="cursor-pointer select-none bg-transparent border-0 p-0 font-inherit text-inherit"
+      className="cursor-pointer select-none bg-transparent border-0 p-0 font-inherit text-inherit inline-flex items-center gap-0.5"
     >
-      {label}{indicator}
+      {label}
+      {sorted === 'asc' && <ChevronUp className="size-3" aria-hidden="true" />}
+      {sorted === 'desc' && <ChevronDown className="size-3" aria-hidden="true" />}
     </button>
   );
 }

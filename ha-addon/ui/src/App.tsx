@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Eye, EyeOff, Moon, Sun } from 'lucide-react';
 import useSWR from 'swr';
 import {
   cancelJobs,
@@ -514,26 +515,26 @@ export default function App() {
         >
           Secrets
         </button>
-        {/* QS.2: aria-label for screen readers on the icon-only theme toggle. */}
+        {/* QS.2/QS.15: aria-label on icon-only buttons; Lucide icons. */}
         <button
           type="button"
           aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
           aria-pressed={theme === 'light'}
-          className="inline-flex items-center justify-center w-7 h-7 rounded-full border border-[var(--border)] bg-[var(--surface2)] text-[13px] text-[var(--text-muted)] cursor-pointer hover:bg-[var(--border)]"
+          className="inline-flex items-center justify-center w-7 h-7 rounded-full border border-[var(--border)] bg-[var(--surface2)] text-[var(--text-muted)] cursor-pointer hover:bg-[var(--border)]"
           onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
           title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
         >
-          {theme === 'dark' ? '☀' : '☾'}
+          {theme === 'dark' ? <Sun className="size-3.5" /> : <Moon className="size-3.5" />}
         </button>
         <button
           type="button"
           aria-label={streamerMode ? 'Disable streamer mode' : 'Enable streamer mode (blur sensitive data)'}
           aria-pressed={streamerMode}
-          className={`inline-flex items-center justify-center w-7 h-7 rounded-full border border-[var(--border)] bg-[var(--surface2)] text-[13px] cursor-pointer hover:bg-[var(--border)] ${streamerMode ? 'text-[var(--accent)]' : 'text-[var(--text-muted)]'}`}
+          className={`inline-flex items-center justify-center w-7 h-7 rounded-full border border-[var(--border)] bg-[var(--surface2)] cursor-pointer hover:bg-[var(--border)] ${streamerMode ? 'text-[var(--accent)]' : 'text-[var(--text-muted)]'}`}
           onClick={() => setStreamerMode(s => !s)}
           title={streamerMode ? 'Disable streamer mode' : 'Enable streamer mode (blur sensitive data)'}
         >
-          {streamerMode ? '🔒' : '👁'}
+          {streamerMode ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
         </button>
         <span className="spacer" />
         <span className="status-dot" title="Server online" />

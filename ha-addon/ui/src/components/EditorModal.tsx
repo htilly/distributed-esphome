@@ -1,4 +1,5 @@
 import Editor, { type OnMount } from '@monaco-editor/react';
+import { Check, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { getTargetContent, saveTargetContent } from '../api/client';
 import {
@@ -279,8 +280,10 @@ export function EditorModal({ target, onClose, onSaved, onToast, onValidate, onC
             }}
           >
             <div className="flex items-center justify-between mb-1">
-              <span className="font-semibold text-[11px] uppercase tracking-wide">
-                {validateResult.success ? '✓ Validation passed' : '✗ Validation failed'}
+              <span className="inline-flex items-center gap-1 font-semibold text-[11px] uppercase tracking-wide">
+                {validateResult.success
+                  ? (<><Check className="size-3.5" aria-hidden="true" /> Validation passed</>)
+                  : (<><X className="size-3.5" aria-hidden="true" /> Validation failed</>)}
               </span>
               <button
                 className="text-[var(--text-muted)] text-[10px] cursor-pointer hover:text-[var(--text)]"

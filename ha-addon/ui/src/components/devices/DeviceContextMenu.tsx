@@ -1,4 +1,5 @@
 import { memo } from 'react';
+import { MoreVertical } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -82,11 +83,11 @@ function DeviceContextMenuImpl({
   return (
     <DropdownMenu open={open} onOpenChange={onOpenChange}>
       <DropdownMenuTrigger
-        className="action-menu-trigger cursor-pointer"
+        className="action-menu-trigger cursor-pointer inline-flex items-center justify-center"
         aria-label="More actions"
         title="More actions"
       >
-        &#8942;
+        <MoreVertical className="size-4" />
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="end"
