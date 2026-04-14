@@ -397,7 +397,12 @@ class JobQueue:
                 job.assigned_at = now
                 job.worker_id = worker_id
                 self._persist()
-                logger.info("Job %s claimed by client %s worker %d", job.id, client_id, worker_id)
+                # #94: include target + hostname so the log line is useful at a
+                # glance without correlating IDs back to the registry/queue.
+                logger.info(
+                    "Job %s (%s) claimed by %s [%s] worker %d",
+                    job.id, job.target, hostname or "?", client_id, worker_id,
+                )
                 return job
             return None
 
@@ -428,12 +433,17 @@ class JobQueue:
                 job._streaming_log = ""
                 job.status_text = None
                 self._persist()
-                logger.info("Job %s OTA result: %s", job_id, ota_result)
+                # #94: include target + worker hostname in the log line.
+                logger.info(
+                    "Job %s (%s on %s) OTA result: %s",
+                    job_id, job.target, job.assigned_hostname or "?", ota_result,
+                )
                 return True
 
             if job.state != JobState.WORKING:
                 logger.warning(
-                    "submit_result: job %s in unexpected state %s", job_id, job.state
+                    "submit_result: job %s (%s) in unexpected state %s",
+                    job_id, job.target, job.state,
                 )
                 return False
             job.state = JobState.SUCCESS if status == "success" else JobState.FAILED
@@ -445,7 +455,12 @@ class JobQueue:
                 job.ota_result = ota_result
             job.finished_at = _utcnow()
             self._persist()
-            logger.info("Job %s finished with status %s", job_id, status)
+            # #94: include target + worker hostname so log readers can see
+            # which device on which worker just finished without joining IDs.
+            logger.info(
+                "Job %s (%s on %s) finished with status %s",
+                job_id, job.target, job.assigned_hostname or "?", status,
+            )
             return True
 
     async def cancel(self, job_ids: list[str]) -> int:

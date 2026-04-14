@@ -1015,7 +1015,6 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
           onRename={(t) => { setMenuTarget(null); setMenuPos(null); setRenameTarget(t); }}
           onDuplicate={(t) => { setMenuTarget(null); setMenuPos(null); onDuplicate(t.target); }}
           onLogs={(t) => { setMenuTarget(null); setMenuPos(null); onLogs(t); }}
-          onSchedule={(t) => { setMenuTarget(null); setMenuPos(null); onSchedule(t); }}
           onPin={(t) => { setMenuTarget(null); setMenuPos(null); handlePin(t); }}
           onUnpin={(t) => { setMenuTarget(null); setMenuPos(null); handleUnpin(t); }}
           onClose={() => { setMenuTarget(null); setMenuPos(null); }}
@@ -1049,7 +1048,6 @@ function DeviceMenu({
   onRename,
   onDuplicate,
   onLogs,
-  onSchedule,
   onPin,
   onUnpin,
   onClose,
@@ -1061,7 +1059,6 @@ function DeviceMenu({
   onRename: (target: string) => void;
   onDuplicate: (target: Target) => void;
   onLogs: (target: string) => void;
-  onSchedule: (target: string) => void;
   onPin: (target: string) => void;
   onUnpin: (target: string) => void;
   onClose: () => void;
@@ -1131,7 +1128,8 @@ function DeviceMenu({
         <div className="-mx-1 my-1 h-px bg-[var(--border)]" />
 
         <div className="px-1.5 py-1 text-xs font-medium text-[var(--text-muted)]">Config</div>
-        <button className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-sm cursor-pointer hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]" onClick={() => onSchedule(t.target)}>Schedule Upgrade...</button>
+        {/* #93: "Schedule Upgrade…" removed — accessible via the Upgrade
+            button by switching to "Scheduled" mode. */}
         {t.pinned_version
           ? <button className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-sm cursor-pointer hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]" onClick={() => onUnpin(t.target)}>Unpin version ({t.pinned_version})</button>
           : <button className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-sm cursor-pointer hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]" onClick={() => onPin(t.target)}>Pin to current version</button>
