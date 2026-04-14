@@ -92,6 +92,36 @@ _SECURITY_HEADERS = {
 
 
 @web.middleware
+async def compression_middleware(request: web.Request, handler):
+    """SP.1: opportunistic gzip on responses.
+
+    A typical /ui/api/targets response on a 50-device fleet is ~40-50 KB of
+    JSON; gzip cuts it to ~5-10 KB. The /ui/api/queue list (after SP.2's
+    log strip) is also a frequent 1 Hz poll target. Static JS/CSS in
+    /static benefits even more.
+
+    aiohttp's `enable_compression()` honors the request's Accept-Encoding,
+    skips compression if the client doesn't advertise gzip, and is a no-op
+    if the response already has Content-Encoding set. WebSocket upgrade
+    responses are explicitly excluded.
+    """
+    response = await handler(request)
+    if (
+        isinstance(response, web.StreamResponse)
+        and not isinstance(response, web.WebSocketResponse)
+        and not response.headers.get("Content-Encoding")
+    ):
+        try:
+            response.enable_compression()
+        except Exception:
+            # enable_compression can raise on already-prepared responses
+            # (e.g. mid-stream WebSocket-like flows); compression is an
+            # optimization, not a correctness requirement.
+            pass
+    return response
+
+
+@web.middleware
 async def security_headers_middleware(request: web.Request, handler):
     """Attach defence-in-depth security headers to UI-tier responses (E.9)."""
     response = await handler(request)
@@ -916,7 +946,7 @@ def create_app() -> web.Application:
 
     device_poller = DevicePoller(poll_interval=cfg.device_poll_interval)
 
-    app = web.Application(middlewares=[security_headers_middleware, version_header_middleware, auth_middleware])
+    app = web.Application(middlewares=[compression_middleware, security_headers_middleware, version_header_middleware, auth_middleware])
     app["config"] = cfg
     app["queue"] = queue
     app["registry"] = registry

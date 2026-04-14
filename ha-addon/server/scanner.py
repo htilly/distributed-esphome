@@ -21,7 +21,12 @@ def set_esphome_version(version: str) -> None:
     """Set the active ESPHome version used for new compile jobs."""
     global _selected_esphome_version
     _selected_esphome_version = version
-    logger.info("ESPHome version set to %s", version)
+    # SP.3 cleanup: the three callers (on_startup, pypi_version_refresher,
+    # ui_api.set_esphome_version_handler) each log their own INFO message
+    # with the right context ("Active ESPHome version: X", "…detected: X",
+    # "…changed to X via UI"). This helper firing its own INFO alongside
+    # duplicated the message at startup and added log noise.
+    logger.debug("ESPHome version set to %s", version)
 
 
 def get_esphome_version() -> str:

@@ -162,8 +162,11 @@ export function LogModal({ jobId, queue, workers, onClose, onRetry, onEdit, stac
       } catch {
         startPolling(jobId);
       }
-    } else if (currentJob?.log) {
-      term.write(currentJob.log);
+    } else if (currentJob) {
+      // SP.2: queue list no longer carries `log`. For terminal jobs, fetch
+      // via /ui/api/jobs/{id}/log — startPolling does one full read and
+      // stops as soon as the response says finished:true.
+      startPolling(jobId);
     }
 
     return () => {

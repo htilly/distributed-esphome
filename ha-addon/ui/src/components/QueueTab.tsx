@@ -303,7 +303,10 @@ export function QueueTab({
       header: () => 'Actions',
       cell: ({ row: { original: job } }) => {
         const inProgress = isJobInProgress(job);
-        const hasLog = !!(job.log || inProgress);
+        // SP.2: log isn't carried in the queue list response anymore. Show the
+        // Log button for any non-pending job — terminal jobs lazy-load the log
+        // via /ui/api/jobs/{id}/log when the modal opens.
+        const hasLog = job.state !== 'pending';
         const canRetry = isJobRetryable(job);
         const canCancel = inProgress;
         return (

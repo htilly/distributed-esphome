@@ -360,15 +360,19 @@ async def get_targets(request: web.Request) -> web.Response:
 
 @routes.get("/ui/api/queue")
 async def get_queue(request: web.Request) -> web.Response:
-    """Return current job queue state."""
+    """Return current job queue state.
+
+    SP.2: `log` is stripped from EVERY job in the list response. Previously
+    only pending/working jobs had their log blanked; terminal jobs carried
+    up to 512 KB of log text each, and 10 finished jobs on a 1 Hz SWR poll
+    = ~5 MB/s steady-state. The log modal and WebSocket tail both fetch
+    per-job via /ui/api/jobs/{id}/log, so the list endpoint doesn't need it.
+    """
     queue = request.app["queue"]
     jobs = []
     for job in queue.get_all():
         d = job.to_dict()
-        # Don't send full log in poll response for active jobs — browser fetches
-        # live logs via WebSocket instead
-        if d["state"] in ("pending", "working"):
-            d["log"] = None
+        d["log"] = None
         jobs.append(d)
     return web.json_response(jobs)
 
