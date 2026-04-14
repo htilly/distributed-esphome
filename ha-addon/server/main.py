@@ -339,9 +339,20 @@ async def ha_entity_poller(app: web.Application) -> None:
                                 )
                         else:
                             body = await resp.text()
+                            # #11: 5xx is almost always HA Core or the
+                            # Supervisor proxy bouncing; suggest the right
+                            # remedy instead of pointing at the (correctly-set)
+                            # homeassistant_api flag.
+                            hint = (
+                                " — HA Core may be restarting; will retry on the next poll"
+                                if 500 <= resp.status < 600 else
+                                " — check homeassistant_api: true in config.yaml"
+                                if resp.status in (401, 403) else
+                                ""
+                            )
                             _log_poll_warning(
                                 f"template_http_{resp.status}",
-                                "HA template API returned HTTP %d: %.200s", resp.status, body,
+                                "HA template API returned HTTP %d%s: %.200s", resp.status, hint, body,
                             )
                 except Exception:
                     _log_poll_warning(
@@ -441,10 +452,20 @@ async def ha_entity_poller(app: web.Application) -> None:
                     timeout=timeout,
                 ) as resp:
                     if resp.status != 200:
+                        # #11: differentiate the hint by status class so 5xx
+                        # (HA Core / Supervisor proxy bouncing) doesn't tell
+                        # the user to "check homeassistant_api" when their
+                        # config is fine.
+                        hint = (
+                            " — HA Core may be restarting; will retry on the next poll"
+                            if 500 <= resp.status < 600 else
+                            " — check homeassistant_api: true in config.yaml"
+                            if resp.status in (401, 403) else
+                            ""
+                        )
                         _log_poll_warning(
                             f"states_http_{resp.status}",
-                            "HA states returned HTTP %d — check homeassistant_api: true in config.yaml",
-                            resp.status,
+                            "HA states returned HTTP %d%s", resp.status, hint,
                         )
                         continue
                     states: list[dict] = await resp.json()

@@ -11,6 +11,3 @@
 build_from:
   aarch64: "docker.io/library/python:3.11-slim"
   amd64: "docker.io/library/python:3.11-slim"
-  armhf: "docker.io/library/python:3.11-slim"
-  armv7: "docker.io/library/python:3.11-slim"
-  i386: "docker.io/library/python:3.11-slim"

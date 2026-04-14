@@ -158,6 +158,16 @@ Triage and merge the 8 open Dependabot PRs. Group into low-risk auto-merge, medi
 
 - [x] **#8** *(not-a-regression — hass-4 is stale)* — Log monitor flagged `UserWarning: Synchronous compression of large response bodies (46306540 bytes)` on hass-4. This is the SP.1 aiohttp warning from the worker job-claim endpoint gzipping a 46 MB config tarball — already fixed in #5 final (commit `585327f` scopes the compression middleware to `/ui/api/*` only, excluding `/api/v1/*` worker endpoints). The warning appears because `hass-4` is still running **1.4.0-dev.52** (pre-release), not the current `1.4.1-dev.10` develop. Will disappear on next `./push-to-hass-4.sh`.
 
+- [x] **#10** *(1.4.1-dev.14)* — Dropped `armhf`, `armv7`, `i386` from `config.yaml` `arch:` and from `build.yaml` `build_from:`. ESPHome compilation is effectively 64-bit-only now; no real-world worker users on those archs. Supervisor's "deprecated arch values" warning gone.
+
+- [x] **#11** *(1.4.1-dev.14)* — Both `_log_poll_warning` callsites in `ha_entity_poller` (template API + states API) now pick the hint based on status class:
+  - **5xx** → "HA Core may be restarting; will retry on the next poll" (the right remedy — wait for HA to come back)
+  - **401/403** → "check homeassistant_api: true in config.yaml" (the original hint, kept where it's actually correct)
+  - other → no hint, just the bare HTTP code
+  Demote-to-debug behavior from 1.3.1 #5 unchanged.
+
+- [x] **#12** *(transient)* — Supervisor `ERROR [supervisor.addons.manager] Version changed, use Update instead Rebuild` at 2026-04-14 10:58:29. Artifact of a Supervisor `ha app rebuild` call firing while the stored add-on version on disk was different from the Supervisor's cached version for the same slug — typically seen during the `./push-to-hass-4.sh` Reload/Update/Rebuild loop. No action needed; the script already handles this by retrying `ha app update` first, which is what eventually succeeded. Not a code bug.
+
 - [x] **#6** *(already fixed by #2 + #4)* — CI failure monitor's first catches on develop. All four already resolved or superseded:
   - [CI #24408342243](https://github.com/weirded/distributed-esphome/actions/runs/24408342243) failure on `44f8445` (QS.16-21 DevicesTab split bundle rebuild) — 2 mocked Playwright failures in `create-device.spec.ts` ("duplicate device" flow). Old selectors targeted the hand-rolled context menu; fixed in bug #2 which moved tests to `getByRole('menuitem')`.
   - [CI #24410409557](https://github.com/weirded/distributed-esphome/actions/runs/24410409557) failure on `41817f6` (QS.1-QS.7 UI hygiene) — 5 mocked Playwright failures on theme toggle and streamer mode tests. Old selectors matched `header span[title*="..."]`; fixed in bug #4 which updated them to `header button[...]` after the `<span onClick>`→`<button>` conversion from QS.3.
