@@ -8,8 +8,7 @@ import {
   type VisibilityState,
   type RowSelectionState,
 } from '@tanstack/react-table';
-import { pinTargetVersion, unpinTargetVersion, setTargetSchedule } from '../api/client';
-import { UpgradeModal } from './UpgradeModal';
+import { pinTargetVersion, unpinTargetVersion } from '../api/client';
 import type { Device, Job, Target, Worker } from '../types';
 import { stripYaml, haDeepLink } from '../utils';
 import { StatusDot } from './StatusDot';
@@ -17,6 +16,7 @@ import { Button } from './ui/button';
 import { getAriaSort } from './ui/sort-header';
 import { DeleteModal, RenameModal } from './devices/DeviceTableModals';
 import { useDeviceColumns } from './devices/useDeviceColumns';
+import { DeviceTableActions } from './devices/DeviceTableActions';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -286,35 +286,7 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
     if (selectedTargets.length === 0) return;
     onCompile(selectedTargets);
   }
-
-  // #2: "Schedule Selected" — open the schedule modal in multi-target mode.
-  // We reuse the same ScheduleModal but apply the result to all selected targets.
-  const [bulkScheduleOpen, setBulkScheduleOpen] = useState(false);
-  function handleScheduleSelected() {
-    if (selectedTargets.length === 0) return;
-    setBulkScheduleOpen(true);
-  }
-
-  // #15: bulk remove schedule from selected devices.
-  // #37: include devices with a one-time schedule, not just recurring.
-  async function handleRemoveScheduleSelected() {
-    const scheduled = selectedTargets.filter(t => {
-      const target = targets.find(x => x.target === t);
-      return target?.schedule || target?.schedule_once;
-    });
-    if (scheduled.length === 0) {
-      onToast('No selected devices have a schedule', 'info');
-      return;
-    }
-    try {
-      const { deleteTargetSchedule } = await import('../api/client');
-      await Promise.all(scheduled.map(t => deleteTargetSchedule(t)));
-      onToast(`Removed schedule from ${scheduled.length} device(s)`, 'success');
-      onRefresh();
-    } catch (err) {
-      onToast('Remove failed: ' + (err as Error).message, 'error');
-    }
-  }
+  // QS.18: bulk schedule state + handlers + modal now live in DeviceTableActions.
 
   // Column visibility for unmanaged rows — derive from TanStack state
   const isVisible = useCallback((col: OptionalColumnId) => columnVisibility[col] !== false, [columnVisibility]);
@@ -389,25 +361,15 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
               </DropdownMenuContent>
             </DropdownMenu>
 
-            {/* #8: Actions dropdown — non-compile bulk operations */}
-            <DropdownMenu>
-              <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg border border-border bg-background px-2.5 h-7 text-[0.8rem] font-medium text-foreground hover:bg-muted cursor-pointer">
-                Actions <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuGroup>
-                  <DropdownMenuItem onClick={handleScheduleSelected} disabled={Object.keys(rowSelection).length === 0}>
-                    Schedule Selected...
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    onClick={handleRemoveScheduleSelected}
-                    disabled={Object.keys(rowSelection).length === 0}
-                  >
-                    Remove Schedule from Selected
-                  </DropdownMenuItem>
-                </DropdownMenuGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            {/* #8 / QS.18: Actions dropdown — non-compile bulk operations. */}
+            <DeviceTableActions
+              selectedTargets={selectedTargets}
+              workers={workers}
+              targets={targets}
+              onToast={onToast}
+              onRefresh={onRefresh}
+            />
+
 
             {/* Column picker (gear icon) */}
             <DropdownMenu>
@@ -511,42 +473,7 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
         />
       )}
 
-      {bulkScheduleOpen && (
-        <UpgradeModal
-          target="(multiple)"
-          displayName={`${selectedTargets.length} device${selectedTargets.length > 1 ? 's' : ''}`}
-          workers={workers}
-          esphomeVersions={[]}
-          defaultEsphomeVersion={null}
-          scheduleOnly
-          defaultMode="schedule"
-          onUpgradeNow={() => {}}
-          onSaveSchedule={async (cron, _version, tz) => {
-            try {
-              await Promise.all(selectedTargets.map(t => setTargetSchedule(t, cron, tz)));
-              onToast(`Schedule set for ${selectedTargets.length} device(s)`, 'success');
-              setBulkScheduleOpen(false);
-              onRefresh();
-            } catch (err) {
-              onToast('Schedule failed: ' + (err as Error).message, 'error');
-            }
-          }}
-          onSaveOnce={async (datetime, _version) => {
-            try {
-              const { setTargetScheduleOnce } = await import('../api/client');
-              await Promise.all(selectedTargets.map(t => setTargetScheduleOnce(t, datetime)));
-              onToast(`One-time upgrade scheduled for ${selectedTargets.length} device(s)`, 'success');
-              setBulkScheduleOpen(false);
-              onRefresh();
-            } catch (err) {
-              onToast('Schedule failed: ' + (err as Error).message, 'error');
-            }
-          }}
-          onDeleteSchedule={() => setBulkScheduleOpen(false)}
-          onClose={() => setBulkScheduleOpen(false)}
-        />
-      )}
-
+      {/* QS.18: bulk schedule UpgradeModal moved into DeviceTableActions. */}
     </div>
   );
 }
