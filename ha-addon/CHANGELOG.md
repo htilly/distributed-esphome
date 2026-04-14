@@ -9,7 +9,8 @@ The fleet management release. Schedule upgrades, pin device versions, and create
 - **Scheduled upgrades** — set any device to upgrade on a recurring schedule (daily, weekly, monthly, custom cron) or at a one-time future date. Times are entered in your local timezone. A new **Schedules tab** lists every scheduled device with its next/last run, status, and recent run history.
 - **Per-device version pinning** — pin individual devices to a specific ESPHome version. Bulk upgrades and scheduled runs respect the pin. The upgrade modal warns you when a one-off upgrade differs from a device's pin.
 - **Create devices from the UI** — "+ New Device" makes a new YAML from a stub; "Duplicate…" clones an existing device (preserving `!include`, `!secret`, and substitutions). Both open the editor on the new file. Cancelling without saving cleans up after itself.
-- **Unified Upgrade dialog** — one dialog handles "upgrade now" and "schedule for later" with a mode toggle. The version dropdown is now searchable and lists every historic ESPHome release from PyPI, with an option to show beta versions.
+- **Unified Upgrade dialog** — one dialog handles "upgrade now" and "schedule for later" with a mode toggle.
+- **Searchable ESPHome version picker** ([#44](https://github.com/weirded/distributed-esphome/issues/44)) — both the header version dropdown and the Upgrade dialog now have a search box and list every historic ESPHome release from PyPI (no more 50-version cap). Beta versions are hidden by default with a "Show betas" toggle.
 - **Home Assistant device deep-links** — the "Yes" indicator in the HA column is now a clickable link to the device's page in Home Assistant.
 - **Cancel and clear queue jobs** — cancelled jobs are now distinct from failed (gray "Cancelled" badge) and can be retried. New "Clear Entire Queue" option cancels everything in flight and clears all terminal jobs in one click.
 
