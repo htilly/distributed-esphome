@@ -86,6 +86,7 @@ export function EsphomeVersionDropdown({ versions, onSelect, onRefresh }: Props)
       <button
         className="rounded-full border border-[var(--border)] bg-[var(--surface2)] px-1.5 py-0.5 text-[11px] text-[var(--text-muted)] cursor-pointer hover:bg-[var(--border)]"
         title="Refresh available ESPHome versions from PyPI"
+        aria-label="Refresh ESPHome versions"
         onClick={onRefresh}
       >
         &#8635;

@@ -207,7 +207,7 @@ export function SchedulesTab({ targets, workers, onSchedule, onRefresh, onToast 
         </Button>
       ),
     }),
-  ], [onSchedule]);
+  ], [onSchedule, history]);
 
   const table = useReactTable({
     data: filteredScheduled,

@@ -175,7 +175,7 @@ export async function getTargetContent(filename: string): Promise<string> {
 /**
  * Save YAML content to a target file. Returns the final target name,
  * which may differ from *filename* when saving a staged new device
- * (#53 — ``.staging/name.yaml`` → ``name.yaml`` on first save).
+ * (#62 — ``.pending.<name>.yaml`` → ``<name>.yaml`` on first save).
  */
 export async function saveTargetContent(
   filename: string,
@@ -308,8 +308,9 @@ export async function deleteArchivedConfig(filename: string): Promise<void> {
 /**
  * Create a new YAML target (CD.3). Without ``source``, creates a minimal
  * stub YAML. With ``source``, duplicates the source file and rewrites
- * ``esphome.name`` to the new filename. Returns the created target name
- * (e.g. "kitchen.yaml").
+ * ``esphome.name`` to the new filename. Returns the created target name,
+ * which is staged as ``.pending.<name>.yaml`` until the first save promotes
+ * it to ``<name>.yaml`` (#62). Cancelling the editor deletes the dotfile.
  */
 export async function createTarget(
   filename: string,
