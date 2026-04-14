@@ -669,7 +669,6 @@ export default function App() {
           // saves first (in handleSaveAndUpgrade) — this just changes what
           // happens AFTER the save.
           onCompile={(target) => handleOpenUpgradeModal(target)}
-          onRename={(target) => { setEditorTarget(null); setRenameModalTarget(target); }}
           monacoTheme={theme === 'light' ? 'vs' : 'vs-dark'}
           esphomeVersion={esphomeVersions.selected ?? esphomeVersions.detected ?? undefined}
         />

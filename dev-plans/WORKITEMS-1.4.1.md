@@ -44,9 +44,12 @@ The current `DevicesTab.tsx` is **1,173 lines with 24 hooks** and an ESLint disa
 
 ## EditorModal + Utils Split
 
-- [ ] **QS.22 Split `EditorModal.tsx` Monaco setup into `editor/` submodule** — extract `monacoSetup.ts`, `completionProvider.ts`, `useYamlValidation.ts`. EditorModal stays as dialog wrapper.
-- [ ] **QS.23 Split `src/utils.ts` grab-bag** — into `utils/format.ts`, `utils/jobState.ts`, `utils/cron.ts`.
-- [ ] **QS.24 Remove dead `_onRename` parameter in `EditorModal.tsx:232`**.
+- [x] **QS.22** *(1.4.1-dev.15)* — New `components/editor/` submodule splitting the ~230 lines of Monaco glue out of EditorModal.tsx:
+  - `yamlValidation.ts` — `ESPHOME_SCHEMA`, `collectSyntaxMarkers`, `validateYaml`, `validateYamlDebounced`, `loadComponentList`, + the `_componentList` / `_validationTimer` module-level state.
+  - `completionProvider.ts` — `getConfigVars`, `findParentComponent`, `currentLineIndent`, `COMMON_SUB_KEYS`, plus `registerEsphomeCompletionProvider` (idempotent — gated on an internal flag so re-mounts don't duplicate) and `setEsphomeVersion` for the async provider to read the current version.
+  - `monacoSetup.ts` — orchestrator `setupEsphomeEditor(editor, monaco)` that wires everything. EditorModal's `handleEditorDidMount` shrank to ~10 lines: store refs, call the orchestrator, add the dirty-decoration change listener. EditorModal.tsx 619 → 319 lines (-48%).
+- [x] **QS.23** *(1.4.1-dev.15)* — Split `src/utils.ts` into `utils/format.ts` (timeAgo, stripYaml, fmtDuration, haDeepLink), `utils/cron.ts` (formatCronHuman), `utils/jobState.ts` (isJob* + getJobBadge). Old `src/utils.ts` kept as a barrel re-export so existing `from '../utils'` callsites work with zero change; new code should import from the submodule.
+- [x] **QS.24** *(1.4.1-dev.15)* — Dropped the unused `onRename` prop from `EditorModal.Props` and the `void _onRename` compat line. Also removed the `onRename={…}` passed from `App.tsx` (the handler it wrapped was never called).
 
 ## Tests and Safety Net
 
@@ -165,6 +168,8 @@ Triage and merge the 8 open Dependabot PRs. Group into low-risk auto-merge, medi
   - **401/403** → "check homeassistant_api: true in config.yaml" (the original hint, kept where it's actually correct)
   - other → no hint, just the bare HTTP code
   Demote-to-debug behavior from 1.3.1 #5 unchanged.
+
+- [x] **#13** *(transient — Docker Hub)* — `Publish Client Docker Image` workflow failed on `develop` @ `59a8301` ([run 24417779600](https://github.com/weirded/distributed-esphome/actions/runs/24417779600)) — the `Build and push` step's buildx output is dominated by an HTML error page (complete with base64-encoded Docker Hub logo), ending in `##[error]buildx failed with: <html...>`. The previous publish ([run 24417488903](https://github.com/weirded/distributed-esphome/actions/runs/24417488903) on `c61be24`, 6 minutes earlier) and the next run on develop both succeeded. Classic symptom of Docker Hub serving a 503/504 error page during base-image pull (probably `library/python:3.11-slim` — same dep as bug #9's hass-4 failure). The commit itself (`fix: drop deprecated archs (#10) + better 5xx hint (#11)`) didn't touch the Dockerfile, so this is pure transient flake. **Re-run the workflow** from the Actions UI (or it'll get retried naturally on next push) — no code fix. If this becomes a pattern, consider pinning `python:3.11-slim` to a digest or switching to the HA base image (`ghcr.io/home-assistant/...`) which would also close bug #7/#9. Two failures attributable to Docker Hub reliability issues in one day (the earlier hass-4 one at 10:48, this one at 19:06) is noise, not a trend — revisit if we see three in a week.
 
 - [x] **#12** *(transient)* — Supervisor `ERROR [supervisor.addons.manager] Version changed, use Update instead Rebuild` at 2026-04-14 10:58:29. Artifact of a Supervisor `ha app rebuild` call firing while the stored add-on version on disk was different from the Supervisor's cached version for the same slug — typically seen during the `./push-to-hass-4.sh` Reload/Update/Rebuild loop. No action needed; the script already handles this by retrying `ha app update` first, which is what eventually succeeded. Not a code bug.
 
