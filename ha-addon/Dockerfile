@@ -1,4 +1,9 @@
-FROM python:3.11-slim
+# #7: use the BUILD_FROM arg set by the Supervisor from build.yaml. The
+# hardcoded `FROM python:3.11-slim` we had before ignored build.yaml's
+# per-arch selection — and tripped Supervisor's "build.yaml deprecated"
+# warning on every parse because nothing here took advantage of it.
+ARG BUILD_FROM=docker.io/library/python:3.11-slim
+FROM ${BUILD_FROM}
 
 ARG BUILD_ARCH
 ARG BUILD_VERSION
