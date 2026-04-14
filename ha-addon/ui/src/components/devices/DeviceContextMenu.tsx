@@ -36,6 +36,15 @@ interface Props {
   onLogs: (target: string) => void;
   onPin: (target: string) => void;
   onUnpin: (target: string) => void;
+  /**
+   * #2: open state is controlled by the parent so it survives the row
+   * re-mounts that follow every SWR poll. If we let Radix manage `open`
+   * internally, the menu would close on every 1Hz refresh because the
+   * column-cell (and its DropdownMenu instance) is torn down when the
+   * useDeviceColumns memo invalidates.
+   */
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
 }
 
 export function DeviceContextMenu({
@@ -47,6 +56,8 @@ export function DeviceContextMenu({
   onLogs,
   onPin,
   onUnpin,
+  open,
+  onOpenChange,
 }: Props) {
   async function handleCopyApiKey() {
     try {
@@ -68,7 +79,7 @@ export function DeviceContextMenu({
   }
 
   return (
-    <DropdownMenu>
+    <DropdownMenu open={open} onOpenChange={onOpenChange}>
       <DropdownMenuTrigger
         className="action-menu-trigger cursor-pointer"
         aria-label="More actions"

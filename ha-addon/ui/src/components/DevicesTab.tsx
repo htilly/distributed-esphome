@@ -143,6 +143,9 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  // #2: hamburger open state lives here so it survives row remounts
+  // triggered by SWR polls. See useDeviceColumns / DeviceContextMenu.
+  const [menuOpenTarget, setMenuOpenTarget] = useState<string | null>(null);
   const [showUnmanaged, setShowUnmanaged] = useState(() => localStorage.getItem('showUnmanaged') !== 'false');
 
   // VP.4 / QS.20: pin/unpin version from the hamburger menu. Memoized so
@@ -257,6 +260,8 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
     onRequestDelete: setDeleteTarget,
     onPin: handlePin,
     onUnpin: handleUnpin,
+    menuOpenTarget,
+    setMenuOpenTarget,
   });
 
 

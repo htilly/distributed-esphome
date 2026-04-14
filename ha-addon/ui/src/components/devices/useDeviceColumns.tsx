@@ -40,6 +40,14 @@ interface Options {
   onRequestDelete: (target: string) => void;
   onPin: (target: string) => void;
   onUnpin: (target: string) => void;
+  /**
+   * #2 followup to QS.16: per-row hamburger open state is owned by
+   * DevicesTab (not Radix's internal state) so it survives row re-mounts
+   * triggered by SWR polls. Pass the currently open target's filename and
+   * a setter that takes a target (or null to close).
+   */
+  menuOpenTarget: string | null;
+  setMenuOpenTarget: (target: string | null) => void;
 }
 
 /**
@@ -90,6 +98,8 @@ export function useDeviceColumns(options: Options) {
     onRequestDelete,
     onPin,
     onUnpin,
+    menuOpenTarget,
+    setMenuOpenTarget,
   } = options;
 
   return useMemo(() => [
@@ -420,6 +430,8 @@ export function useDeviceColumns(options: Options) {
               onLogs={onLogs}
               onPin={onPin}
               onUnpin={onUnpin}
+              open={menuOpenTarget === t.target}
+              onOpenChange={(o) => setMenuOpenTarget(o ? t.target : null)}
             />
           </div>
         );
@@ -438,5 +450,7 @@ export function useDeviceColumns(options: Options) {
     onRequestDelete,
     onPin,
     onUnpin,
+    menuOpenTarget,
+    setMenuOpenTarget,
   ]);
 }
