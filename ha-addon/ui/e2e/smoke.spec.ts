@@ -64,8 +64,10 @@ test('switching to queue tab shows jobs', async ({ page }) => {
 
   // Should see job targets from fixture data
   await expect(page.getByText('bedroom-light')).toBeVisible({ timeout: 5000 });
-  await expect(page.getByText('garage-door')).toBeVisible();
-  await expect(page.getByText('living-room')).toBeVisible();
+  // PT.12 fixtures add a recurring-scheduled garage-door + cancelled
+  // living-room job; multiple rows for those targets is expected.
+  await expect(page.getByText('garage-door').first()).toBeVisible();
+  await expect(page.getByText('living-room').first()).toBeVisible();
 });
 
 test('switching to workers tab shows workers', async ({ page }) => {

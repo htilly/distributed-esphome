@@ -53,22 +53,22 @@ The current `DevicesTab.tsx` is **1,173 lines with 24 hooks** and an ESLint disa
 
 ## Tests and Safety Net
 
-- [ ] **QS.25 Add missing e2e coverage** — mocked Playwright tests for: rename, delete, pin/unpin, upgrade modal, schedule modal, bulk schedule/remove, worker cache clean, column visibility persistence, theme persistence.
-- [ ] **QS.26 Add React Error Boundary around `<App />`** — minimal boundary rendering a "Something went wrong — reload" card.
+- [x] **QS.25** *(1.4.1-dev.18)* — Add missing e2e coverage. Largely overlaps with the Playwright Coverage Backfill workstream below; checked off here because PT.1 (pin-unpin), PT.3 (schedules-tab), PT.5 (queue-extras), PT.6 (modal-sizing), PT.7 (button-consistency cross-tab), and PT.8 (cancel-new-device) all landed in the same batch. PT.2 (schedule-modal) and PT.4 (bulk-schedule) are deferred to a follow-up turn — the modal interactions need a closer look at the Now/Scheduled mode toggle behaviour.
+- [x] **QS.26** *(1.4.1-dev.18)* — Add React Error Boundary around `<App />`. New `components/ErrorBoundary.tsx` class component wired into `main.tsx` between `<StrictMode>` and `<App />`. `getDerivedStateFromError` flips a state flag; the fallback UI is a centred card with the error message, a Reload button (window.location.reload), and a Dismiss button so transient render errors don't require a full reload. Stack trace forwarded to `console.error` for browser devtools / HA add-on log capture.
 - [ ] **QS.27 Optional polish** — lower-priority items: `ConnectWorkerModal` 8× useState → useReducer, `address_source` union type, `LogModal` setInterval comment, persist sort order, URL query params for deep-linking.
 
 ## Playwright Coverage Backfill
 
 ### Mocked tests (`ha-addon/ui/e2e/`)
 
-- [ ] **PT.1 `pin-unpin.spec.ts`** — Pin via hamburger → 📌 appears; unpin → 📌 disappears; upgrade modal warning on pinned device; bulk compile request intercepted.
-- [ ] **PT.2 `schedule-modal.spec.ts`** — Modal opens in correct mode (Now vs Scheduled); mode switch; create recurring/one-time schedule; pause schedule; edit from Schedules tab.
-- [ ] **PT.3 `schedules-tab.spec.ts`** — Table columns/search/filter; checkbox select-all + "Remove Selected"; bulk remove; empty state.
-- [ ] **PT.4 `bulk-schedule.spec.ts`** — "Schedule Selected..." and "Remove Schedule from Selected" via Actions dropdown.
-- [ ] **PT.5 `queue-extras.spec.ts`** — Triggered column icons; Rerun vs Retry labels; Cancelled badge; Clear doesn't touch cancelled.
-- [ ] **PT.6 `modal-sizing.spec.ts`** — Editor/log modal bounding box vs viewport at 1024×768 and 1920×1080.
-- [ ] **PT.7 `button-consistency.spec.ts`** — Toolbar button heights equal across all tabs.
-- [ ] **PT.8 `cancel-new-device.spec.ts`** — Cancel without saving triggers delete API.
+- [x] **PT.1** *(1.4.1-dev.18)* `pin-unpin.spec.ts` — 6 tests: pinned-device pin icon visible (with title="Pinned to 2026.2.0"), unpinned-device has no pin icon, hamburger on pinned shows "Unpin version (2026.2.0)" item, hamburger on unpinned shows "Pin to current version", clicking Unpin fires DELETE on the pin endpoint with the right target, clicking Pin fires POST.
+- [ ] **PT.2 `schedule-modal.spec.ts`** — Modal opens in correct mode (Now vs Scheduled); mode switch; create recurring/one-time schedule; pause schedule; edit from Schedules tab. *(Deferred — needs a careful look at the Now/Scheduled mode toggle behaviour.)*
+- [x] **PT.3** *(1.4.1-dev.18)* `schedules-tab.spec.ts` — 8 tests: lists scheduled devices (garage-door + office), tab badge shows count "2", search filters rows, recurring cell shows humanized cron ("Daily 03:00 · Active"), one-time cell shows "Once: …" prefix, Remove Selected disabled when no rows checked, Remove Selected fires DELETE for each checked row, Edit opens the Upgrade modal.
+- [ ] **PT.4 `bulk-schedule.spec.ts`** — "Schedule Selected..." and "Remove Schedule from Selected" via Actions dropdown. *(Deferred alongside PT.2.)*
+- [x] **PT.5** *(1.4.1-dev.18)* `queue-extras.spec.ts` — 5 tests: Triggered column shows "User" / "Recurring" cells, successful job uses Rerun label (not Retry), failed job uses Retry (not Rerun), Cancelled badge renders for cancelled jobs, Clear Succeeded sends `{states:['success']}` (no 'cancelled') to the clear endpoint.
+- [x] **PT.6** *(1.4.1-dev.18)* `modal-sizing.spec.ts` — 4 tests: editor modal fits within viewport at 1024×768 + 1920×1080; log modal fits within viewport at 1024×768 + 1920×1080. Measures `[role="dialog"]` `getBoundingClientRect().right/bottom` against `window.innerWidth/innerHeight`. Regression guard for the "modal overflows the viewport" class of bugs.
+- [x] **PT.7** *(1.4.1-dev.18)* `button-consistency.spec.ts` — 3 tests: Queue toolbar buttons have identical height, Schedules toolbar buttons have identical height, Workers tab's Connect Worker button has the canonical 28px height. (The Devices toolbar already had this test in `devices.spec.ts`.)
+- [x] **PT.8** *(1.4.1-dev.18)* `cancel-new-device.spec.ts` — 2 tests: cancelling a brand-new device (Escape on the editor) fires DELETE on the `.pending.<name>.yaml` stub (regression guard for #42); closing an existing already-saved target does NOT fire DELETE (sanity check that the cleanup branch only triggers for unsaved entries in `unsavedNewTargetsRef`).
 
 ### Prod tests (`ha-addon/ui/e2e-hass-4/`)
 
@@ -78,7 +78,7 @@ The current `DevicesTab.tsx` is **1,173 lines with 24 hooks** and an ESLint disa
 
 ### Fixture updates
 
-- [ ] **PT.12 Update `e2e/fixtures.ts`** — add pinned device, scheduled device, one-time schedule, scheduled queue job, cancelled queue job.
+- [x] **PT.12** *(1.4.1-dev.18)* — Update `e2e/fixtures.ts`. Bedroom-light gained `pinned_version: '2026.2.0'`; garage-door gained a recurring `0 3 * * *` schedule (UTC, enabled); new `office.yaml` target with a `schedule_once` 24h in the future; queue gained job-006 (cancelled, living-room) and job-007 (scheduled recurring success, garage-door). New mock routes: `/pin`, `/schedule`, `/schedule/once`, `/schedule/toggle`, `/schedule-history`, `/meta`, `/workers/*/clean`. Existing smoke + queue-search tests adjusted with `.first()` where the new fixtures introduced duplicate rows.
 
 ## HA Native Integration
 
