@@ -26,31 +26,63 @@ However, several meaningful security issues remain. The most significant are:
 
 The findings below are detailed with affected code locations and concrete recommendations.
 
+### Post-audit mitigations (shipped since the original audit)
+
+**1.3.1 (supply-chain + hardening pass, Workstream E):**
+- **Hash-pinned Python dependencies** — both `ha-addon/server/requirements.lock` and `ha-addon/client/requirements.lock` generated with `pip-compile --generate-hashes --strip-extras`. Dockerfiles install via `pip install --require-hashes -r requirements.lock`. Closes F-12 at image-build time. `scripts/refresh-deps.sh` regenerates both lockfiles.
+- **CI audit gates** — `pip-audit --requirement <lockfile>` runs in CI for both server and client on every push; `npm audit --audit-level=high --omit=dev` gates the frontend job. Hard failures; any known high/critical advisory blocks merge unless explicitly ignored (see PY-7 below).
+- **Dependabot** — weekly PRs for pip × 2 (server + client), npm × 1 (UI), docker × 2, and github-actions × 1. Open-PR caps kept low to avoid queue pileup.
+- **Cosign-signed GHCR images (keyless / GitHub OIDC)** — both `publish-client.yml` and `publish-server.yml` sign every published tag against the build's digest using `sigstore/cosign-installer@v3` + `cosign sign --yes`. No long-lived keys. Verification instructions in `ha-addon/DOCS.md`. Closes "item 9" (unsigned images) from the supply-chain threat model.
+- **Security response headers middleware** — `security_headers_middleware` in `main.py` adds `Content-Security-Policy`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Permissions-Policy`, and `X-Frame-Options: SAMEORIGIN` to every response **except** `/api/v1/*` (worker tier). CSP allows `wss:` (live log WS), `https://schema.esphome.io` (editor schema), `blob:` workers (Monaco), and `frame-ancestors 'self'` (HA Ingress iframe). Inner-handler headers are not clobbered. Closes F-20.
+- **Typed protocol (pydantic v2)** — every `/api/v1/*` handler parses its body through a typed pydantic model in `protocol.py` (byte-identical server/client copies enforced by `tests/test_protocol.py`). Malformed payloads return structured `ProtocolError` responses with HTTP 400 instead of half-processing. `PROTOCOL_VERSION` gate rejects mismatched peers with a clear error. Reduces the injection surface on the worker API (OWASP A03).
+- **Auth middleware observability (C.2)** — every 401 emits a structured reason (`missing_authorization_header`, `authorization_not_bearer_scheme`, `bearer_token_mismatch`) plus the peer IP at WARNING. IPv6 zone IDs stripped, IPv4-mapped IPv6 unwrapped. `peername=None` paths no longer crash. Addresses A09 logging gap and F-06 operational observability.
+- **Log payload DoS guard (C.3)** — `append_job_log` handler rejects bodies larger than `4 × MAX_LOG_BYTES` (~2MB) with `log_payload_too_large` + HTTP 413 before aiohttp buffers the full input. Augments the existing in-function log cap. Partially addresses F-07.
+- **PY-6 invariant** — `protocol.py` bytes must stay identical between server and client copies (enforced by unit test). Prevents wire-contract drift.
+- **PY-7 invariant** — every `--ignore-vuln` in `pip-audit` must have an inline applicability assessment: why the fix can't be pulled in, whether the vulnerable code path is actually exercised in this codebase, and a date so staleness is visible. Prevents silent CVE dismissals.
+- **PY-8 invariant** — every direct dep in `requirements.txt` must also appear in `requirements.lock`. Enforced by `scripts/check-invariants.sh`. Prevents the 1.3.1-dev.2 class of bug where `croniter` was silently absent from the Docker image because `refresh-deps.sh` wasn't rerun.
+
+**1.4.1 (server-performance + rebrand):**
+- **Compression middleware scope** — gzip is applied only to `/ui/api/*` responses (not `/api/v1/*` worker-tier), so the 46 MB config-bundle tarball sent to workers doesn't block the event loop gzipping it synchronously. Not a security fix per se but prevents a latent DoS via the event-loop stall.
+
+**Deliberately still open** (see summary table for status):
+- F-02 (worker auto-update signing) — image-version gating in 1.3.0 narrowed the blast radius but no signature verification yet.
+- F-08 (job result not validated against claiming worker).
+- F-14 (auth token file mode).
+- F-15 (`X-Ingress-Path` sanitization).
+- F-17 (external_components RCE) — amplifies F-03; full fix deferred.
+- F-18 (worker pip install not hash-pinned) — partial via 1.3.1 image lockfiles; worker-time `esphome==<version>` install remains unpinned.
+- F-19 (GitHub Actions referenced by major-version tags, not SHA-pinned) — Dependabot now watches them but doesn't use SHA pins.
+
 ---
 
 ## Supply Chain Threat Model
 
-The supply chain surface is larger than any single finding in this document suggests, and the worker is the softest target. In priority order:
+This section covers supply-chain surface **introduced or amplified by this project**. Generic ESPHome-ecosystem trust assumptions (the PlatformIO registry, framework SDKs, ESPHome's own `external_components` / `includes` / `libraries` feature) are inherited from any ESPHome install and are not re-litigated here.
+
+In priority order:
 
 1. **Worker installs `esphome==<version>` from PyPI at job time.** `ha-addon/client/version_manager.py:137` shells out to `pip install --no-cache-dir esphome==<version>` with no `--require-hashes`, no index restriction, and no constraint file. The version string is chosen by the worker based on the target YAML's `esphome.esphome_version` (or the server's recommendation). A compromised ESPHome release — or any of its several-hundred transitive dependencies — executes arbitrary Python on every worker the next time it compiles a target pinned to that version. This is strictly worse than F-02 (the server-driven source auto-update) because it does not require the server to be compromised at all: it only requires *any* package in ESPHome's dependency graph to have a bad release. There is no allow-list, no hash manifest, and no signed-build verification.
 
-2. **ESPHome's compile step downloads PlatformIO toolchains** (GCC, linker, framework SDKs, bootloaders) over HTTPS from `dl.registry.platformio.org` and mirrors, then executes those binaries as part of the build. This is inherited from ESPHome and cannot be fully eliminated without breaking compilation, but it means a worker's trust boundary implicitly extends to the PlatformIO registry and every upstream framework (ESP-IDF, Arduino-ESP32, etc.) for every platform its compiled targets use.
+2. **`python:3.11-slim` base image and apt packages are not digest-pinned.** Both `ha-addon/Dockerfile` and `ha-addon/client/Dockerfile` use `FROM python:3.11-slim` (tag, not digest) and `apt-get install -y gcc libffi-dev libssl-dev git` without version constraints. Each rebuild resolves the latest published layer from Docker Hub and the latest apt snapshot from Debian. This is partially constrained by HA's add-on build infrastructure on the server side but fully unconstrained on the client image we publish ourselves. Tracked as F-13 (and extended here).
 
-3. **`external_components:` in user YAML gives arbitrary git → Python import on the worker.** ESPHome's config resolver clones the referenced repository and imports its Python at compile time. Combined with F-03 (the UI API is unauthenticated if port 8765 is reachable without HA Ingress), any LAN-adjacent attacker can `POST /ui/api/targets/<file>/content` a YAML containing an `external_components` block pointing at a git repo they control and obtain code execution on every worker that compiles it. This is tracked as a first-class finding below (F-17).
+3. **GitHub Actions are referenced by floating tags** (`actions/checkout@v4`, `actions/setup-python@v5`, `actions/setup-node@v4`, `actions/upload-artifact@v4`) in every workflow file. A tag-move attack on any of these — or a compromise of a transitively-used action — pushes attacker code into our CI with full access to repo secrets and the GHCR publish token. Tracked as F-19.
 
-4. **`python:3.11-slim` base image and apt packages are not digest-pinned.** Both `ha-addon/Dockerfile` and `ha-addon/client/Dockerfile` use `FROM python:3.11-slim` (tag, not digest) and `apt-get install -y gcc libffi-dev libssl-dev git` without version constraints. Each rebuild resolves the latest published layer from Docker Hub and the latest apt snapshot from Debian. This is partially constrained by HA's add-on build infrastructure on the server side but fully unconstrained on the client image we publish ourselves. Tracked as F-13 (and extended here).
+4. **Python requirements use `>=` constraints** with no lockfile, no `--require-hashes`, and no `pip-audit` in CI. Both `ha-addon/server/requirements.txt` and `ha-addon/client/requirements.txt`. Tracked as F-12.
 
-5. **GitHub Actions are referenced by floating tags** (`actions/checkout@v4`, `actions/setup-python@v5`, `actions/setup-node@v4`, `actions/upload-artifact@v4`) in every workflow file. A tag-move attack on any of these — or a compromise of a transitively-used action — pushes attacker code into our CI with full access to repo secrets and the GHCR publish token. Tracked as F-19.
+5. **Frontend npm has `package-lock.json`** (which does lock hashes transitively, so this is meaningfully better than the Python side), but `package.json` uses `^` ranges, there is no `npm audit` gate in CI, and no advisory feed is consulted before release.
 
-6. **Python requirements use `>=` constraints** with no lockfile, no `--require-hashes`, and no `pip-audit` in CI. Both `ha-addon/server/requirements.txt` and `ha-addon/client/requirements.txt`. Tracked as F-12.
+6. **Server distributes worker source code via `/api/v1/client/code`** and workers execv themselves into it (F-02 chain). The supply-chain relevance is that this pathway bypasses any Docker-image signing or provenance we might add later — fixing upstream build provenance without also fixing F-02 leaves the bypass in place.
 
-7. **Frontend npm has `package-lock.json`** (which does lock hashes transitively, so this is meaningfully better than the Python side), but `package.json` uses `^` ranges, there is no `npm audit` gate in CI, and no advisory feed is consulted before release.
+7. **No SBOM is generated for either Docker image**, and GHCR images are not signed (no cosign attestations, no provenance). Downstream users have no way to verify what they're running matches this source tree.
 
-8. **Server distributes worker source code via `/api/v1/client/code`** and workers execv themselves into it (F-02 chain). The supply-chain relevance is that this pathway bypasses any Docker-image signing or provenance we might add later — fixing upstream build provenance without also fixing F-02 leaves the bypass in place.
-
-9. **No SBOM is generated for either Docker image**, and GHCR images are not signed (no cosign attestations, no provenance). Downstream users have no way to verify what they're running matches this source tree.
-
-**Mitigation approach in 1.3.1:** Workstream E below addresses items 1 (partial, via hash-pinned requirements + release-time dependency update cadence), 5, 6, 9, and adds defensive headers / unauth-RCE fixes for items 3 and the broader UI surface. Items 2 and 8 are explicitly deferred — item 2 is inherent to ESPHome, and item 8 folds into the larger F-02 redesign.
+**Mitigation state (as of 1.4.1-dev):**
+- Item 1 (worker pip install) — partial. Image-build dependencies are hash-pinned (F-12 closed), but the worker-time `pip install esphome==<version>` at job time remains unpinned (F-18).
+- Item 2 (base image not digest-pinned) — WONTFIX. HA add-on build infrastructure controls BUILD_FROM.
+- Item 3 (GitHub Actions floating tags) — partial. Dependabot now opens weekly PRs for major-version bumps, but the actions themselves are still referenced by major tag, not SHA. F-19 remains open.
+- Item 4 (Python requirements unpinned) — **closed**. Lockfiles with `--require-hashes` + `pip-audit` in CI + Dependabot + PY-8 invariant. F-12 resolved.
+- Item 5 (npm audit not in CI) — **closed**. `npm audit --audit-level=high --omit=dev` runs in the frontend CI job.
+- Item 6 (worker source via `/api/v1/client/code`) — unchanged. F-02 still open; image-version gating (`IMAGE_VERSION`/`MIN_IMAGE_VERSION`) landed in 1.3.0 narrowed the blast radius to workers on a current Docker image, but no signature verification yet.
+- Item 7 (no SBOM, no signing) — **closed for signing**. All GHCR tags are cosign-signed via keyless GitHub OIDC (E.10). SBOM generation still deferred (E.7 in the 1.3.1 plan, not blocking).
 
 ---
 
@@ -592,27 +624,27 @@ Do not apply these headers to the `/api/v1/*` worker tier — those responses ar
 
 ## OWASP Top 10 (2021) Assessment
 
-A mapping of this project's findings against OWASP's Top 10 web application risks. Status reflects the code as of 1.3.0 plus the 1.3.1 work planned in Workstream E.
+A mapping of this project's findings against OWASP's Top 10 web application risks. Status reflects current code (1.4.1-dev.33, last refreshed 2026-04-15).
 
 | Category | Status | Evidence in this project |
 |---|---|---|
-| **A01 Broken Access Control** | Vulnerable | F-03 (UI API unauthenticated on direct port), F-06 (Supervisor IP bypass), F-08 (any authenticated worker can submit results for any job) |
-| **A02 Cryptographic Failures** | Vulnerable | F-05 (plaintext HTTP on the worker↔server channel carries secrets.yaml and the bearer token), F-01 (token exposed to browser), F-14 (token file permissions not enforced) |
-| **A03 Injection** | Largely OK | Subprocess invocations use argument lists; YAML is parsed via ESPHome's `safe_load`-based resolver. Residual: F-15 (`X-Ingress-Path` injected into HTML by string replace — low because the header is Supervisor-set) |
-| **A04 Insecure Design** | Vulnerable | F-02 (unsigned worker auto-update pipeline), F-04 (secrets.yaml blast radius to every worker), **F-17 (unauth UI + external_components = worker RCE)**, F-18 (pip install at job time with no integrity check) |
-| **A05 Security Misconfiguration** | Vulnerable | F-13 (base image not digest-pinned), F-20 (no CSP / X-Frame-Options / X-Content-Type-Options on UI responses). Not audited: whether containers run as root (likely yes — neither Dockerfile sets `USER`) |
-| **A06 Vulnerable & Outdated Components** | Vulnerable | F-12 (Python deps unpinned and unhashed), F-18 (worker-time pip install unpinned), no `pip-audit` / `npm audit` in CI, no Dependabot/Renovate configured, no SBOM |
-| **A07 Identification & Authentication Failures** | Partial | Single static shared token with no rotation story, no rate limiting on `/api/v1/workers/register` or other auth-carrying endpoints (F-07 partial). Mitigated by the home-network trust model but worth documenting |
-| **A08 Software & Data Integrity Failures** | Vulnerable (high) | F-02 (worker auto-update has no signature verification), F-18 (pip installs lack hash verification), F-19 (GitHub Actions not SHA-pinned), GHCR images unsigned (no cosign attestations), no SBOM |
-| **A09 Security Logging & Monitoring Failures** | Partial | `auth_middleware` rejects requests silently (tracked separately as Workstream C.2 in WORKITEMS-1.3.1); no audit log of who triggered compiles or edited configs; no alerting on repeated auth failures |
-| **A10 Server-Side Request Forgery (SSRF)** | Low | `device_poller.py` only contacts mDNS-discovered ESPHome devices on well-known ports; the UI currently fetches ESPHome's JSON schema from `schema.esphome.io` (to be moved server-side by Workstream C.5). No attacker-controlled URL is passed to a server-side fetcher |
+| **A01 Broken Access Control** | Vulnerable (by design) | F-03 (UI API unauthenticated on direct port — WONTFIX per threat model), F-06 (Supervisor IP bypass, PARTIAL 1.3.1 with IP normalization + structured 401 logging), F-08 (any authenticated worker can submit results for any job — still OPEN) |
+| **A02 Cryptographic Failures** | Vulnerable (by design) | F-05 (plaintext HTTP on worker↔server — WONTFIX per home-network threat model), F-01 (token exposed to browser — WONTFIX, required for Connect Worker modal), F-14 (token file mode — OPEN) |
+| **A03 Injection** | OK | Subprocess invocations use argument lists; YAML parsed via ESPHome's `safe_load`-based resolver; **all `/api/v1/*` handlers now parse bodies through typed pydantic models (1.3.1) with structured `ProtocolError` on malformed payloads**. Residual: F-15 (`X-Ingress-Path` HTML string-replace — low; Supervisor-set header) |
+| **A04 Insecure Design** | Vulnerable | F-02 (unsigned worker auto-update — PARTIAL 1.3.0 via image-version gating), F-04 (secrets.yaml bundle — WONTFIX), **F-17 (unauth UI + external_components = worker RCE)** still OPEN, F-18 (worker pip install at job time) still OPEN |
+| **A05 Security Misconfiguration** | OK (1.3.1+) | F-13 (base image digest — WONTFIX, HA controls BUILD_FROM). **F-20 CLOSED in 1.3.1 via `security_headers_middleware`** (CSP, X-Content-Type-Options, Referrer-Policy, Permissions-Policy, X-Frame-Options on every `/ui/api/*` + static response). Not audited: whether containers run as root (likely yes — neither Dockerfile sets `USER`) |
+| **A06 Vulnerable & Outdated Components** | Largely OK (1.3.1+) | **F-12 CLOSED:** hash-pinned lockfiles + `--require-hashes` install + `pip-audit` in CI + `npm audit` in CI + Dependabot weekly PRs (pip × 2, npm, docker × 2, github-actions) + PY-7 (CVE applicability assessment) + PY-8 (lockfile sync) invariants. Residual: F-18 (worker-time pip install) still OPEN |
+| **A07 Identification & Authentication Failures** | Partial | Single static shared token with no rotation story. No rate limiting on `/api/v1/workers/register` (F-07 PARTIAL: log payload DoS guarded, queue-size cap + retry rate-limit still TBD). Mitigated by home-network trust model |
+| **A08 Software & Data Integrity Failures** | Partial | F-02 (worker auto-update has no signature verification — OPEN); F-18 (pip installs lack hash verification — OPEN); F-19 (GitHub Actions not SHA-pinned — OPEN but Dependabot watches). **Cosign-signed GHCR images (keyless OIDC) landed in 1.3.1 (E.10)** — verification command in `ha-addon/DOCS.md`. SBOM not yet |
+| **A09 Security Logging & Monitoring Failures** | Partial | **Auth middleware now emits structured 401 reasons with peer IP (1.3.1 bug #3 + C.2).** No audit log of who triggered compiles or edited configs; no alerting on repeated auth failures. Server logs sufficient for post-incident forensics |
+| **A10 Server-Side Request Forgery (SSRF)** | Low | `device_poller.py` only contacts mDNS-discovered ESPHome devices on well-known ports; the editor fetches ESPHome's JSON schema from `schema.esphome.io` (moved into a dedicated `api/esphomeSchema.ts` module during the 1.3.1 UI-1 cleanup — no attacker-controlled URL reaches a server-side fetcher) |
 
-**Highest-leverage fixes** (ordered by ease × impact):
+**Highest-leverage fixes that remain** (ordered by ease × impact):
 
-1. **F-20 — Security headers middleware** — one file, no behavior change, measurable hardening for every existing and future UI bug.
-2. **F-12 + F-18 — Hash-pinned dependencies + release-time audit gate** — addresses A06 and a chunk of A08 simultaneously. Mechanically straightforward with `pip-compile`.
-3. **F-03 authentication** — closes A01 outright and eliminates the remote path in F-17. Deferred to 1.4 because it touches the Ingress trust contract.
-4. **F-17 YAML scan** — defence in depth for the RCE amplification even once F-03 is fixed.
+1. **F-08 job-result authorization check** — one function change in `queue.submit_result()` to require `client_id == job.assigned_client_id`. Closes the "worker A poisons worker B's results" vector. Small code change, meaningful A01 improvement.
+2. **F-14 + F-15 info-rated cleanups** — token file `chmod 0600` and `X-Ingress-Path` regex sanitizer. Each is a one-line fix sitting in the A02/A03 residual buckets.
+3. **F-17 external_components YAML scan** — defence in depth. Reject targets whose resolved config contains `external_components`, `esphome.includes` referencing Python files, or `libraries:` with git/URL sources unless an explicit `allow_external_code: true` add-on option is set.
+4. **F-18 worker pip install hash-pinning** — ship per-ESPHome-version constraints files in the worker image (`esphome-constraints/<version>.txt` generated by `pip-compile --generate-hashes`). Install with `--require-hashes -c` at job time. Refuse versions without shipped constraints rather than falling back to unverified resolution. Highest open supply-chain finding.
 
 ---
 
@@ -644,27 +676,27 @@ The following aspects of the implementation are done well and worth noting expli
 
 Status legend: **FIXED** (resolved, release noted) · **PARTIAL** (partially mitigated in the release noted; residual risk remains) · **OPEN** (still live, planned to fix) · **WONTFIX** (accepted risk by design for the HA add-on threat model) · **INFO** (observation, no action planned).
 
-Status as of 1.3.0 release (last reviewed 2026-04-08 against current code).
+Status as of 1.4.1-dev.33 (last reviewed 2026-04-15 against current code).
 
 | ID   | Finding                                              | Severity | Status | Notes |
 |------|------------------------------------------------------|----------|--------|-------|
 | F-01 | Auth token exposed to browser via server-info API    | High     | WONTFIX | Required for the Connect Worker modal's `docker run` command UX. Risk accepted: the token lives behind HA Ingress authentication, same trust boundary as the rest of HA. |
-| F-02 | Worker auto-update executes arbitrary server code    | High     | PARTIAL (1.3.0) | LIB.0/LIB.1 added `IMAGE_VERSION` / `MIN_IMAGE_VERSION` gating so the server refuses source-code auto-updates to workers running a stale Docker image. The arbitrary-code path itself remains; no signature verification. Full fix (signing or removal) tracked for a future release. |
+| F-02 | Worker auto-update executes arbitrary server code    | High     | PARTIAL (1.3.0) | LIB.0/LIB.1 added `IMAGE_VERSION` / `MIN_IMAGE_VERSION` gating so the server refuses source-code auto-updates to workers running a stale Docker image. The arbitrary-code path itself remains; no signature verification. Full fix (signing or removal) still OPEN. |
 | F-03 | UI API unauthenticated if port 8765 is directly accessible | Medium | WONTFIX | By design — HA Ingress is the only intended access path. Documented in README. |
 | F-04 | `secrets.yaml` included in every build bundle        | Medium   | WONTFIX | Required for ESPHome's `!secret` resolution on the worker. Workers are authenticated and trusted machines in the stated threat model. |
 | F-05 | Worker-server communication is plaintext HTTP        | Medium   | WONTFIX | By design for the home-network threat model. Users with remote workers across segments can front the server with their own reverse proxy (documented). |
-| F-06 | Supervisor IP bypass grants unauthenticated API access | Low    | PARTIAL (1.3.0) | PY.4 moved the hardcoded `172.30.32.2` into `constants.HA_SUPERVISOR_IP`. The bypass itself (IP-based trust) remains. Workstream C.2 in WORKITEMS-1.3.1 will normalize IPv6 supervisor addrs and log refusal reasons. |
-| F-07 | No rate limiting or queue size cap                   | Low      | PARTIAL (1.3.0) | SEC.2 capped streaming logs at 512 KB per job. SEC.3 clamped `max_parallel_jobs` on worker registration (0–32). Queue-size cap and retry rate limit not yet added. |
-| F-08 | Job results not validated against the claiming worker | Low     | OPEN | Still unverified. Candidate for 1.3.1 Workstream B. |
+| F-06 | Supervisor IP bypass grants unauthenticated API access | Low    | PARTIAL (1.3.1) | 1.3.0: PY.4 moved the hardcoded `172.30.32.2` into `constants.HA_SUPERVISOR_IP`. 1.3.1 C.2: `_normalize_peer_ip()` strips IPv6 zone IDs, unwraps IPv4-mapped IPv6, handles `peername=None`. Bug #3 added structured 401 reasons + peer IP logging. The IP-based trust model itself remains. |
+| F-07 | No rate limiting or queue size cap                   | Low      | PARTIAL (1.3.1) | 1.3.0: SEC.2 capped streaming logs at 512 KB per job; SEC.3 clamped `max_parallel_jobs` on registration (0–32). 1.3.1 C.3: `Content-Length` guard on log append at ~2MB (`log_payload_too_large` → HTTP 413) before aiohttp buffers. Queue-size cap and retry rate limit not yet added. |
+| F-08 | Job results not validated against the claiming worker | Low     | OPEN | Still unverified. Candidate for 1.4.x. See OWASP highest-leverage list. |
 | F-09 | Path traversal check correct but worth hardening     | Low      | FIXED (1.3.0) | PY.1 introduced `helpers.safe_resolve()` and every UI API file endpoint now uses it. |
 | F-10 | Monaco editor loaded from unpinned CDN (no SRI)      | Low      | FIXED (1.1.0) | React UI rewrite bundles `monaco-editor` + `@monaco-editor/react` via Vite. No external CDN. |
 | F-11 | Build log content stored unredacted                  | Low      | WONTFIX | Build logs are inherently needed for debugging; scrubbing is imperfect. Mitigated by the F-07 size cap and by the fact that the log API lives behind HA Ingress (see F-03). |
-| F-12 | Dependency versions not pinned                       | Low      | OPEN | `requirements.txt` still uses `>=`. Needs a lockfile or exact pins plus a dependabot/renovate flow. Candidate for 1.3.1. |
+| F-12 | Dependency versions not pinned                       | Low      | FIXED (1.3.1) | E.1 generated `requirements.lock` with `pip-compile --generate-hashes --strip-extras` for both server and client; Dockerfiles install with `--require-hashes`. `scripts/refresh-deps.sh` regenerates. E.5 added `pip-audit` + `npm audit` in CI. E.6 added Dependabot weekly PRs across pip × 2, npm, docker × 2, github-actions. PY-7 invariant requires CVE applicability assessment on every `--ignore-vuln`. PY-8 invariant enforces that every direct dep in `requirements.txt` is pinned in `requirements.lock`. |
 | F-13 | Docker base image not pinned to a digest             | Low      | WONTFIX | HA add-on build infrastructure controls `BUILD_FROM`; pinning a digest would break the official build flow. Trust assumption documented. |
-| F-14 | Auth token file written without explicit permissions | Info     | OPEN | Small hardening. Candidate for 1.3.1. |
-| F-15 | `X-Ingress-Path` injected into HTML unsanitized      | Info     | OPEN | Add a regex sanitizer in `serve_index`. Candidate for 1.3.1. |
-| F-16 | Worker registry not persistent (operational note)    | Info     | INFO | Operational note, not a security issue. No action planned. |
-| F-17 | Unauth UI + `external_components` → worker RCE       | High     | OPEN | Amplifies F-03. Full fix requires closing F-03; defence-in-depth YAML scan + `allow_external_code` gate deferred to 1.4. |
-| F-18 | Worker pip install is not hash-pinned                | High     | OPEN | Partial mitigation in 1.3.1 via E.1 (image-build deps). Worker-time `esphome==<version>` install remains unpinned; full fix (shipped constraints files per ESPHome version) deferred. |
-| F-19 | GitHub Actions referenced by floating tags           | Low      | OPEN | Not included in 1.3.1. Candidate for a follow-up; Dependabot (E.6) will open PRs once it's configured for the `github-actions` ecosystem. |
-| F-20 | Missing security response headers on UI              | Low      | OPEN | Planned for 1.3.1 via E.9 (aiohttp middleware). |
+| F-14 | Auth token file written without explicit permissions | Info     | OPEN | One-line fix (`TOKEN_FILE.chmod(0o600)`). Not prioritized; candidate for a 1.4.x cleanup pass. |
+| F-15 | `X-Ingress-Path` injected into HTML unsanitized      | Info     | OPEN | Add a regex sanitizer in `serve_index`. Not prioritized; Supervisor-set header in practice. |
+| F-16 | Worker registry not persistent (operational note)    | Info     | INFO | Operational note, not a security issue. No action planned. Note: 1.5 **WC.1–WC.5** (worker constraints) introduces a user-assigned durable `WORKER_NAME` that would make this less operationally painful; doesn't change the security posture. |
+| F-17 | Unauth UI + `external_components` → worker RCE       | High     | OPEN | Amplifies F-03. Full fix requires closing F-03; defence-in-depth YAML scan + `allow_external_code` gate not yet landed. |
+| F-18 | Worker pip install is not hash-pinned                | High     | OPEN | 1.3.1 E.1 closed the image-build-time dep install (F-12). Worker-time `pip install esphome==<version>` at job time (`version_manager.py`) is the residual gap. Full fix requires shipping hash-pinned constraints files per supported ESPHome version; tracked on the "highest-leverage fixes that remain" list above. |
+| F-19 | GitHub Actions referenced by floating tags           | Low      | OPEN | Dependabot now opens weekly PRs for major-version bumps (1.4.1 DU.6/7/8 merged `docker/build-push-action` v6→v7, `docker/login-action` v3→v4, `actions/checkout` v4→v6). Tags are still used, not SHAs — tag-move attacks remain possible. SHA-pin-with-comment (`@sha # v4.1.1`) is the canonical fix; low priority. |
+| F-20 | Missing security response headers on UI              | Low      | FIXED (1.3.1) | E.9 added `security_headers_middleware` attaching CSP (allowing `wss:` / `blob:` workers / `schema.esphome.io` / `frame-ancestors 'self'`), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Permissions-Policy` (accelerometer/camera/geolocation/microphone/payment/usb denied), `X-Frame-Options: SAMEORIGIN`. Applied to `/ui/api/*` + static responses; deliberately excluded from `/api/v1/*` worker tier. Tests in `tests/test_security_headers.py`. |
