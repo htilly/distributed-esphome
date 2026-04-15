@@ -1092,3 +1092,97 @@ async def test_heartbeat_image_version_full_parametrization(
             assert "server_client_version" in data
     finally:
         await ta.close()
+
+
+# ---------------------------------------------------------------------------
+# FD.5 — /api/v1/jobs/{id}/firmware (worker uploads compiled binary)
+# ---------------------------------------------------------------------------
+
+async def test_firmware_upload_stores_bin_and_flips_has_firmware(tmp_path, monkeypatch):
+    import firmware_storage
+    firmware_dir = tmp_path / "firmware"
+    monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
+
+    ta = await _make_app(tmp_path)
+    try:
+        job = await ta.queue.enqueue(
+            target="x.yaml", esphome_version="2026.3.2", run_id="r",
+            timeout_seconds=300, download_only=True,
+        )
+        assert job is not None
+        await _register(ta, hostname="w")
+        # Claim moves the job to WORKING.
+        await ta.queue.claim_next("any-client")
+
+        resp = await ta.post(
+            f"/api/v1/jobs/{job.id}/firmware",
+            data=b"\xde\xad\xbe\xef" * 100,
+            headers={**AUTH_HEADERS, "Content-Type": "application/octet-stream"},
+        )
+        assert resp.status == 200
+
+        stored = firmware_storage.firmware_path(job.id, root=firmware_dir)
+        assert stored.is_file()
+        assert stored.read_bytes() == b"\xde\xad\xbe\xef" * 100
+
+        refreshed = ta.queue.get(job.id)
+        assert refreshed.has_firmware is True
+    finally:
+        await ta.close()
+
+
+async def test_firmware_upload_rejects_non_download_only_job(tmp_path, monkeypatch):
+    import firmware_storage
+    monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", tmp_path / "firmware")
+
+    ta = await _make_app(tmp_path)
+    try:
+        job = await ta.queue.enqueue(
+            target="x.yaml", esphome_version="2026.3.2", run_id="r",
+            timeout_seconds=300, download_only=False,
+        )
+        assert job is not None
+        await ta.queue.claim_next("any")
+        resp = await ta.post(
+            f"/api/v1/jobs/{job.id}/firmware",
+            data=b"fw",
+            headers={**AUTH_HEADERS, "Content-Type": "application/octet-stream"},
+        )
+        assert resp.status == 400
+    finally:
+        await ta.close()
+
+
+async def test_firmware_upload_rejects_missing_job(tmp_path):
+    ta = await _make_app(tmp_path)
+    try:
+        resp = await ta.post(
+            "/api/v1/jobs/ghost/firmware",
+            data=b"fw",
+            headers={**AUTH_HEADERS, "Content-Type": "application/octet-stream"},
+        )
+        assert resp.status == 404
+    finally:
+        await ta.close()
+
+
+async def test_firmware_upload_rejects_empty_body(tmp_path, monkeypatch):
+    import firmware_storage
+    monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", tmp_path / "firmware")
+
+    ta = await _make_app(tmp_path)
+    try:
+        job = await ta.queue.enqueue(
+            target="x.yaml", esphome_version="2026.3.2", run_id="r",
+            timeout_seconds=300, download_only=True,
+        )
+        assert job is not None
+        await ta.queue.claim_next("any")
+        resp = await ta.post(
+            f"/api/v1/jobs/{job.id}/firmware",
+            data=b"",
+            headers={**AUTH_HEADERS, "Content-Type": "application/octet-stream"},
+        )
+        assert resp.status == 400
+    finally:
+        await ta.close()

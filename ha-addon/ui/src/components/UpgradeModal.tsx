@@ -111,6 +111,8 @@ interface Props {
     pinnedClientId: string | null;
     esphomeVersion: string | null;
     updatePin?: string | null;
+    /** FD.3: when true, enqueue a compile-and-download job instead of compile+OTA. */
+    downloadOnly?: boolean;
   }) => void;
   /**
    * Save a recurring cron schedule. `version` is the user's pin choice —
@@ -175,6 +177,11 @@ export function UpgradeModal({
 
   // --- Mode: now vs schedule ---
   const [mode, setMode] = useState<'now' | 'schedule'>(scheduleOnly ? 'schedule' : defaultMode);
+  // FD.3: "Now" mode has a sub-toggle: compile+OTA (default) vs
+  // compile+download. The download variant skips OTA entirely; the
+  // worker uploads the binary to the server and the user grabs it
+  // from the Queue tab. Scheduled mode always runs OTA.
+  const [nowAction, setNowAction] = useState<'ota' | 'download'>('ota');
 
   // --- Schedule state ---
   // #90/#91: cron is shown literally in the picker — no client-side hour
@@ -224,7 +231,10 @@ export function UpgradeModal({
       onUpgradeNow({
         pinnedClientId: selectedWorker || null,
         esphomeVersion: selectedVersion && selectedVersion !== defaultEsphomeVersion ? selectedVersion : null,
-        updatePin: shouldUpdatePin ? selectedVersion : null,
+        // FD.3: don't update the pin when we're only producing a
+        // binary to download — the device state hasn't changed.
+        updatePin: nowAction === 'ota' && shouldUpdatePin ? selectedVersion : null,
+        downloadOnly: nowAction === 'download',
       });
     } else {
       if (scheduleType === 'once') {
@@ -322,6 +332,31 @@ export function UpgradeModal({
             </div>
           )}
 
+          {/* FD.3: Compile + OTA vs Compile + Download sub-toggle.
+              Only shown in Now mode; scheduled runs always OTA. */}
+          {!scheduleOnly && mode === 'now' && (
+            <div className="flex items-center gap-4 text-[12px] text-[var(--text-muted)]">
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="radio"
+                  name="upgrade-now-action"
+                  checked={nowAction === 'ota'}
+                  onChange={() => setNowAction('ota')}
+                />
+                Compile + OTA
+              </label>
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="radio"
+                  name="upgrade-now-action"
+                  checked={nowAction === 'download'}
+                  onChange={() => setNowAction('download')}
+                />
+                Compile + Download (no OTA)
+              </label>
+            </div>
+          )}
+
           {/* Schedule options (only visible in schedule mode) */}
           {mode === 'schedule' && (
             <div className="flex flex-col gap-3 pt-1 border-t border-[var(--border)]">
@@ -408,7 +443,9 @@ export function UpgradeModal({
               disabled={mode === 'schedule' && scheduleType === 'once' && !onceDate}
               onClick={handleConfirm}
             >
-              {mode === 'now' ? 'Upgrade' : 'Save Schedule'}
+              {mode === 'now'
+                ? (nowAction === 'download' ? 'Compile & Download' : 'Upgrade')
+                : 'Save Schedule'}
             </Button>
           </div>
         </div>

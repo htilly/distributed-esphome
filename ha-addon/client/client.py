@@ -43,7 +43,7 @@ from sysinfo import collect_system_info
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.4.1-dev.41"
+CLIENT_VERSION = "1.4.1-dev.42"
 
 
 def _read_image_version() -> Optional[str]:
@@ -204,6 +204,13 @@ def post(path: str, data: dict, timeout: int = 30) -> requests.Response:
 def get(path: str, params: Optional[dict] = None, timeout: int = 30) -> requests.Response:
     url = f"{SERVER_URL}{path}"
     return requests.get(url, params=params, headers={**HEADERS, "Content-Type": "application/json"}, timeout=timeout)
+
+
+def post_bytes(path: str, data: bytes, timeout: int = 600) -> requests.Response:
+    """POST raw bytes (e.g. firmware uploads — FD.5). 10 min default timeout."""
+    url = f"{SERVER_URL}{path}"
+    headers = {**HEADERS, "Content-Type": "application/octet-stream"}
+    return requests.post(url, data=data, headers=headers, timeout=timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -764,11 +771,12 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
     timeout_seconds = job.get("timeout_seconds", JOB_TIMEOUT)
     ota_only = job.get("ota_only", False)
     validate_only = job.get("validate_only", False)
+    download_only = job.get("download_only", False)
 
     _log_context.current_target = target
     logger.info(
-        "Starting job %s: target=%s esphome=%s ota_only=%s validate_only=%s",
-        job_id, target, esphome_version, ota_only, validate_only,
+        "Starting job %s: target=%s esphome=%s ota_only=%s validate_only=%s download_only=%s",
+        job_id, target, esphome_version, ota_only, validate_only, download_only,
     )
 
     # Per-slot PlatformIO core directory — prevents cross-slot package conflicts
@@ -868,6 +876,58 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
             )
             _submit_result(job_id, "success" if compile_ok else "failed", log=None, ota_result=None)
             return  # skip compile and OTA phases
+
+        # ---------------------------------------------------------------
+        # Compile-and-download phase (download_only=True) — runs
+        # `esphome compile` (no OTA), locates the produced firmware .bin
+        # under .esphome/build/<device>/.pioenvs/<device>/, POSTs it to
+        # the server, and reports success. FD.4.
+        # ---------------------------------------------------------------
+        if download_only:
+            _report_status(job_id, "Compiling (no OTA)")
+            compile_cmd = [esphome_bin, "compile", target_path]
+            _log_invocation(job_id, compile_cmd)
+            compile_log, compile_ok = _run_subprocess(
+                compile_cmd,
+                cwd=build_dir,
+                timeout=timeout_seconds,
+                label="compile",
+                env=subprocess_env,
+                job_id=job_id,
+            )
+            if not compile_ok:
+                _submit_result(job_id, "failed", log=None, ota_result=None)
+                return
+            # Compile succeeded — warm the shared cache.
+            _sync_slot_into_cache(target_stem, build_dir)
+
+            firmware_path = _locate_firmware_binary(build_dir, target_stem)
+            if firmware_path is None:
+                _flush_log_text(
+                    job_id,
+                    "\n\033[31mERROR: Compile succeeded but firmware binary was "
+                    "not found under .pioenvs/ — nothing to upload.\033[0m\n",
+                )
+                _submit_result(job_id, "failed", log=None, ota_result=None)
+                return
+
+            _report_status(job_id, "Uploading firmware")
+            upload_ok = _upload_firmware(job_id, firmware_path)
+            if not upload_ok:
+                _flush_log_text(
+                    job_id,
+                    "\n\033[31mERROR: Firmware upload to server failed.\033[0m\n",
+                )
+                _submit_result(job_id, "failed", log=None, ota_result=None)
+                return
+
+            _flush_log_text(
+                job_id,
+                f"\nFirmware uploaded to server ({firmware_path.stat().st_size} bytes). "
+                "Download from the Queue tab.\n",
+            )
+            _submit_result(job_id, "success", log=None, ota_result=None)
+            return
 
         # ---------------------------------------------------------------
         # Build + OTA via `esphome run` (compile and upload in one step)
@@ -1137,6 +1197,89 @@ def _submit_result(
             logger.warning("Failed to submit result (attempt %d): %s", attempt + 1, exc)
             if attempt < 2:
                 time.sleep(2)
+
+
+def _locate_firmware_binary(build_dir: str, target_stem: str) -> Optional[Path]:
+    """Find the compiled firmware .bin under .esphome/build/<device>/.
+
+    ESPHome layout after `esphome compile` is:
+      {build_dir}/.esphome/build/{device_name}/.pioenvs/{device_name}/firmware.factory.bin   (ESP32)
+      {build_dir}/.esphome/build/{device_name}/.pioenvs/{device_name}/firmware.bin           (ESP8266)
+
+    The device name can differ from the target filename stem if the
+    YAML uses substitutions. Walk the build tree and pick the largest
+    `firmware.*.bin` we find — on ESP32 that's `firmware.factory.bin`
+    (~1-2MB, the full flash image); on ESP8266 it's `firmware.bin`.
+    Logs what it picked so ESPHome-version-specific layout changes are
+    diagnosable from the job log.
+    """
+    esphome_build = Path(build_dir) / ".esphome" / "build"
+    if not esphome_build.is_dir():
+        logger.warning(
+            "Build tree %s does not exist — compile likely failed or produced no artifacts",
+            esphome_build,
+        )
+        return None
+
+    # Prefer .factory.bin (full flash image) when present; fall back to
+    # firmware.bin (ESP8266 / OTA-only ESP32 build variant).
+    candidates: list[Path] = []
+    for device_dir in esphome_build.iterdir():
+        if not device_dir.is_dir():
+            continue
+        for name in ("firmware.factory.bin", "firmware.bin"):
+            p = device_dir / ".pioenvs" / device_dir.name / name
+            if p.is_file():
+                candidates.append(p)
+
+    if not candidates:
+        logger.warning("No firmware binary found under %s", esphome_build)
+        return None
+
+    # factory.bin > firmware.bin (lexicographic puts factory first which is fine)
+    candidates.sort(key=lambda p: (0 if "factory" in p.name else 1, -p.stat().st_size))
+    picked = candidates[0]
+    logger.info(
+        "Located firmware binary for %s: %s (%d bytes)",
+        target_stem, picked, picked.stat().st_size,
+    )
+    return picked
+
+
+def _upload_firmware(job_id: str, path: Path) -> bool:
+    """POST the compiled binary to the server. Returns True on success."""
+    try:
+        data = path.read_bytes()
+    except Exception as exc:
+        logger.error("Failed to read firmware %s: %s", path, exc)
+        return False
+
+    for attempt in range(3):
+        try:
+            resp = post_bytes(
+                f"/api/v1/jobs/{job_id}/firmware",
+                data,
+                timeout=600,
+            )
+            if resp.ok:
+                logger.info(
+                    "Uploaded firmware for job %s (%d bytes) → server",
+                    job_id, len(data),
+                )
+                return True
+            logger.warning(
+                "Server rejected firmware for job %s: %d %s",
+                job_id, resp.status_code, resp.text,
+            )
+            return False
+        except Exception as exc:
+            logger.warning(
+                "Firmware upload attempt %d failed for job %s: %s",
+                attempt + 1, job_id, exc,
+            )
+            if attempt < 2:
+                time.sleep(3)
+    return False
 
 
 def _submit_ota_result(job_id: str, ota_result: str, ota_log: Optional[str]) -> None:

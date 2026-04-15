@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,13 @@ class Job:
     ota_result: Optional[str] = None
     ota_only: bool = False  # skip compile, just re-run OTA upload
     validate_only: bool = False  # run esphome config (validation) instead of compile+OTA
+    # FD.1: run `esphome compile` (no OTA) and upload the resulting
+    # binary back to the server for download. Mutually exclusive with
+    # validate_only.
+    download_only: bool = False
+    # FD.1: set to True once the worker has POSTed the binary to
+    # /api/v1/jobs/{id}/firmware. Drives the Queue-tab Download button.
+    has_firmware: bool = False
     ota_address: Optional[str] = None  # override OTA target address (used after rename)
     pinned_client_id: Optional[str] = None  # only this client can claim the job
     # #23: True if this job is a coalesced "follow-up" — created while another
@@ -99,6 +106,8 @@ class Job:
             "ota_result": self.ota_result,
             "ota_only": self.ota_only,
             "validate_only": self.validate_only,
+            "download_only": self.download_only,
+            "has_firmware": self.has_firmware,
             "ota_address": self.ota_address,
             "pinned_client_id": self.pinned_client_id,
             "is_followup": self.is_followup,
@@ -132,6 +141,8 @@ class Job:
             ota_result=d.get("ota_result"),
             ota_only=d.get("ota_only", False),
             validate_only=d.get("validate_only", False),
+            download_only=d.get("download_only", False),
+            has_firmware=d.get("has_firmware", False),
             ota_address=d.get("ota_address"),
             pinned_client_id=d.get("pinned_client_id"),
             is_followup=d.get("is_followup", False),
@@ -144,6 +155,23 @@ class Job:
             return None
         end = self.finished_at or _utcnow()
         return (end - self.assigned_at).total_seconds()
+
+
+def _purge_firmware(job_ids: Iterable[str]) -> None:
+    """Remove .bin files for removed jobs (FD.7).
+
+    Imported lazily so unit tests that replace `DEFAULT_FIRMWARE_DIR`
+    via monkeypatch see the patched value.
+    """
+    try:
+        from firmware_storage import delete_firmware  # noqa: PLC0415
+    except Exception:
+        return
+    for jid in job_ids:
+        try:
+            delete_firmware(jid)
+        except Exception:
+            logger.debug("Firmware purge for %s raised", jid, exc_info=True)
 
 
 class JobQueue:
@@ -220,6 +248,13 @@ class JobQueue:
         if skipped:
             logger.warning("Skipped %d unparseable job entries on startup", skipped)
         logger.info("Loaded %d jobs from %s (persisted across restarts)", len(self._jobs), self._queue_file)
+        # FD.7: sweep orphan firmware binaries whose job no longer
+        # exists (add-on crashed mid-cleanup, etc.).
+        try:
+            from firmware_storage import reconcile_orphans  # noqa: PLC0415
+            reconcile_orphans(self._jobs.keys())
+        except Exception:
+            logger.debug("Firmware reconciliation skipped", exc_info=True)
 
     # ------------------------------------------------------------------
     # Public API
@@ -232,6 +267,7 @@ class JobQueue:
         run_id: str,
         timeout_seconds: int,
         validate_only: bool = False,
+        download_only: bool = False,
         ota_address: Optional[str] = None,
         pinned_client_id: Optional[str] = None,
     ) -> Optional[Job]:
@@ -313,6 +349,9 @@ class JobQueue:
                 del self._jobs[jid]
             if stale:
                 logger.debug("Removed %d stale job(s) for target %s", len(stale), target)
+                # FD.7: purge any firmware binaries the stale jobs owned
+                # so per-target coalescing doesn't leak disk storage.
+                _purge_firmware(stale)
 
             is_followup = active is not None and active.state == JobState.WORKING and not validate_only
             job = Job(
@@ -323,6 +362,7 @@ class JobQueue:
                 run_id=run_id,
                 timeout_seconds=timeout_seconds,
                 validate_only=validate_only,
+                download_only=download_only,
                 ota_address=ota_address,
                 pinned_client_id=pinned_client_id,
                 is_followup=is_followup,
@@ -701,24 +741,31 @@ class JobQueue:
             return len(to_remove)
 
     async def remove_jobs(self, job_ids: list[str]) -> int:
-        """Remove terminal jobs by ID. Returns count removed."""
+        """Remove terminal jobs by ID. Returns count removed.
+
+        FD.7: deletes the associated firmware binary (if any) alongside
+        the queue entry so storage tracks the queue.
+        """
         terminal = {JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT, JobState.CANCELLED}
         async with self._lock:
-            removed = 0
+            removed_ids: list[str] = []
             for job_id in job_ids:
                 job = self._jobs.get(job_id)
                 if job and job.state in terminal:
                     del self._jobs[job_id]
-                    removed += 1
-            if removed:
+                    removed_ids.append(job_id)
+            if removed_ids:
                 self._persist()
-            return removed
+        _purge_firmware(removed_ids)
+        return len(removed_ids)
 
     async def clear(self, states: list[str], require_ota_success: bool = False) -> int:
         """Remove terminal jobs whose state is in *states*. Returns count removed.
 
         If *require_ota_success* is True, jobs with ota_result == 'failed' are
         kept even if their state matches (so "Clear Succeeded" leaves OTA-failed jobs).
+
+        FD.7: firmware binaries for removed jobs are deleted from disk.
         """
         terminal = {JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT, JobState.CANCELLED}
         target_states = {JobState(s) for s in states if JobState(s) in terminal}
@@ -734,4 +781,34 @@ class JobQueue:
                 del self._jobs[job_id]
             if to_remove:
                 self._persist()
-            return len(to_remove)
+        _purge_firmware(to_remove)
+        return len(to_remove)
+
+    async def mark_firmware_stored(self, job_id: str) -> bool:
+        """Record that a worker has uploaded the .bin for *job_id*.
+
+        Returns True when the flag was flipped. Called by the worker
+        firmware-upload endpoint (FD.5).
+        """
+        async with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return False
+            if job.state != JobState.WORKING:
+                logger.warning(
+                    "Refusing firmware upload for job %s in state %s (not WORKING)",
+                    job_id, job.state.value,
+                )
+                return False
+            if not job.download_only:
+                logger.warning(
+                    "Refusing firmware upload for non-download-only job %s", job_id,
+                )
+                return False
+            job.has_firmware = True
+            self._persist()
+            return True
+
+    def active_job_ids(self) -> set[str]:
+        """Snapshot of current job ids — used by firmware-storage reconciliation."""
+        return set(self._jobs.keys())

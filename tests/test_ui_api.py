@@ -798,3 +798,90 @@ async def test_create_target_duplicate_missing_source(tmp_path):
         assert resp.status == 404
     finally:
         await ta.close()
+
+
+# ---------------------------------------------------------------------------
+# FD.2 / FD.6 — compile(download_only) + /ui/api/jobs/{id}/firmware download
+# ---------------------------------------------------------------------------
+
+async def test_compile_accepts_download_only_flag(tmp_path):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "a.yaml", "a")
+        resp = await ta.post(
+            "/ui/api/compile",
+            json={"targets": ["a.yaml"], "download_only": True},
+        )
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["enqueued"] == 1
+        job = ta.queue.get_all()[0]
+        assert job.download_only is True
+        assert job.has_firmware is False
+    finally:
+        await ta.close()
+
+
+async def test_compile_defaults_download_only_to_false(tmp_path):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "a.yaml", "a")
+        resp = await ta.post("/ui/api/compile", json={"targets": ["a.yaml"]})
+        assert resp.status == 200
+        job = ta.queue.get_all()[0]
+        assert job.download_only is False
+    finally:
+        await ta.close()
+
+
+async def test_firmware_download_streams_stored_bin(tmp_path, monkeypatch):
+    import firmware_storage
+    firmware_dir = tmp_path / "firmware"
+    monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
+
+    ta = await _make_ui_app(tmp_path)
+    try:
+        job = await ta.queue.enqueue(
+            target="office.yaml", esphome_version="2026.3.2", run_id="r",
+            timeout_seconds=300, download_only=True,
+        )
+        assert job is not None
+        await ta.queue.claim_next("any")
+        firmware_storage.save_firmware(job.id, b"HELLO_FW", root=firmware_dir)
+        await ta.queue.mark_firmware_stored(job.id)
+
+        resp = await ta.get(f"/ui/api/jobs/{job.id}/firmware")
+        assert resp.status == 200
+        body = await resp.read()
+        assert body == b"HELLO_FW"
+        # Must arrive as an attachment with a filename derived from the target + short id.
+        cd = resp.headers.get("Content-Disposition", "")
+        assert "attachment" in cd
+        assert "office-" in cd
+        assert cd.endswith('.bin"')
+    finally:
+        await ta.close()
+
+
+async def test_firmware_download_returns_404_when_unavailable(tmp_path):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        job = await ta.queue.enqueue(
+            target="a.yaml", esphome_version="2026.3.2", run_id="r",
+            timeout_seconds=300, download_only=True,
+        )
+        assert job is not None
+        # has_firmware is False → endpoint returns 404.
+        resp = await ta.get(f"/ui/api/jobs/{job.id}/firmware")
+        assert resp.status == 404
+    finally:
+        await ta.close()
+
+
+async def test_firmware_download_404_when_job_missing(tmp_path):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        resp = await ta.get("/ui/api/jobs/ghost/firmware")
+        assert resp.status == 404
+    finally:
+        await ta.close()

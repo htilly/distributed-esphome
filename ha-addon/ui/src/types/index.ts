@@ -203,6 +203,12 @@ export interface Job {
   status_text?: string;
   ota_only?: boolean;
   validate_only?: boolean;
+  /** FD.1: compile-and-download mode — skips OTA, binary uploaded to server. */
+  download_only?: boolean;
+  /** FD.1: true once the worker has POSTed the .bin and it's available
+   *  from GET /ui/api/jobs/{id}/firmware. Drives the Queue tab's Download
+   *  button visibility. */
+  has_firmware?: boolean;
   ota_result?: string;
   log?: string;
 }

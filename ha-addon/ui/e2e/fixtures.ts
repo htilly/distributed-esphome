@@ -199,6 +199,20 @@ export const queue: Job[] = [
     duration_seconds: 100,
     ota_result: 'success',
   },
+  // FD.8 — download-only job with a firmware binary ready. Queue-tab
+  // renders the Download button exclusively for this row.
+  {
+    id: 'job-008',
+    target: 'office.yaml',
+    state: 'success',
+    download_only: true,
+    has_firmware: true,
+    assigned_client_id: 'worker-1',
+    assigned_hostname: 'build-server-1',
+    created_at: new Date(Date.now() - 2100_000).toISOString(),
+    finished_at: new Date(Date.now() - 2000_000).toISOString(),
+    duration_seconds: 100,
+  },
 ];
 
 const configContent = `esphome:
@@ -282,6 +296,16 @@ export async function mockApi(page: Page) {
   );
   await page.route('**/ui/api/jobs/*/log*', route =>
     route.fulfill({ json: { log: 'INFO Compiling...\nINFO Done.\n', offset: 100, finished: true } }),
+  );
+  // FD.6 — firmware download. Short tiny payload; tests just verify the
+  // request reaches this URL, not the byte content.
+  await page.route('**/ui/api/jobs/*/firmware', route =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/octet-stream',
+      headers: { 'Content-Disposition': 'attachment; filename="firmware.bin"' },
+      body: 'FIRMWARE_BYTES',
+    }),
   );
   await page.route('**/ui/api/targets/*/rename', route =>
     route.fulfill({ json: { new_filename: 'renamed.yaml' } }),

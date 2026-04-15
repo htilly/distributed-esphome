@@ -146,10 +146,12 @@ export async function compile(
   targets: string[] | 'all' | 'outdated',
   pinnedClientId?: string,
   esphomeVersion?: string,
+  downloadOnly?: boolean,
 ): Promise<CompileResponse> {
   const body: Record<string, unknown> = { targets };
   if (pinnedClientId) body.pinned_client_id = pinnedClientId;
   if (esphomeVersion) body.esphome_version = esphomeVersion;
+  if (downloadOnly) body.download_only = true;
   return parseResponse<CompileResponse>(
     await apiFetch('./ui/api/compile', {
       method: 'POST',

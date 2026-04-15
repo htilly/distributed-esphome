@@ -11,7 +11,7 @@ import {
   type SortingFn,
 } from '@tanstack/react-table';
 import type { Job, Target, Worker } from '../types';
-import { Button } from './ui/button';
+import { Button, buttonVariants } from './ui/button';
 import { SortHeader, getAriaSort } from './ui/sort-header';
 import { fmtDuration, getJobBadge, stripYaml, timeAgo, isJobSuccessful, isJobInProgress, isJobFailed, isJobFinished, isJobRetryable } from '../utils';
 import {
@@ -326,6 +326,9 @@ export function QueueTab({
         const hasLog = job.state !== 'pending';
         const canRetry = isJobRetryable(job);
         const canCancel = inProgress;
+        // FD.8: Download button is only meaningful for a successful
+        // download-only job whose worker has actually uploaded the .bin.
+        const canDownload = job.state === 'success' && !!job.download_only && !!job.has_firmware;
         return (
           <div className="flex gap-1">
             {canCancel && (
@@ -339,6 +342,16 @@ export function QueueTab({
               isJobSuccessful(job)
                 ? <Button variant="success" size="sm" onClick={() => onRetry([job.id])}>Rerun</Button>
                 : <Button variant="warn" size="sm" onClick={() => onRetry([job.id])}>Retry</Button>
+            )}
+            {canDownload && (
+              <a
+                href={`./ui/api/jobs/${job.id}/firmware`}
+                download
+                className={buttonVariants({ variant: 'secondary', size: 'sm' })}
+                title="Download compiled firmware binary"
+              >
+                Download
+              </a>
             )}
             {hasLog && (
               <Button variant="secondary" size="sm" onClick={() => onOpenLog(job.id)}>Log</Button>

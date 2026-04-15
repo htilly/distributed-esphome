@@ -360,6 +360,7 @@ async def get_next_job(request: web.Request) -> web.Response:
         timeout_seconds=job.timeout_seconds,
         ota_only=job.ota_only,
         validate_only=job.validate_only,
+        download_only=job.download_only,
         ota_address=job.ota_address,
         server_timezone=server_tz,
     )
@@ -401,6 +402,44 @@ async def submit_job_result(request: web.Request) -> web.Response:
                 asyncio.create_task(device_poller.refresh_target(job.target))
             except Exception:
                 logger.exception("Failed to schedule post-OTA device refresh for %s", job.target)
+
+    return web.json_response(OkResponse().model_dump())
+
+
+@routes.post("/api/v1/jobs/{id}/firmware")
+async def upload_job_firmware(request: web.Request) -> web.Response:
+    """FD.5 — worker uploads the compiled binary for a download-only job.
+
+    Body: raw bytes of the `.bin`. Rejected unless the job is WORKING and
+    was enqueued as download_only. Idempotent — a re-upload overwrites.
+    """
+    job_id = request.match_info["id"]
+    queue = request.app["queue"]
+
+    job = queue.get(job_id)
+    if job is None:
+        return _protocol_error("job_not_found", status=404)
+    if not job.download_only:
+        return _protocol_error("job_not_download_only", status=400)
+
+    data = await request.read()
+    if not data:
+        return _protocol_error("empty_firmware_body", status=400)
+
+    from firmware_storage import save_firmware, delete_firmware  # noqa: PLC0415
+    try:
+        save_firmware(job_id, data)
+    except Exception:
+        logger.exception("Failed to save firmware for job %s", job_id)
+        return _protocol_error("firmware_save_failed", status=500)
+
+    ok = await queue.mark_firmware_stored(job_id)
+    if not ok:
+        # Race: the job transitioned out of WORKING between the start
+        # of the upload and now. The binary is on disk; delete it
+        # since the queue entry can't point at it.
+        delete_firmware(job_id)
+        return _protocol_error("job_not_eligible", status=409)
 
     return web.json_response(OkResponse().model_dump())
 

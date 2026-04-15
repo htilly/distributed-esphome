@@ -264,6 +264,7 @@ export default function App() {
     pinnedClientId: string | null;
     esphomeVersion: string | null;
     updatePin?: string | null;
+    downloadOnly?: boolean;
   }) {
     const ctx = upgradeModalTarget;
     if (!ctx) return;
@@ -273,13 +274,21 @@ export default function App() {
       if (params.updatePin) {
         await pinTargetVersion(ctx.target, params.updatePin);
       }
-      await compile([ctx.target], params.pinnedClientId ?? undefined, params.esphomeVersion ?? undefined);
+      await compile(
+        [ctx.target],
+        params.pinnedClientId ?? undefined,
+        params.esphomeVersion ?? undefined,
+        params.downloadOnly ?? false,
+      );
       const versionSuffix = params.esphomeVersion ? ` (ESPHome ${params.esphomeVersion})` : '';
       const workerSuffix = params.pinnedClientId
         ? ` on ${workers.find(w => w.client_id === params.pinnedClientId)?.hostname ?? params.pinnedClientId}`
         : '';
       const pinSuffix = params.updatePin ? ` (pin updated to ${params.updatePin})` : '';
-      addToast(`Queued ${ctx.displayName}${workerSuffix}${versionSuffix}${pinSuffix}`, 'success');
+      // FD.3: different toast verb when producing a downloadable binary
+      // so the user understands the device won't be OTA'd this round.
+      const verb = params.downloadOnly ? 'Compile-and-download queued for' : 'Queued';
+      addToast(`${verb} ${ctx.displayName}${workerSuffix}${versionSuffix}${pinSuffix}`, 'success');
       switchTab('queue');
       mutateQueue();
       mutateDevices();

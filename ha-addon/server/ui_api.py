@@ -394,6 +394,37 @@ async def get_job_log(request: web.Request) -> web.Response:
     return web.json_response({"log": chunk, "offset": len(full_log), "finished": finished})
 
 
+@routes.get("/ui/api/jobs/{id}/firmware")
+async def download_job_firmware(request: web.Request) -> web.Response:
+    """FD.6 — download the firmware binary stored for a download-only job."""
+    job_id = request.match_info["id"]
+    queue = request.app["queue"]
+    job = queue.get(job_id)
+    if not job:
+        return web.json_response({"error": "Job not found"}, status=404)
+    if not job.has_firmware:
+        return web.json_response({"error": "Firmware not available"}, status=404)
+
+    from firmware_storage import firmware_path  # noqa: PLC0415
+    path = firmware_path(job_id)
+    if not path.is_file():
+        # has_firmware flipped but file disappeared — log and 404.
+        logger.warning(
+            "Job %s has_firmware=True but %s is missing", job_id, path,
+        )
+        return web.json_response({"error": "Firmware not available"}, status=404)
+
+    stem = job.target.removesuffix(".yaml").removesuffix(".yml") or job.target
+    filename = f"{stem}-{job_id[:8]}.bin"
+    return web.FileResponse(
+        path=path,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
+
 @routes.get("/ui/api/targets/{filename}/logs/ws")
 async def ws_device_log(request: web.Request) -> web.WebSocketResponse:
     """WebSocket endpoint for streaming live device logs via the native API."""
@@ -1026,6 +1057,11 @@ async def start_compile(request: web.Request) -> web.Response:
     # default from set_esphome_version when not provided. We do NOT mutate the
     # global default — this is a per-job override only.
     version_override = body.get("esphome_version")
+    # FD.2: compile-and-download mode. When true the worker runs
+    # `esphome compile` (no OTA), POSTs the produced binary back, and
+    # the user downloads it from the Queue tab. Mutually exclusive with
+    # validate_only (which isn't exposed through this endpoint anyway).
+    download_only = bool(body.get("download_only", False))
     cfg = _cfg(request)
     queue = request.app["queue"]
     device_poller = request.app.get("device_poller")
@@ -1091,6 +1127,7 @@ async def start_compile(request: web.Request) -> web.Response:
             esphome_version=effective_version,
             run_id=run_id,
             timeout_seconds=cfg.job_timeout,
+            download_only=download_only,
             ota_address=ota_addresses.get(target),
             pinned_client_id=pinned_client_id,
         )
