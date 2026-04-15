@@ -452,7 +452,13 @@ class JobQueue:
             return True
 
     async def cancel(self, job_ids: list[str]) -> int:
-        """Cancel jobs by id; transitions any non-terminal job to CANCELLED."""
+        """Cancel jobs by id; transitions any non-terminal job to CANCELLED.
+
+        Bug #21: emits an INFO log line per cancelled job so the
+        `submit_result: job <uuid> in unexpected state CANCELLED` warning
+        that fires when a worker later tries to report on a job the user
+        already cancelled is unambiguously explainable in the log.
+        """
         async with self._lock:
             cancelled = 0
             for job_id in job_ids:
@@ -460,10 +466,20 @@ class JobQueue:
                 if job is None:
                     continue
                 if job.state not in (JobState.SUCCESS, JobState.FAILED, JobState.CANCELLED):
+                    prior_state = job.state
                     job.state = JobState.CANCELLED
                     job.finished_at = _utcnow()
                     job.log = (job.log or "") + "\nCancelled by user."
                     cancelled += 1
+                    logger.info(
+                        "Cancelled job %s (%s) from state %s%s",
+                        job_id,
+                        job.target,
+                        prior_state.value if hasattr(prior_state, "value") else prior_state,
+                        f" — worker {job.assigned_hostname or job.assigned_client_id} may still be compiling"
+                        if prior_state == JobState.WORKING
+                        else "",
+                    )
             if cancelled:
                 self._persist()
             return cancelled

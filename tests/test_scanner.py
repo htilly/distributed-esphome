@@ -319,6 +319,45 @@ def test_name_map_extracts_encryption_key():
     assert keys["device1"]  # non-empty
 
 
+def test_name_map_resolves_despite_unresolved_substitution():
+    """Bug #22: YAMLs with an undefined substitution (e.g. ${pretty_name}
+    referenced but not declared) must still produce scanner metadata —
+    the resolver has to pass ``ignore_missing=True`` to ESPHome's
+    substitution pass when available, otherwise any missing reference
+    raises and the entire config silently returns empty.
+    """
+    name_map, keys, overrides, _ = build_name_to_target_map(
+        str(FIXTURES), ["unresolved_subs_device.yaml"],
+    )
+    # The device_name substitution resolves, so the device name itself
+    # must make it into the name_map.
+    assert "un-sub-device" in name_map, (
+        f"name_map is missing resolved device name; got {name_map}"
+    )
+    assert name_map["un-sub-device"] == "unresolved_subs_device.yaml"
+    # API encryption key must be extracted (keyed by resolved name).
+    assert "un-sub-device" in keys
+    # Address override is always registered — at minimum the mdns fallback.
+    assert "un-sub-device" in overrides
+
+
+def test_get_device_metadata_uses_friendly_name_for_unresolved_subs():
+    """Bug #22 follow-up: get_device_metadata must still extract
+    device_name for a YAML that contains an unresolved substitution.
+    (friendly_name may be None when it references an undefined sub; the
+    UI falls back to device_name in that case — but device_name must NOT
+    be None, which is what the regression had before.)
+    """
+    from scanner import get_device_metadata
+
+    meta = get_device_metadata(str(FIXTURES), "unresolved_subs_device.yaml")
+    assert meta["device_name"] is not None, (
+        "device_name should resolve from ${device_name} even when friendly_name doesn't"
+    )
+    # device_name is title-cased ("un-sub-device" → "Un Sub Device")
+    assert "Un Sub Device" in meta["device_name"]
+
+
 def test_name_map_empty_targets(tmp_path):
     name_map, keys, overrides, sources = build_name_to_target_map(str(tmp_path), [])
     assert name_map == {}

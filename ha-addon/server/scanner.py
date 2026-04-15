@@ -416,14 +416,21 @@ def _resolve_esphome_config(config_dir: str, target: str) -> Optional[dict]:
         #   2. changed do_substitution_pass from in-place mutation to
         #      returning a new config (previously discarded its return
         #      value)
-        # Try the new signature first; fall back for older ESPHomes still
-        # pinned in worker venvs.
+        # We must pass `ignore_missing=True` when it's accepted — without
+        # it, any unresolved substitution raises `cv.Invalid` which the
+        # outer `except Exception` swallows and the whole resolve returns
+        # None (bug #22: friendly_name missing for devices whose YAML uses
+        # ${device_name} in the name field). Try the legacy signature
+        # first; the TypeError on new ESPHome drops us into the new form,
+        # which always tolerates missing subs via the warn-only path.
         try:
-            config = do_substitution_pass(config, None)
-        except TypeError:
-            # Legacy esphome (<2026.4.0) requires ignore_missing=True
-            # and mutates in place, returning None.
             do_substitution_pass(config, None, ignore_missing=True)  # type: ignore[call-arg]
+        except TypeError:
+            # esphome>=2026.4.0 dropped ignore_missing and returns a new
+            # config instead of mutating in place.
+            result = do_substitution_pass(config, None)
+            if result is not None:
+                config = result
 
         _config_cache[target] = (mtime, config)
         return config
