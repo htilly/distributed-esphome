@@ -1012,7 +1012,15 @@ def create_app() -> web.Application:
 
     device_poller = DevicePoller(poll_interval=cfg.device_poll_interval)
 
-    app = web.Application(middlewares=[compression_middleware, security_headers_middleware, version_header_middleware, auth_middleware])
+    # FD.5: firmware upload needs a body budget larger than aiohttp's
+    # 1 MB default. ESP32 `firmware.factory.bin` is 1-4 MB typically;
+    # cyd-office-info hit this limit at 1.05 MB with the 1 MB default.
+    # 16 MB is well above any plausible ESP firmware size.
+    FIRMWARE_MAX_SIZE = 16 * 1024 * 1024
+    app = web.Application(
+        client_max_size=FIRMWARE_MAX_SIZE,
+        middlewares=[compression_middleware, security_headers_middleware, version_header_middleware, auth_middleware],
+    )
     app["config"] = cfg
     app["queue"] = queue
     app["registry"] = registry
