@@ -72,11 +72,11 @@ The existing `tags` field landed in 1.4.0-dev.2 as a simple list of strings — 
 
 ## Firmware Download
 
-After a successful compile, extract the firmware binary and make it downloadable from the UI. Foundation for remote compilation in a later release.
+**Pulled forward to 1.4.1.** See `WORKITEMS-1.4.1.md` §"Firmware Download" (FD.1–FD.9). The original per-target lifecycle (`/data/firmware/<target>/`) was rescoped to a per-queue-item lifecycle (`/data/firmware/{job_id}.bin`) so a stored binary is tied to the exact compile that produced it; cleanup piggybacks on the existing queue-clear semantics instead of adding a separate TTL/management surface. Download surface also moved from the Devices tab to the Queue tab for the same reason — the binary is a compile artifact, not a device property.
 
-- [ ] **3.1a Worker extracts firmware binary** — read .bin after compile, POST to server
-- [ ] **3.1b Server stores firmware** — `/data/firmware/<target>/`, metadata endpoint
-- [ ] **3.1c Download button on device row** — `GET /ui/api/targets/{f}/firmware`
+- [x] ~~**3.1a Worker extracts firmware binary**~~ → FD.4 in 1.4.1
+- [x] ~~**3.1b Server stores firmware**~~ → FD.5, FD.6, FD.7 in 1.4.1
+- [x] ~~**3.1c Download button on device row**~~ → FD.8 in 1.4.1 (on Queue tab, per-job, not per-target)
 
 ## PlatformIO Package Cache Proxy
 
