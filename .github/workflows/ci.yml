@@ -38,7 +38,13 @@ jobs:
           # an isolated prefix that the integration tests can load
           # without contaminating esphome's site-packages.
           python -m venv .ha-testenv
-          ./.ha-testenv/bin/pip install 'homeassistant>=2025.1,<2025.2' pytest pytest-asyncio
+          # Integration tests reach into homeassistant.components.zeroconf
+          # via config_flow, so zeroconf + aiohttp need to be present
+          # alongside homeassistant itself.
+          ./.ha-testenv/bin/pip install \
+            'homeassistant>=2025.1,<2025.2' \
+            pytest pytest-asyncio \
+            aiohttp zeroconf voluptuous
 
       - name: Run server + client tests
         # Excludes integration tests — those need HA, which conflicts
