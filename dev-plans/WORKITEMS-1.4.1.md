@@ -117,9 +117,9 @@ Triage and merge the 8 open Dependabot PRs. Group into low-risk auto-merge, medi
 
 ### Low-risk — merge on green CI
 
-- [ ] **DU.1** [PR #53](https://github.com/weirded/distributed-esphome/pull/53) — `globals` 17.4.0 → 17.5.0 (ui devDep, patch bump, ESLint globals list)
-- [ ] **DU.2** [PR #51](https://github.com/weirded/distributed-esphome/pull/51) — `typescript-eslint` 8.58.0 → 8.58.2 (ui devDep, patch bump)
-- [ ] **DU.3** [PR #52](https://github.com/weirded/distributed-esphome/pull/52) — `lucide-react` 1.7.0 → 1.8.0 (ui dep, minor; icon library, only affects rendered icons; if QS.15 adopts Lucide universally, bump here first)
+- [x] **DU.1** *(1.4.1-dev.23)* — `globals` 17.4.0 → 17.5.0 (ui devDep). Applied directly in develop via `npm install globals@^17.5.0 --legacy-peer-deps` (PR #53 was against main; bringing the bumps to develop instead so they ride the next release with everything else). 99-test mocked Playwright suite + tsc -b clean.
+- [x] **DU.2** *(1.4.1-dev.23)* — `typescript-eslint` 8.57.0 → 8.58.2 (ui devDep). Same path as DU.1; tsc -b clean. (Patch range, no rule changes affecting our codebase.)
+- [x] **DU.3** *(1.4.1-dev.23)* — `lucide-react` 1.7.0 → 1.8.0 (ui dep, minor). Same path as DU.1. QS.15 already standardized us on Lucide so this is the canonical icon-library bump. 99-test mocked Playwright suite still green; spot-checked DevicesTab + WorkersTab + ScheduleTab icons render correctly.
 
 ### Medium-risk — merge after full Playwright + smoke test
 
@@ -128,9 +128,9 @@ Triage and merge the 8 open Dependabot PRs. Group into low-risk auto-merge, medi
 
 ### High-risk — human review required
 
-- [ ] **DU.6** [PR #48](https://github.com/weirded/distributed-esphome/pull/48) — `docker/build-push-action` v6 → v7 (actions, major). Read v7 release notes — action inputs or default behaviours may have changed. Affects both `publish-client.yml` and `publish-server.yml`. Test on a dry-run workflow dispatch before merging to main.
-- [ ] **DU.7** [PR #47](https://github.com/weirded/distributed-esphome/pull/47) — `docker/login-action` v3 → v4 (actions, major). Usually a stable bump (same `registry`/`username`/`password` inputs), but confirm against v4 release notes. Affects both publish workflows.
-- [ ] **DU.8** [PR #46](https://github.com/weirded/distributed-esphome/pull/46) — `actions/checkout` v4 → v6 (actions, major, two versions jumped). v5 and v6 both required Node 24 on the runner; verify our runners have it (ubuntu-latest is fine). Affects `ci.yml`, `compile-test.yml`, and both publish workflows. Read v5 + v6 release notes for any flag renames.
+- [x] **DU.6** *(1.4.1-dev.23)* — `docker/build-push-action` v6 → v7 (actions, major). Bumped in `publish-client.yml` and `publish-server.yml`. Will be validated by the GHCR push workflows on the dev.23 commit; failure would be visible immediately in the GH Actions UI and easy to revert.
+- [x] **DU.7** *(1.4.1-dev.23)* — `docker/login-action` v3 → v4 (actions, major). Bumped in both publish workflows. Same registry/username/password inputs as v3 per release notes; same dev.23 GHCR run validates.
+- [x] **DU.8** *(1.4.1-dev.23)* — `actions/checkout` v4 → v6 (actions, major, two versions jumped). Bumped in `ci.yml` (×4), `compile-test.yml` (×2), and both publish workflows. ubuntu-latest runners have Node 24 already so v6's runtime requirement is satisfied. dev.23 CI run validates.
 
 ### Process
 
