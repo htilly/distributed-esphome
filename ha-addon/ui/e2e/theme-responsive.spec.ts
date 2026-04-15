@@ -100,6 +100,34 @@ test('narrow viewport: table-wrap is the horizontal scroll container', async ({ 
   expect(overflowX).toBe('auto');
 });
 
+test('narrow viewport: header is horizontally scrollable so every control is reachable (#1)', async ({ page }) => {
+  // iPhone SE width — narrow enough to overflow the header's natural width.
+  await page.setViewportSize({ width: 320, height: 800 });
+  await page.goto('/');
+  await expect(page.getByText('Distributed Build')).toBeVisible({ timeout: 5000 });
+
+  const header = page.locator('header');
+  // overflow-x: auto turns the header into its own scroll container.
+  const overflowX = await header.evaluate(el => getComputedStyle(el).overflowX);
+  expect(overflowX).toBe('auto');
+
+  // Sanity: header content is wider than viewport (i.e. there's something
+  // to scroll). If this stops being true we should remove the test, not
+  // tighten the assertion.
+  const { scrollWidth, clientWidth } = await header.evaluate(el => ({
+    scrollWidth: el.scrollWidth,
+    clientWidth: el.clientWidth,
+  }));
+  expect(scrollWidth).toBeGreaterThan(clientWidth);
+
+  // Streamer-mode toggle is the last interactive control before the spacer
+  // and most likely to be off-screen on iOS Safari. Scroll the header to
+  // bring it into view and assert it becomes reachable.
+  const streamerBtn = page.locator('header button[aria-label*="streamer mode"]');
+  await streamerBtn.scrollIntoViewIfNeeded();
+  await expect(streamerBtn).toBeInViewport();
+});
+
 test('desktop viewport: page renders without horizontal scroll', async ({ page }) => {
   await page.setViewportSize({ width: 1920, height: 1080 });
   await page.goto('/');

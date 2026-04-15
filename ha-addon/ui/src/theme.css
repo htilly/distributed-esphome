@@ -94,6 +94,12 @@ header {
   top: 0;
   z-index: 100;
   box-shadow: var(--shadow);
+  /* Bug #1: on iOS / narrow viewports the header items (logo, version
+     dropdown, Secrets, theme/streamer buttons) overflow off the right
+     edge with no way to reach them. Letting the header scroll horizontally
+     keeps every control reachable; on desktop nothing changes (no overflow,
+     no scrollbar). */
+  overflow-x: auto;
 }
 /* Keep header dark in light mode so the ESPHome logo (light gray text) stays readable */
 [data-theme="light"] header {
