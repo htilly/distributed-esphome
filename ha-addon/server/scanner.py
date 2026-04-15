@@ -410,8 +410,20 @@ def _resolve_esphome_config(config_dir: str, target: str) -> Optional[dict]:
         config = do_packages_pass(config, skip_update=already_resolved)
         config = merge_packages(config)
 
-        # Resolve ${substitutions}
-        do_substitution_pass(config, None, ignore_missing=True)
+        # Resolve ${substitutions}. ESPHome 2026.4.0 reshaped the API
+        # in two ways we have to accommodate:
+        #   1. dropped the `ignore_missing` kwarg
+        #   2. changed do_substitution_pass from in-place mutation to
+        #      returning a new config (previously discarded its return
+        #      value)
+        # Try the new signature first; fall back for older ESPHomes still
+        # pinned in worker venvs.
+        try:
+            config = do_substitution_pass(config, None)
+        except TypeError:
+            # Legacy esphome (<2026.4.0) requires ignore_missing=True
+            # and mutates in place, returning None.
+            do_substitution_pass(config, None, ignore_missing=True)  # type: ignore[call-arg]
 
         _config_cache[target] = (mtime, config)
         return config
