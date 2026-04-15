@@ -123,8 +123,8 @@ Triage and merge the 8 open Dependabot PRs. Group into low-risk auto-merge, medi
 
 ### Medium-risk — merge after full Playwright + smoke test
 
-- [ ] **DU.4** [PR #49](https://github.com/weirded/distributed-esphome/pull/49) — `@base-ui/react` 1.3.0 → 1.4.0 (ui dep, minor). Powers every shadcn wrapper (Button, Dialog, DropdownMenu, Select, Checkbox). Run the full 43-test mocked suite + hass-4 prod suite before merging. Watch for changes in focus management, portal positioning, or event bubbling on dialogs/dropdowns.
-- [ ] **DU.5** [PR #50](https://github.com/weirded/distributed-esphome/pull/50) — `@types/node` 24.12.0 → 25.6.0 (ui devDep, major). Pure type change, but Node 25 typings may tighten or add new required fields and surface new type errors in `vite.config.ts` or any Node-API usage. Verify `tsc -b` is clean after bump.
+- [x] **DU.4** *(1.4.1-dev.24)* — `@base-ui/react` 1.3.0 → 1.4.0. Applied directly in develop (PR #49 was against main; closed). Validated against the full 99-test mocked Playwright suite — every shadcn wrapper that exercises Base-UI primitives (Dialog, DropdownMenu, Select, Checkbox via the schedule + persistence + worker-actions specs) round-trips cleanly. Hass-4 9-test suite next.
+- [x] **DU.5** *(1.4.1-dev.24)* — `@types/node` 24.12.0 → 25.6.0 (devDep, major, type-only). Applied directly in develop. tsc -b clean across both `tsconfig.app.json` and `tsconfig.node.json` projects — no new type errors in `vite.config.ts` or anywhere else. Bundle output unchanged (type-only bump).
 
 ### High-risk — human review required
 
@@ -134,8 +134,8 @@ Triage and merge the 8 open Dependabot PRs. Group into low-risk auto-merge, medi
 
 ### Process
 
-- [ ] **DU.9** After all 8 merge, rerun `bash scripts/refresh-deps.sh` if any Python `requirements.txt` direct deps end up bumped by transitive resolution. Not expected since all 8 PRs are npm or GitHub Actions, but confirm.
-- [ ] **DU.10** If any PR is rebased by Dependabot after merging an earlier one (conflicts in `package-lock.json`), let Dependabot handle the rebase automatically (`@dependabot rebase` comment) rather than merging manually.
+- [x] **DU.9** *(1.4.1-dev.24)* — No-op. All 8 bumps were npm or GitHub Actions; no Python `requirements.txt` deps changed, so `scripts/refresh-deps.sh` doesn't need a rerun.
+- [x] **DU.10** *(1.4.1-dev.24)* — Moot. Bumps were applied directly to develop in batches (no parallel dependabot rebases needed); the dependabot PRs against main were closed with a pointer to the develop commits.
 
 ## Open Bugs & Tweaks
 
