@@ -410,17 +410,59 @@ async def submit_job_result(request: web.Request) -> web.Response:
 async def upload_job_firmware(request: web.Request) -> web.Response:
     """FD.5 — worker uploads the compiled binary for a download-only job.
 
-    Body: raw bytes of the `.bin`. Rejected unless the job is WORKING and
-    was enqueued as download_only. Idempotent — a re-upload overwrites.
+    Body: raw bytes of the `.bin`. Rejected unless the job is WORKING,
+    was enqueued as download_only, and the caller is the worker
+    currently assigned to the job. Idempotent — a legitimate re-upload
+    by the assigned worker overwrites in place.
+
+    Bug #24: previously the handler stored the bytes to disk *before*
+    checking state, so a stale worker that arrived after the job had
+    been re-queued-and-succeeded-elsewhere would overwrite the good
+    binary from disk, then the rejection path would delete the
+    overwritten file — destroying the successful worker's upload.
+    The state + client-identity checks now run FIRST; bytes aren't
+    written until we've confirmed the caller owns the job.
     """
     job_id = request.match_info["id"]
     queue = request.app["queue"]
+    caller_client_id = (
+        request.headers.get(HEADER_X_CLIENT_ID)
+        or request.rel_url.query.get("client_id")
+    )
 
     job = queue.get(job_id)
     if job is None:
         return _protocol_error("job_not_found", status=404)
     if not job.download_only:
         return _protocol_error("job_not_download_only", status=400)
+
+    # #24 (1): state check MUST run before any disk write. A stale
+    # worker (the one that was abandoned by bug #17's offline
+    # short-circuit) will fail this check and we refuse without
+    # touching disk.
+    from job_queue import JobState  # noqa: PLC0415
+    if job.state != JobState.WORKING:
+        logger.info(
+            "Refusing firmware upload for job %s — state is %s "
+            "(stale worker %s; current assigned: %s)",
+            job_id, job.state.value, caller_client_id, job.assigned_client_id,
+        )
+        return _protocol_error("job_not_working", status=409)
+
+    # #24 (2) / security audit F-08: worker identity must match the
+    # currently-assigned worker. Without this, an abandoned-then-late
+    # worker could still overwrite the successor's upload.
+    if (
+        caller_client_id
+        and job.assigned_client_id
+        and caller_client_id != job.assigned_client_id
+    ):
+        logger.warning(
+            "Refusing firmware upload for job %s — caller %s is not the "
+            "assigned worker %s (stale upload after requeue?)",
+            job_id, caller_client_id, job.assigned_client_id,
+        )
+        return _protocol_error("worker_identity_mismatch", status=409)
 
     data = await request.read()
     if not data:
@@ -435,9 +477,15 @@ async def upload_job_firmware(request: web.Request) -> web.Response:
 
     ok = await queue.mark_firmware_stored(job_id)
     if not ok:
-        # Race: the job transitioned out of WORKING between the start
-        # of the upload and now. The binary is on disk; delete it
-        # since the queue entry can't point at it.
+        # Genuine race: the job transitioned out of WORKING between
+        # our pre-write state check and mark_firmware_stored. Clean
+        # up the bytes we wrote; the `delete_firmware` call here is
+        # for OUR OWN upload, not someone else's (pre-write guards
+        # above prevent that).
+        logger.info(
+            "Cleaned up out-of-order firmware upload for job %s "
+            "(transitioned out of WORKING during write)", job_id,
+        )
         delete_firmware(job_id)
         return _protocol_error("job_not_eligible", status=409)
 

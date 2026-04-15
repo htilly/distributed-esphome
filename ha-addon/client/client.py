@@ -43,7 +43,7 @@ from sysinfo import collect_system_info
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.4.1-dev.44"
+CLIENT_VERSION = "1.4.1-dev.45"
 
 
 def _read_image_version() -> Optional[str]:
@@ -206,10 +206,19 @@ def get(path: str, params: Optional[dict] = None, timeout: int = 30) -> requests
     return requests.get(url, params=params, headers={**HEADERS, "Content-Type": "application/json"}, timeout=timeout)
 
 
-def post_bytes(path: str, data: bytes, timeout: int = 600) -> requests.Response:
-    """POST raw bytes (e.g. firmware uploads — FD.5). 10 min default timeout."""
+def post_bytes(
+    path: str, data: bytes, timeout: int = 600, client_id: Optional[str] = None,
+) -> requests.Response:
+    """POST raw bytes (e.g. firmware uploads — FD.5). 10 min default timeout.
+
+    *client_id* is included as `X-Client-Id` so the server can validate
+    that the caller is the worker currently assigned to the job (bug
+    #24 / audit F-08). Omit only for test scaffolding.
+    """
     url = f"{SERVER_URL}{path}"
     headers = {**HEADERS, "Content-Type": "application/octet-stream"}
+    if client_id:
+        headers["X-Client-Id"] = client_id
     return requests.post(url, data=data, headers=headers, timeout=timeout)
 
 
@@ -912,7 +921,7 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
                 return
 
             _report_status(job_id, "Uploading firmware")
-            upload_ok = _upload_firmware(job_id, firmware_path)
+            upload_ok = _upload_firmware(job_id, firmware_path, client_id=client_id)
             if not upload_ok:
                 _flush_log_text(
                     job_id,
@@ -1246,7 +1255,7 @@ def _locate_firmware_binary(build_dir: str, target_stem: str) -> Optional[Path]:
     return picked
 
 
-def _upload_firmware(job_id: str, path: Path) -> bool:
+def _upload_firmware(job_id: str, path: Path, client_id: Optional[str] = None) -> bool:
     """POST the compiled binary to the server. Returns True on success.
 
     Failure reasons are surfaced into the job's log (via
@@ -1268,6 +1277,7 @@ def _upload_firmware(job_id: str, path: Path) -> bool:
                 f"/api/v1/jobs/{job_id}/firmware",
                 data,
                 timeout=600,
+                client_id=client_id,
             )
             if resp.ok:
                 logger.info(

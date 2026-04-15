@@ -1186,3 +1186,121 @@ async def test_firmware_upload_rejects_empty_body(tmp_path, monkeypatch):
         assert resp.status == 400
     finally:
         await ta.close()
+
+
+# ---------------------------------------------------------------------------
+# Bug #24 — firmware upload refuses stale workers / wrong state WITHOUT
+# writing to disk (preserves a prior successful upload).
+# ---------------------------------------------------------------------------
+
+async def test_firmware_upload_rejects_non_working_state_without_writing(
+    tmp_path, monkeypatch,
+):
+    """A job that has already succeeded on another worker must not be
+    clobbered by a stale worker's late upload. The server must reject
+    with 409 BEFORE touching the on-disk file."""
+    import firmware_storage
+    firmware_dir = tmp_path / "firmware"
+    monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
+
+    ta = await _make_app(tmp_path)
+    try:
+        job = await ta.queue.enqueue(
+            target="x.yaml", esphome_version="2026.3.2", run_id="r",
+            timeout_seconds=300, download_only=True,
+        )
+        assert job is not None
+        # Successful worker: claim → upload → submit success.
+        await ta.queue.claim_next("good-worker")
+        firmware_storage.save_firmware(job.id, b"GOOD_FIRMWARE", root=firmware_dir)
+        await ta.queue.mark_firmware_stored(job.id)
+        await ta.queue.submit_result(job.id, "success", log=None, ota_result=None)
+
+        stored_path = firmware_storage.firmware_path(job.id, root=firmware_dir)
+        assert stored_path.read_bytes() == b"GOOD_FIRMWARE"
+
+        # Stale worker arrives late with its own firmware. Must be
+        # rejected with 409 AND the good firmware must survive.
+        resp = await ta.post(
+            f"/api/v1/jobs/{job.id}/firmware",
+            data=b"STALE_FIRMWARE_SHOULD_BE_REJECTED",
+            headers={
+                **AUTH_HEADERS,
+                "Content-Type": "application/octet-stream",
+                "X-Client-Id": "stale-worker",
+            },
+        )
+        assert resp.status == 409
+        # THE CORE FIX: the file on disk still holds the good worker's
+        # firmware. Before bug #24's fix the handler wrote the stale
+        # bytes first, then the rejection path deleted the file.
+        assert stored_path.read_bytes() == b"GOOD_FIRMWARE"
+    finally:
+        await ta.close()
+
+
+async def test_firmware_upload_rejects_unassigned_worker(tmp_path, monkeypatch):
+    """Security audit F-08: when the caller's client_id doesn't match
+    the currently-assigned worker, reject with 409 even if the job IS
+    still WORKING."""
+    import firmware_storage
+    firmware_dir = tmp_path / "firmware"
+    monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
+
+    ta = await _make_app(tmp_path)
+    try:
+        job = await ta.queue.enqueue(
+            target="x.yaml", esphome_version="2026.3.2", run_id="r",
+            timeout_seconds=300, download_only=True,
+        )
+        assert job is not None
+        await ta.queue.claim_next("assigned-worker")
+
+        resp = await ta.post(
+            f"/api/v1/jobs/{job.id}/firmware",
+            data=b"rogue",
+            headers={
+                **AUTH_HEADERS,
+                "Content-Type": "application/octet-stream",
+                "X-Client-Id": "other-worker",
+            },
+        )
+        assert resp.status == 409
+        assert not firmware_storage.firmware_path(job.id, root=firmware_dir).exists()
+    finally:
+        await ta.close()
+
+
+async def test_firmware_upload_accepted_for_matching_assigned_worker(
+    tmp_path, monkeypatch,
+):
+    """Happy path: the worker whose client_id matches the assignment
+    is accepted and its bytes land on disk."""
+    import firmware_storage
+    firmware_dir = tmp_path / "firmware"
+    monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
+
+    ta = await _make_app(tmp_path)
+    try:
+        job = await ta.queue.enqueue(
+            target="x.yaml", esphome_version="2026.3.2", run_id="r",
+            timeout_seconds=300, download_only=True,
+        )
+        assert job is not None
+        await ta.queue.claim_next("assigned-worker")
+
+        resp = await ta.post(
+            f"/api/v1/jobs/{job.id}/firmware",
+            data=b"RIGHT_BYTES",
+            headers={
+                **AUTH_HEADERS,
+                "Content-Type": "application/octet-stream",
+                "X-Client-Id": "assigned-worker",
+            },
+        )
+        assert resp.status == 200
+        path = firmware_storage.firmware_path(job.id, root=firmware_dir)
+        assert path.read_bytes() == b"RIGHT_BYTES"
+        assert ta.queue.get(job.id).has_firmware is True
+    finally:
+        await ta.close()

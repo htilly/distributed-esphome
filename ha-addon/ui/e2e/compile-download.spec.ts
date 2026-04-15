@@ -94,3 +94,26 @@ test('Queue tab renders Download button only on eligible rows', async ({ page })
   const otaRow = page.locator('#tab-queue tbody tr').filter({ hasText: 'bedroom-light' });
   await expect(otaRow.getByRole('link', { name: 'Download' })).toHaveCount(0);
 });
+
+test('download-only success row shows Ready badge, not OTA Pending (#23)', async ({ page }) => {
+  await page.getByRole('button', { name: /Queue/ }).click();
+  await expect(page.getByText('bedroom-light')).toBeVisible({ timeout: 5000 });
+  const downloadRow = page.locator('#tab-queue tbody tr').filter({ hasText: 'office' });
+  // Pre-fix this row showed "OTA Pending" because ota_result is null for
+  // download-only jobs. Post-#23 it reads "Ready".
+  await expect(downloadRow.getByText('Ready', { exact: true })).toBeVisible();
+  await expect(downloadRow.getByText('OTA Pending', { exact: true })).toHaveCount(0);
+});
+
+test('download-only terminal row exposes Clear + Rerun (was blocked pre-#23)', async ({ page }) => {
+  await page.getByRole('button', { name: /Queue/ }).click();
+  // Scope by data-job attribute so we don't accidentally match the
+  // Office Sensor Devices-tab row or any other "office" string.
+  const downloadRow = page.locator('#tab-queue tbody tr[data-job="job-008"]');
+  await expect(downloadRow).toHaveCount(1);
+  // Pre-#23 isJobFinished returned false for download-only-success because
+  // ota_result !== 'success' → neither Clear nor Rerun rendered. Post-fix
+  // both are present.
+  await expect(downloadRow.getByRole('button', { name: 'Clear' })).toBeVisible();
+  await expect(downloadRow.getByRole('button', { name: 'Rerun' })).toBeVisible();
+});

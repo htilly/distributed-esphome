@@ -6,21 +6,47 @@
  * only have e.g. state + ota_result.
  */
 
-/** Job is fully done and successful (compile + OTA both succeeded) */
-export function isJobSuccessful(job: { state: string; ota_result?: string }): boolean {
-  return job.state === 'success' && job.ota_result === 'success';
+type JobStatusLike = {
+  state: string;
+  ota_result?: string;
+  validate_only?: boolean;
+  download_only?: boolean;
+};
+
+/** Job is fully done and successful.
+ *
+ * Three terminal-success paths:
+ *   - compile + OTA: state=success AND ota_result=success
+ *   - validate-only: state=success (OTA is N/A)
+ *   - download-only (#23): state=success (OTA deliberately skipped —
+ *     the binary is stored server-side for the user to download)
+ */
+export function isJobSuccessful(job: JobStatusLike): boolean {
+  if (job.state !== 'success') return false;
+  if (job.validate_only || job.download_only) return true;
+  return job.ota_result === 'success';
 }
 
 /** Job is still in progress (not yet reached a terminal state) */
-export function isJobInProgress(job: { state: string; ota_result?: string }): boolean {
+export function isJobInProgress(job: JobStatusLike): boolean {
   if (job.state === 'pending' || job.state === 'working') return true;
-  // Compile succeeded but OTA hasn't finished yet
-  if (job.state === 'success' && job.ota_result !== 'success' && job.ota_result !== 'failed') return true;
+  // Compile succeeded but OTA hasn't finished yet. validate_only /
+  // download_only jobs don't have an OTA phase and are terminal on
+  // state=success (#23).
+  if (
+    job.state === 'success' &&
+    !job.validate_only &&
+    !job.download_only &&
+    job.ota_result !== 'success' &&
+    job.ota_result !== 'failed'
+  ) {
+    return true;
+  }
   return false;
 }
 
 /** Job is in a terminal failed state (not running, not successful, not cancelled) */
-export function isJobFailed(job: { state: string; ota_result?: string }): boolean {
+export function isJobFailed(job: JobStatusLike): boolean {
   if (job.state === 'cancelled') return false;
   return !isJobInProgress(job) && !isJobSuccessful(job);
 }
@@ -30,12 +56,12 @@ export function isJobCancelled(job: { state: string }): boolean {
 }
 
 /** Job is in a terminal state (not running) */
-export function isJobFinished(job: { state: string; ota_result?: string }): boolean {
+export function isJobFinished(job: JobStatusLike): boolean {
   return !isJobInProgress(job);
 }
 
 /** Job can be retried (any terminal state — failed or successful) */
-export function isJobRetryable(job: { state: string; ota_result?: string }): boolean {
+export function isJobRetryable(job: JobStatusLike): boolean {
   return isJobFinished(job);
 }
 
@@ -53,23 +79,33 @@ export function getJobBadge(job: {
   state: string;
   ota_only?: boolean;
   validate_only?: boolean;
+  download_only?: boolean;
   ota_result?: string;
   status_text?: string;
 }): { label: string; cls: string } {
   if (job.state === 'pending' && job.validate_only) {
     return { label: 'Validate', cls: BADGE_VARIANTS.pending };
+  } else if (job.state === 'pending' && job.download_only) {
+    return { label: 'Download', cls: BADGE_VARIANTS.pending };
   } else if (job.state === 'pending' && job.ota_only) {
     return { label: 'OTA Retry', cls: BADGE_VARIANTS.timed_out };
   } else if (job.state === 'pending') {
     return { label: 'Pending', cls: BADGE_VARIANTS.pending };
   } else if (job.state === 'working' && job.validate_only) {
     return { label: job.status_text || 'Validating', cls: BADGE_VARIANTS.working };
+  } else if (job.state === 'working' && job.download_only) {
+    return { label: job.status_text || 'Compiling', cls: BADGE_VARIANTS.working };
   } else if (job.state === 'working') {
     return { label: job.status_text || 'Working', cls: BADGE_VARIANTS.working };
   } else if (job.state === 'failed') {
     return { label: 'Failed', cls: BADGE_VARIANTS.failed };
   } else if (job.state === 'success' && job.validate_only) {
     return { label: 'Valid', cls: BADGE_VARIANTS.success };
+  } else if (job.state === 'success' && job.download_only) {
+    // #23: compile-and-download is terminal on state=success — no OTA
+    // phase, so "OTA Pending" was misleading. "Ready" reads as "your
+    // binary is ready to download".
+    return { label: 'Ready', cls: BADGE_VARIANTS.success };
   } else if (job.state === 'success') {
     if (job.ota_result === 'success') {
       return { label: 'Success', cls: BADGE_VARIANTS.success };
