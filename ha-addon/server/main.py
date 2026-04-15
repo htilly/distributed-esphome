@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -245,22 +246,30 @@ async def auth_middleware(request: web.Request, handler):
 
 async def timeout_checker(app: web.Application) -> None:
     """Background task: check for timed-out jobs every 30 seconds.
-    Also prunes terminal jobs older than 1 hour to keep the queue tidy."""
+
+    Bug #18: no longer auto-prunes terminal jobs. The queue is the
+    user's record of what the system did; time-based pruning used to
+    erase overnight compile history before the user had a chance to
+    see it. Users clear the queue explicitly via the Queue tab's Clear
+    dropdown.
+    """
     queue: JobQueue = app["queue"]
-    prune_counter = 0
+    registry: WorkerRegistry = app["registry"]
+    cfg: AppConfig = app["config"]
     while True:
         await asyncio.sleep(30)
         try:
-            timed_out = await queue.check_timeouts()
+            # Bug #17: short-circuit re-queue for jobs whose worker went
+            # offline mid-job. Previously these sat stalled for the full
+            # JOB_TIMEOUT (600s default) before the elapsed-time check
+            # noticed. Now check_timeouts also re-queues WORKING jobs
+            # whose assigned worker has no recent heartbeat.
+            def _is_online(cid: str) -> bool:
+                return registry.is_online(cid, threshold_secs=cfg.worker_offline_threshold)
+
+            timed_out = await queue.check_timeouts(is_worker_online=_is_online)
             if timed_out:
                 logger.info("Timeout checker: processed %d timed-out jobs", len(timed_out))
-            # Prune old finished jobs every ~5 minutes (every 10th cycle)
-            prune_counter += 1
-            if prune_counter >= 10:
-                prune_counter = 0
-                pruned = await queue.prune_old_terminal(max_age_seconds=3600)
-                if pruned:
-                    logger.info("Pruned %d old terminal jobs", pruned)
         except Exception:
             logger.exception("Error in timeout checker")
 
@@ -842,6 +851,55 @@ async def _fetch_ha_esphome_version(session: aiohttp.ClientSession) -> Optional[
     return None
 
 
+_PRE_RELEASE_ORDER = {"dev": -4, "a": -3, "b": -2, "rc": -1}
+
+
+def _esphome_version_key(v: str) -> tuple:
+    """PEP440-ish sort key for ESPHome version strings.
+
+    Each dot-separated segment is parsed into ``(main_num, stage_rank,
+    stage_num)``: the leading integer, a pre-release tier (dev < a < b <
+    rc < stable, encoded as -4/-3/-2/-1/0), and the integer that follows
+    the tier tag (e.g. ``b3`` → stage_num 3). Stable segments are
+    ``(N, 0, 0)``.
+
+    Keyed uniformly per segment so the tuple shapes always match,
+    guaranteeing:
+      - ``b3 > b2`` (bug #16 regression: earlier version discarded the
+        number after the pre-release tag, so b3 and b2 produced the same
+        key and relative order fell back to Python's stable sort, which
+        preserved PyPI's alphabetical input order — putting b2 *above*
+        b3 in descending sort).
+      - Stable outranks any pre-release with the same base (``2026.3.0 >
+        2026.3.0b3``). Early implementations dropped the stage tuple for
+        bare-digit segments, so the stable key was a strict prefix of
+        the pre-release key and sorted *below* it.
+    """
+    parts: list[tuple] = []
+    for seg in v.split("."):
+        if seg.isdigit():
+            parts.append((int(seg), 0, 0))
+            continue
+        # e.g. "0b3" → main=0, tag="b", stage_num=3
+        m = re.match(r"(\d+)(.*)", seg)
+        if not m:
+            # Non-numeric segment (e.g. "dev") — keep it lexicographic.
+            # Cast to avoid mixed-type tuple comparisons downstream.
+            parts.append((0, 0, hash(seg)))
+            continue
+        main_num = int(m.group(1))
+        suffix = m.group(2).lower()
+        for tag, rank in _PRE_RELEASE_ORDER.items():
+            if suffix.startswith(tag):
+                tail = suffix[len(tag):]
+                stage_num = int(tail) if tail.isdigit() else 0
+                parts.append((main_num, rank, stage_num))
+                break
+        else:
+            parts.append((main_num, 0, 0))
+    return tuple(parts)
+
+
 async def _fetch_pypi_versions(session: aiohttp.ClientSession) -> list[str]:
     """Return ALL ESPHome versions from PyPI, newest first.
 
@@ -856,34 +914,7 @@ async def _fetch_pypi_versions(session: aiohttp.ClientSession) -> list[str]:
             if resp.status == 200:
                 data = await resp.json()
                 releases = list(data.get("releases", {}).keys())
-
-                def _version_key(v: str) -> tuple:
-                    # PEP440-ish sort: split on dots, parse numeric parts,
-                    # treat beta/alpha/rc as less-than the stable release.
-                    parts: list[object] = []
-                    for seg in v.split("."):
-                        if seg.isdigit():
-                            parts.append((0, int(seg)))
-                        else:
-                            # e.g. "0b1" → numeric prefix 0, beta suffix "b1"
-                            import re  # noqa: PLC0415
-                            m = re.match(r"(\d+)(.*)", seg)
-                            if m:
-                                parts.append((0, int(m.group(1))))
-                                suffix = m.group(2).lower()
-                                # a < b < rc < (empty=stable)
-                                order = {"a": -3, "b": -2, "rc": -1, "dev": -4}
-                                for tag, rank in order.items():
-                                    if suffix.startswith(tag):
-                                        parts.append((rank, 0))
-                                        break
-                                else:
-                                    parts.append((0, 0))
-                            else:
-                                parts.append((0, seg))
-                    return tuple(parts)
-
-                releases.sort(key=_version_key, reverse=True)
+                releases.sort(key=_esphome_version_key, reverse=True)
                 return releases
     except Exception:
         logger.debug("Failed to fetch PyPI esphome versions", exc_info=True)

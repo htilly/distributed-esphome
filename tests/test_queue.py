@@ -223,6 +223,56 @@ async def test_check_timeouts_no_false_positives(tmp_queue_file):
     assert len(affected) == 0
 
 
+async def test_check_timeouts_requeues_when_worker_offline(tmp_queue_file):
+    """Bug #17: a WORKING job whose worker is offline should be re-queued
+    immediately, not wait out the full JOB_TIMEOUT."""
+    q = JobQueue(queue_file=tmp_queue_file)
+    await q.enqueue("device.yaml", "2024.3.1", "run1", timeout_seconds=9999)
+    claimed = await q.claim_next("sleepy-worker")
+    assert claimed is not None
+    # Simulate: worker went offline (registry reports not-online), but the
+    # job isn't remotely close to its JOB_TIMEOUT yet.
+    affected = await q.check_timeouts(is_worker_online=lambda cid: False)
+    assert len(affected) == 1, "offline-worker job must be short-circuited"
+    stored = q.get(claimed.id)
+    assert stored.state == JobState.PENDING
+    assert stored.assigned_client_id is None
+    assert stored.retry_count == 1
+
+
+async def test_check_timeouts_leaves_job_alone_when_worker_online(tmp_queue_file):
+    """Bug #17: the liveness check must not kick in while the worker is
+    still online and the deadline hasn't passed."""
+    q = JobQueue(queue_file=tmp_queue_file)
+    await q.enqueue("device.yaml", "2024.3.1", "run1", timeout_seconds=9999)
+    claimed = await q.claim_next("live-worker")
+    assert claimed is not None
+    affected = await q.check_timeouts(is_worker_online=lambda cid: True)
+    assert len(affected) == 0
+    assert q.get(claimed.id).state == JobState.WORKING
+
+
+async def test_check_timeouts_offline_worker_respects_max_retries(tmp_queue_file):
+    """Bug #17: after MAX_RETRIES offline re-queues the job must still
+    transition to FAILED permanently (not requeue forever)."""
+    q = JobQueue(queue_file=tmp_queue_file)
+    await q.enqueue("device.yaml", "2024.3.1", "run1", timeout_seconds=9999)
+
+    final_state = None
+    for _ in range(5):
+        claimed = await q.claim_next("offline-worker")
+        if claimed is None:
+            break
+        await q.check_timeouts(is_worker_online=lambda cid: False)
+        stored = q.get(claimed.id)
+        if stored.state == JobState.FAILED:
+            final_state = stored
+            break
+
+    assert final_state is not None, "job should eventually transition to FAILED"
+    assert "offline-worker requeues" in (final_state.log or "")
+
+
 # ---------------------------------------------------------------------------
 # Persistence / restart recovery
 # ---------------------------------------------------------------------------

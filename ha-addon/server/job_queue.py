@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -186,9 +186,7 @@ class JobQueue:
             )
             return
 
-        pruned = 0
         skipped = 0
-        cutoff = datetime.now(timezone.utc)
         for d in data:
             if not isinstance(d, dict):
                 logger.error("Skipping non-dict entry in queue file: %r", d)
@@ -212,26 +210,16 @@ class JobQueue:
                 job.state = JobState.PENDING
                 job.assigned_client_id = None
                 job.assigned_at = None
-            # Prune terminal jobs older than 1 hour on startup
-            if job.state in (JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT, JobState.CANCELLED):
-                try:
-                    created = job.created_at
-                    if created.tzinfo is None:
-                        created = created.replace(tzinfo=timezone.utc)
-                    if (cutoff - created).total_seconds() > 3600:
-                        pruned += 1
-                        continue  # skip adding to queue
-                except Exception:
-                    pruned += 1
-                    continue
+            # Bug #18: no longer prune terminal jobs by age on startup.
+            # The user clears the queue explicitly from the UI; auto-
+            # deleting history on restart meant that a user who scheduled
+            # an overnight upgrade and hit a transient problem would come
+            # back in the morning to a queue that forgot what happened.
             self._jobs[job.id] = job
 
-        if pruned:
-            logger.info("Pruned %d old terminal jobs on startup", pruned)
-            self._persist()
         if skipped:
             logger.warning("Skipped %d unparseable job entries on startup", skipped)
-        logger.info("Loaded %d jobs from %s", len(self._jobs), self._queue_file)
+        logger.info("Loaded %d jobs from %s (persisted across restarts)", len(self._jobs), self._queue_file)
 
     # ------------------------------------------------------------------
     # Public API
@@ -480,9 +468,23 @@ class JobQueue:
                 self._persist()
             return cancelled
 
-    async def check_timeouts(self) -> list[Job]:
+    async def check_timeouts(
+        self,
+        is_worker_online: "Callable[[str], bool] | None" = None,
+    ) -> list[Job]:
         """
-        Find timed-out jobs (WORKING past deadline).
+        Find timed-out or abandoned jobs (WORKING without a live worker).
+
+        A WORKING job is re-queued (or permanently failed after retries) if
+        either:
+          - elapsed since ``assigned_at`` ≥ ``timeout_seconds`` — the classic
+            "compile got stuck" case; or
+          - the assigned worker is no longer online (last heartbeat beyond
+            the registry's offline threshold) and *is_worker_online* is
+            provided — bug #17. A worker that sleeps / crashes mid-job used
+            to leave its jobs stalled for the full ``JOB_TIMEOUT`` (600s by
+            default); liveness short-circuit re-queues them as soon as the
+            registry notices the worker is gone.
 
         Re-enqueues as PENDING if retry_count < MAX_RETRIES, otherwise
         marks FAILED permanently.  Returns the list of affected jobs.
@@ -496,21 +498,39 @@ class JobQueue:
                 if job.assigned_at is None:
                     continue
                 elapsed = (now - job.assigned_at).total_seconds()
-                if elapsed < job.timeout_seconds:
+                timed_out = elapsed >= job.timeout_seconds
+                abandoned = (
+                    not timed_out
+                    and is_worker_online is not None
+                    and job.assigned_client_id is not None
+                    and not is_worker_online(job.assigned_client_id)
+                )
+                if not (timed_out or abandoned):
                     continue
 
                 job.retry_count += 1
-                logger.warning(
-                    "Job %s timed out after %.0fs (retry %d/%d)",
-                    job.id,
-                    elapsed,
-                    job.retry_count,
-                    MAX_RETRIES,
-                )
+                if abandoned:
+                    logger.warning(
+                        "Job %s abandoned after %.0fs — worker %s is offline (retry %d/%d)",
+                        job.id,
+                        elapsed,
+                        job.assigned_client_id,
+                        job.retry_count,
+                        MAX_RETRIES,
+                    )
+                else:
+                    logger.warning(
+                        "Job %s timed out after %.0fs (retry %d/%d)",
+                        job.id,
+                        elapsed,
+                        job.retry_count,
+                        MAX_RETRIES,
+                    )
                 if job.retry_count >= MAX_RETRIES:
                     job.state = JobState.FAILED
                     job.finished_at = now
-                    job.log = (job.log or "") + f"\nPermanently failed after {MAX_RETRIES} timeouts."
+                    reason = "timeouts" if timed_out else "offline-worker requeues"
+                    job.log = (job.log or "") + f"\nPermanently failed after {MAX_RETRIES} {reason}."
                 else:
                     job.state = JobState.TIMED_OUT
                     # Re-enqueue: reset to pending
