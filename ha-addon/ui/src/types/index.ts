@@ -83,6 +83,14 @@ export interface Target {
   schedule_tz?: string | null;
   /** Comma-separated tags from YAML metadata comment. */
   tags?: string | null;
+  /**
+   * Chip MAC address, lower-case colon-separated (e.g.
+   * ``"aa:bb:cc:dd:ee:ff"``). Sourced from mDNS TXT or native API
+   * polling. #27 — the HA custom integration attaches this as a
+   * ``CONNECTION_NETWORK_MAC`` connection so the target device merges
+   * with the native ESPHome integration's device row.
+   */
+  mac_address?: string | null;
 }
 
 /**

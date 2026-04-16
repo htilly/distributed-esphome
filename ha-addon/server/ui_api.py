@@ -336,6 +336,11 @@ async def get_targets(request: web.Request) -> web.Response:
             "ha_configured": ha_configured,
             "ha_connected": ha_connected,
             "ha_device_id": ha_device_id,
+            # #27: surface MAC so the HA custom integration can merge its
+            # target-device with the native ESPHome integration's device
+            # via DeviceInfo `connections={(CONNECTION_NETWORK_MAC, mac)}`.
+            # Populated by the device poller (mDNS TXT or native API).
+            "mac_address": device_mac,
             # #10 — network facts surfaced by the toggleable Net/IP Mode/IPv6/AP columns
             "network_type": meta.get("network_type"),
             "network_static_ip": meta.get("network_static_ip", False),

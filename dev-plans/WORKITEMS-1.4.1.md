@@ -317,8 +317,8 @@ Let users compile a target **without** the OTA flash step, then download the res
 - [x] **#26** *(1.4.1-dev.47)* — Supervisor-discovery path: no URL prompt for local add-on.
   Added `"hassio": true` to `manifest.json` + `async_step_hassio` in `config_flow.py`. Server POSTs to `http://supervisor/discovery` on startup (`supervisor_discovery.py`) and DELETEs on shutdown. HA now surfaces the add-on as a *Discovered* integration with a one-click Confirm — the user never sees the URL prompt. Manual `async_step_user` remains as a fallback for people running the server standalone. Unique-id set from the resolved base URL so repeated discoveries dedupe cleanly against manual setups. Followed up in dev.47 by adding `discovery: [esphome_fleet]` to the add-on's `config.yaml` — Supervisor returned 403 without it.
 
-- [ ] **#27** — Merge targets into the native ESPHome integration instead of separate devices.
-  **Deferred to 1.5.** Requires setting `connections={(CONNECTION_NETWORK_MAC, mac)}` on each target's `DeviceInfo` so HA's device registry merges our target device with the ESPHome integration's device for the same MAC. Blocked by two plumbing items: (a) `/ui/api/targets` needs to return `mac_address` (computed server-side but not yet in the response payload), and (b) we need to decide whether to keep our per-target entities or strictly attach diagnostic entities to the existing ESPHome device. Low-risk refactor, but touches the wire contract + device identity — lands cleaner behind a 1.5 API version bump than a bug-fix turn.
+- [x] **#27** *(1.4.1-dev.48)* — Merge targets with the native ESPHome integration device row.
+  `/ui/api/targets` now returns `mac_address` (populated from the device poller's mDNS TXT / native-API lookup). The HA custom integration's `target_device_info` normalizes the MAC to HA's lower-case colon form and attaches it as `connections={(CONNECTION_NETWORK_MAC, mac)}` in `DeviceInfo`. HA's device registry sees the matching connection on the ESPHome integration's device and merges the two rows — our per-target entities (Firmware update, Schedule, Pinned version) now appear on the same device card as ESPHome's (running version, WiFi signal, sensors, etc.) instead of creating a duplicate device. When MAC is unknown (device offline and never polled), we fall back to the previous `identifiers={(DOMAIN, f"target:{filename}")}` keying so we never lose the entity.
 
 - [x] **#28** *(1.4.1-dev.46)* — Drop redundant firmware-version sensor; expose Schedule + Pinning instead.
   Removed `TargetFirmwareVersionSensor` (the native ESPHome integration already reports running version). Added `TargetScheduleSensor` ("Once: 2026-04-20 18:30", cron expressions, "Paused", "No schedule") and `TargetPinnedVersionSensor` ("2025.9.3" or "Auto").
@@ -331,4 +331,8 @@ Let users compile a target **without** the OTA flash step, then download the res
 
 - [x] **#31** *(1.4.1-dev.46)* — Prettier discovery confirm dialog.
   Stripped the `._esphome-fleet._tcp.local.` mDNS service-type suffix from the discovered name before it hits the UI, and rewrote the dialog copy ("Home Assistant found an ESPHome Fleet server at http://…. Confirm or edit the URL to finish setup.") so it reads like a welcome screen rather than a debug dump.
+
+- [ ] 32 The devices still aren't tagged onto the existing ESP Home devices. Please investigate and fix. 
+
+- [ ] 33 Now the discovery finds two ESP Home fleet devices. That's confusing. We F'd that up. 
 

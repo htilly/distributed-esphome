@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
+
 from esphome_fleet.const import DOMAIN
 from esphome_fleet.device import hub_device_info, target_device_info, worker_device_info
 
@@ -53,6 +55,37 @@ def test_target_device_info_suggested_area_copied_from_yaml() -> None:
         {"target": "foo.yaml", "area": "Living Room"}, "entry-xyz"
     )
     assert info["suggested_area"] == "Living Room"
+
+
+def test_target_device_info_attaches_mac_connection() -> None:
+    """#27 — MAC triggers a CONNECTION_NETWORK_MAC so HA merges with ESPHome."""
+    info = target_device_info(
+        {"target": "foo.yaml", "mac_address": "AA:BB:CC:DD:EE:FF"},
+        "entry-xyz",
+    )
+    assert info["connections"] == {(CONNECTION_NETWORK_MAC, "aa:bb:cc:dd:ee:ff")}
+
+
+def test_target_device_info_normalizes_colonless_mac() -> None:
+    """ESPHome native-API form (no colons, upper-case) is normalized."""
+    info = target_device_info(
+        {"target": "foo.yaml", "mac_address": "AABBCCDDEEFF"},
+        "entry-xyz",
+    )
+    assert info["connections"] == {(CONNECTION_NETWORK_MAC, "aa:bb:cc:dd:ee:ff")}
+
+
+def test_target_device_info_skips_connection_when_mac_missing() -> None:
+    info = target_device_info({"target": "foo.yaml"}, "entry-xyz")
+    assert "connections" not in info
+
+
+def test_target_device_info_skips_connection_when_mac_invalid() -> None:
+    info = target_device_info(
+        {"target": "foo.yaml", "mac_address": "not-a-mac"},
+        "entry-xyz",
+    )
+    assert "connections" not in info
 
 
 def test_worker_device_info_names_worker_with_suffix() -> None:

@@ -21,9 +21,25 @@ from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
 
 from .const import DOMAIN
+
+
+def _normalize_mac(value: str | None) -> str | None:
+    """Canonicalize a MAC to HA's lower-case, colon-separated form.
+
+    The device poller may surface MACs as ``"AA:BB:CC:DD:EE:FF"`` or the
+    ESPHome native-API ``"aabbccddeeff"`` form. HA's device registry keys
+    off the colon-separated lower-case shape, so an un-normalized value
+    silently fails to merge.
+    """
+    if not value:
+        return None
+    cleaned = value.strip().lower().replace("-", "").replace(":", "")
+    if len(cleaned) != 12 or not all(c in "0123456789abcdef" for c in cleaned):
+        return None
+    return ":".join(cleaned[i : i + 2] for i in range(0, 12, 2))
 
 
 def hub_device_info(entry_id: str, base_url: str) -> DeviceInfo:
@@ -71,6 +87,14 @@ def target_device_info(target: dict[str, Any], hub_entry_id: str) -> DeviceInfo:
         sw_version=target.get("running_version") or None,
         via_device=(DOMAIN, f"hub:{hub_entry_id}"),
     )
+    # #27: when the MAC is known, attach it as a connection so HA's
+    # device registry merges this device row with the one that the
+    # native ESPHome integration already registered for the same chip.
+    # Our entities (Schedule, Pinned version, Firmware Update) then
+    # appear on the same card as ESPHome's entities — no duplicate
+    # device rows per managed target.
+    if (mac := _normalize_mac(target.get("mac_address"))):
+        info["connections"] = {(CONNECTION_NETWORK_MAC, mac)}
     if (area := target.get("area")):
         info["suggested_area"] = area
     return info
