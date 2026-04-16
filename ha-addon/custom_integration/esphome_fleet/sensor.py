@@ -46,10 +46,19 @@ async def async_setup_entry(
 ) -> None:
     coordinator: EsphomeFleetCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    # Queue depth is a single always-present entity.
-    async_add_entities(
-        [QueueDepthSensor(coordinator, entry.entry_id, coordinator.base_url)]
-    )
+    # Hub-level sensors — always present.
+    eid = entry.entry_id
+    url = coordinator.base_url
+    async_add_entities([
+        QueueDepthSensor(coordinator, eid, url),
+        WorkerCountSensor(coordinator, eid, url),
+        TotalSlotsSensor(coordinator, eid, url),
+        SelectedEsphomeVersionSensor(coordinator, eid, url),
+        FleetVersionSensor(coordinator, eid, url),
+        TotalDevicesSensor(coordinator, eid, url),
+        OnlineDevicesSensor(coordinator, eid, url),
+        OutdatedDevicesSensor(coordinator, eid, url),
+    ])
 
     seen_targets: set[str] = set()
     seen_workers: set[str] = set()
@@ -127,6 +136,142 @@ class QueueDepthSensor(CoordinatorEntity[EsphomeFleetCoordinator], SensorEntity)
     def native_value(self) -> int:
         queue = (self.coordinator.data or {}).get("queue") or []
         return sum(1 for j in queue if j.get("state") in ("pending", "working"))
+
+
+class _HubSensorBase(CoordinatorEntity[EsphomeFleetCoordinator], SensorEntity):
+    """Shared hub-device-scoping boilerplate."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        coordinator: EsphomeFleetCoordinator,
+        entry_id: str,
+        base_url: str,
+        unique_suffix: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._entry_id = entry_id
+        self._base_url = base_url
+        self._attr_unique_id = f"{entry_id}_{unique_suffix}"
+
+    @property
+    def device_info(self):
+        return hub_device_info(self._entry_id, self._base_url)
+
+
+class WorkerCountSensor(_HubSensorBase):
+    """#42 — number of registered workers."""
+
+    _attr_name = "Workers"
+    _attr_icon = "mdi:server-network"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = "workers"
+
+    def __init__(self, coordinator: EsphomeFleetCoordinator, entry_id: str, base_url: str) -> None:
+        super().__init__(coordinator, entry_id, base_url, "worker_count")
+
+    @property
+    def native_value(self) -> int:
+        return len((self.coordinator.data or {}).get("workers") or [])
+
+
+class TotalSlotsSensor(_HubSensorBase):
+    """#42 — sum of max_parallel_jobs across all workers."""
+
+    _attr_name = "Total build slots"
+    _attr_icon = "mdi:slot-machine"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = "slots"
+
+    def __init__(self, coordinator: EsphomeFleetCoordinator, entry_id: str, base_url: str) -> None:
+        super().__init__(coordinator, entry_id, base_url, "total_slots")
+
+    @property
+    def native_value(self) -> int:
+        workers = (self.coordinator.data or {}).get("workers") or []
+        return sum(w.get("max_parallel_jobs", 0) for w in workers)
+
+
+class SelectedEsphomeVersionSensor(_HubSensorBase):
+    """#43 — currently selected ESPHome version on the server."""
+
+    _attr_name = "Selected ESPHome version"
+    _attr_icon = "mdi:tag"
+
+    def __init__(self, coordinator: EsphomeFleetCoordinator, entry_id: str, base_url: str) -> None:
+        super().__init__(coordinator, entry_id, base_url, "selected_esphome_version")
+
+    @property
+    def native_value(self) -> str | None:
+        versions = (self.coordinator.data or {}).get("esphome_versions") or {}
+        return versions.get("selected") or None
+
+
+class FleetVersionSensor(_HubSensorBase):
+    """#44 — ESPHome Fleet add-on version."""
+
+    _attr_name = "Fleet version"
+    _attr_icon = "mdi:information-outline"
+
+    def __init__(self, coordinator: EsphomeFleetCoordinator, entry_id: str, base_url: str) -> None:
+        super().__init__(coordinator, entry_id, base_url, "fleet_version")
+
+    @property
+    def native_value(self) -> str | None:
+        info = (self.coordinator.data or {}).get("server_info") or {}
+        return info.get("addon_version") or None
+
+
+class TotalDevicesSensor(_HubSensorBase):
+    """#46 — count of managed targets."""
+
+    _attr_name = "Total devices"
+    _attr_icon = "mdi:devices"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = "devices"
+
+    def __init__(self, coordinator: EsphomeFleetCoordinator, entry_id: str, base_url: str) -> None:
+        super().__init__(coordinator, entry_id, base_url, "total_devices")
+
+    @property
+    def native_value(self) -> int:
+        return len((self.coordinator.data or {}).get("targets") or [])
+
+
+class OnlineDevicesSensor(_HubSensorBase):
+    """#46 — count of online targets."""
+
+    _attr_name = "Online devices"
+    _attr_icon = "mdi:lan-connect"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = "devices"
+
+    def __init__(self, coordinator: EsphomeFleetCoordinator, entry_id: str, base_url: str) -> None:
+        super().__init__(coordinator, entry_id, base_url, "online_devices")
+
+    @property
+    def native_value(self) -> int:
+        targets = (self.coordinator.data or {}).get("targets") or []
+        return sum(1 for t in targets if t.get("online"))
+
+
+class OutdatedDevicesSensor(_HubSensorBase):
+    """#46 — count of targets needing an update."""
+
+    _attr_name = "Outdated devices"
+    _attr_icon = "mdi:update"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = "devices"
+
+    def __init__(self, coordinator: EsphomeFleetCoordinator, entry_id: str, base_url: str) -> None:
+        super().__init__(coordinator, entry_id, base_url, "outdated_devices")
+
+    @property
+    def native_value(self) -> int:
+        targets = (self.coordinator.data or {}).get("targets") or []
+        return sum(1 for t in targets if t.get("needs_update"))
 
 
 _DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]

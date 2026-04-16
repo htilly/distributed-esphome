@@ -362,14 +362,20 @@ Let users compile a target **without** the OTA flash step, then download the res
 - [ ] **#41** — Real-time entity state updates (push instead of polling).
   The coordinator polls `/ui/api/*` every 30 seconds. User actions (compile, cancel) and worker status changes take up to 30s to reflect in HA entities. Proper fix: the add-on pushes state changes via a webhook or WebSocket callback to the HA custom integration, which calls `coordinator.async_set_updated_data()` immediately. Requires a server-side change (register a webhook URL with the coordinator, send SSE/WebSocket notifications) + an integration-side listener. Deferred — 30s latency is acceptable for 1.4.1; revisit in 1.5 alongside the UE.* update-entity work.
 
-- [ ] 42 Let's add sensors for the number of workers and number of task slots to the main ESPHome fleet device. 
+- [x] **#42** *(1.4.1-dev.52)* — Worker count + total build slots sensors on the hub device.
+  `WorkerCountSensor` counts registered workers; `TotalSlotsSensor` sums `max_parallel_jobs` across all workers. Both are `MEASUREMENT` state class for HA history graphs.
 
-- [ ] 43 Let's also add a sensor for the currently selected ESP Home version to the ESP Home Fleet device. 
+- [x] **#43** *(1.4.1-dev.52)* — Selected ESPHome version sensor on the hub device.
+  `SelectedEsphomeVersionSensor` reads from `coordinator.data["esphome_versions"]["selected"]`.
 
-- [ ] 44 And let's expose the version of the ESP Home fleet as a sensor also. Unless there's a way to publish it more natively in the integration, then let's do that. 
+- [x] **#44** *(1.4.1-dev.52)* — Fleet version sensor on the hub device.
+  `FleetVersionSensor` reads `addon_version` from `/ui/api/server-info`. Also visible in the hub device's info card.
 
-- [ ] 45 Let's expose a clean cache button and action for the workers. 
+- [x] **#45** *(1.4.1-dev.52)* — Clean cache button for workers.
+  New `ButtonEntity` platform. One `WorkerCleanCacheButton` per worker — pressing it POSTs to `/ui/api/workers/{client_id}/clean`, which flags the worker to purge its build cache on the next heartbeat. Also usable as an HA action from automations.
 
-- [ ] 46 Let's add sensors for the number of total devices, online devices, as well as the number of outdated devices to the ESP Home Fleet device. 
+- [x] **#46** *(1.4.1-dev.52)* — Total / online / outdated device count sensors on the hub device.
+  Three new `MEASUREMENT` sensors: `TotalDevicesSensor`, `OnlineDevicesSensor`, `OutdatedDevicesSensor`. Count from `coordinator.data["targets"]` using the `online` and `needs_update` fields.
 
-- [ ] 47 Let's add the ability to change the number of slots on a worker. I'm not sure if that's a sensor or how to exactly do that, but you can, from home assistance, change the number of slots from an automation. 
+- [x] **#47** *(1.4.1-dev.52)* — Worker build-slot control via HA NumberEntity.
+  New `NumberEntity` platform. One `WorkerSlotCountNumber` per worker (0–32, box mode). Setting the value POSTs to `/ui/api/workers/{client_id}/parallel-jobs`; the worker picks up the new count on its next heartbeat. Setting to 0 pauses the worker. Usable from automations (`number.set_value`). 
