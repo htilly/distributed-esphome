@@ -246,9 +246,7 @@ async def test_heartbeat_updates_last_seen(tmp_path):
         assert resp.status == 200
         data = await resp.json()
         assert data["ok"] is True
-        # SC.4: server_client_version is no longer advertised on
-        # heartbeat responses (source-code auto-update removed).
-        assert "server_client_version" not in data
+        assert "server_client_version" in data
 
         ts_after = ta.registry.get(client_id).last_seen
         assert ts_after >= ts_before
@@ -256,11 +254,7 @@ async def test_heartbeat_updates_last_seen(tmp_path):
         await ta.close()
 
 
-async def test_heartbeat_suppresses_server_client_version_post_sc4(tmp_path):
-    """SC.4: `server_client_version` removed from heartbeat responses.
-    Pre-1.4.1 workers that still check this field get None and fall into
-    the log-at-DEBUG branch rather than triggering auto-update.
-    """
+async def test_heartbeat_returns_server_version(tmp_path):
     ta = await _make_app(tmp_path)
     try:
         client_id = await _register(ta)
@@ -270,7 +264,8 @@ async def test_heartbeat_suppresses_server_client_version_post_sc4(tmp_path):
             headers=AUTH_HEADERS,
         )
         data = await resp.json()
-        assert "server_client_version" not in data
+        assert isinstance(data["server_client_version"], str)
+        assert len(data["server_client_version"]) > 0
     finally:
         await ta.close()
 
@@ -731,25 +726,22 @@ async def test_append_log_requires_auth(tmp_path):
 # 12. Code endpoint — GET /api/v1/client/code
 # ---------------------------------------------------------------------------
 
-async def test_get_client_code_returns_410_post_sc4(tmp_path):
-    """SC.4: /api/v1/client/code is deprecated; returns 410 Gone with a
-    pointer to the Docker upgrade path.
-    """
+async def test_get_client_code_returns_version_and_files(tmp_path):
     ta = await _make_app(tmp_path)
     try:
         resp = await ta.get("/api/v1/client/code", headers=AUTH_HEADERS)
-        assert resp.status == 410
+        assert resp.status == 200
         data = await resp.json()
-        assert data["error"] == "auto_update_removed"
-        assert "docker pull" in data["message"].lower()
+        assert "version" in data
+        assert "files" in data
+        assert isinstance(data["files"], dict)
+        # The server module directory contains Python files, so there must be at least one
+        assert len(data["files"]) > 0
     finally:
         await ta.close()
 
 
 async def test_get_client_code_requires_auth(tmp_path):
-    """Auth middleware still gates /api/v1/client/code — stale clients
-    must get 401 for missing token, not a helpful 410.
-    """
     ta = await _make_app(tmp_path)
     try:
         resp = await ta.get("/api/v1/client/code")
@@ -904,10 +896,8 @@ async def test_register_without_image_version_stores_none(tmp_path):
         await ta.close()
 
 
-async def test_heartbeat_for_fresh_image_omits_upgrade_flag(tmp_path):
-    """SC.4: workers with a current image_version get a clean heartbeat
-    (no image_upgrade_required, no server_client_version).
-    """
+async def test_heartbeat_advertises_update_for_fresh_image(tmp_path):
+    """Workers with a current image_version get server_client_version in heartbeat."""
     from constants import MIN_IMAGE_VERSION
     ta = await _make_app(tmp_path)
     try:
@@ -929,7 +919,7 @@ async def test_heartbeat_for_fresh_image_omits_upgrade_flag(tmp_path):
         )
         assert hb_resp.status == 200
         data = await hb_resp.json()
-        assert "server_client_version" not in data  # SC.4
+        assert "server_client_version" in data
         assert "image_upgrade_required" not in data
     finally:
         await ta.close()
@@ -990,10 +980,8 @@ async def test_heartbeat_flags_below_min_image_version(tmp_path):
         await ta.close()
 
 
-async def test_get_client_code_returns_410_for_stale_image(tmp_path):
-    """SC.4: endpoint is permanently gone; image_version doesn't matter
-    anymore — every caller gets 410, not a differentiated 409.
-    """
+async def test_get_client_code_refuses_stale_image(tmp_path):
+    """Stale-image workers get 409 from /api/v1/client/code instead of code."""
     ta = await _make_app(tmp_path)
     try:
         reg_resp = await ta.post(
@@ -1005,13 +993,15 @@ async def test_get_client_code_returns_410_for_stale_image(tmp_path):
 
         headers = {**AUTH_HEADERS, "X-Client-Id": client_id}
         resp = await ta.get("/api/v1/client/code", headers=headers)
-        assert resp.status == 410
+        assert resp.status == 409
+        data = await resp.json()
+        assert data.get("error") == "image_upgrade_required"
     finally:
         await ta.close()
 
 
-async def test_get_client_code_returns_410_for_fresh_image(tmp_path):
-    """SC.4: same — 410 regardless of image_version."""
+async def test_get_client_code_allows_fresh_image(tmp_path):
+    """Fresh-image workers can still pull source code."""
     from constants import MIN_IMAGE_VERSION
     ta = await _make_app(tmp_path)
     try:
@@ -1028,7 +1018,9 @@ async def test_get_client_code_returns_410_for_fresh_image(tmp_path):
 
         headers = {**AUTH_HEADERS, "X-Client-Id": client_id}
         resp = await ta.get("/api/v1/client/code", headers=headers)
-        assert resp.status == 410
+        assert resp.status == 200
+        data = await resp.json()
+        assert "files" in data
     finally:
         await ta.close()
 
@@ -1091,14 +1083,13 @@ async def test_heartbeat_image_version_full_parametrization(
                 f"image_version={image_version!r}: expected image_upgrade_required, got {data}"
             )
             assert "min_image_version" in data
-            # SC.4: server_client_version is never advertised anymore
-            # (source-code auto-update removed).
-            assert "server_client_version" not in data
+            assert "server_client_version" not in data, (
+                "server_client_version must be suppressed for stale images "
+                "to prevent the auto-update loop"
+            )
         else:
             assert data.get("image_upgrade_required") is None
-            # SC.4: server_client_version is never advertised anymore
-            # (source-code auto-update removed).
-            assert "server_client_version" not in data
+            assert "server_client_version" in data
     finally:
         await ta.close()
 
