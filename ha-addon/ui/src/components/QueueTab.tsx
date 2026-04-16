@@ -94,6 +94,13 @@ export function QueueTab({
   );
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [filter, setFilter] = useState('');
+  // #71: lift the Download dropdown's open state out of the row cell so
+  // it survives the 1 Hz SWR poll. TanStack Table re-instantiates column
+  // cells on data change, and any state kept inside the `<DropdownMenu>`
+  // would be torn down mid-click. Keyed by job id so only one dropdown
+  // is open at a time. Same pattern we used for the Devices-tab
+  // hamburger in #2 (1.4.1-dev.3) — see Design Judgment in CLAUDE.md.
+  const [downloadMenuOpenJobId, setDownloadMenuOpenJobId] = useState<string | null>(null);
 
   // Build target → display name map so queue shows friendly names
   const targetNameMap = useMemo(() => {
@@ -365,7 +372,10 @@ export function QueueTab({
                 : <Button variant="warn" size="sm" onClick={() => onRetry([job.id])}>Retry</Button>
             )}
             {canDownload && variants.length > 0 && (
-              <DropdownMenu>
+              <DropdownMenu
+                open={downloadMenuOpenJobId === job.id}
+                onOpenChange={(open) => setDownloadMenuOpenJobId(open ? job.id : null)}
+              >
                 <DropdownMenuTrigger
                   className="inline-flex items-center gap-1 rounded-lg border border-border bg-background px-2.5 h-7 text-[0.8rem] font-medium text-foreground hover:bg-muted cursor-pointer"
                   title="Download compiled firmware"
@@ -423,7 +433,7 @@ export function QueueTab({
       },
     }),
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [workers, onCancel, onRetry, onClear, onOpenLog, onEdit, targetNameMap]);
+  ], [workers, onCancel, onRetry, onClear, onOpenLog, onEdit, targetNameMap, downloadMenuOpenJobId]);
 
   const table = useReactTable({
     data: filteredQueue,

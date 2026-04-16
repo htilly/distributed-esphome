@@ -115,6 +115,28 @@ test('Queue tab renders Download dropdown only on eligible rows', async ({ page 
   await expect(otaRow.getByRole('button', { name: 'Download firmware' })).toHaveCount(0);
 });
 
+test('Queue Download dropdown survives a SWR poll tick (#71)', async ({ page }) => {
+  // Regression guard for #71 / #2-class bug: SWR polls the queue at 1 Hz,
+  // which re-instantiates TanStack Table cells. Any DropdownMenu state
+  // kept inside the cell would tear down mid-click and the menu would
+  // vanish. The fix lifts `open` state to the QueueTab parent (see
+  // CLAUDE.md Design Judgment → "Lift DropdownMenu open state out of
+  // any row cell").
+  await page.getByRole('button', { name: /Queue/ }).click();
+  await expect(page.locator('#tab-queue tbody tr').first()).toBeVisible({ timeout: 5000 });
+
+  const row = page.locator('#tab-queue tbody tr').filter({ hasText: 'office' });
+  await row.getByRole('button', { name: 'Download firmware' }).click();
+
+  const menuItem = page.getByRole('menuitem').first();
+  await expect(menuItem).toBeVisible();
+
+  // Wait long enough to cross at least two 1 Hz SWR poll ticks. The
+  // menu must still be visible afterward.
+  await page.waitForTimeout(2500);
+  await expect(menuItem).toBeVisible();
+});
+
 test('download-only success row shows Ready badge, not OTA Pending (#23)', async ({ page }) => {
   await page.getByRole('button', { name: /Queue/ }).click();
   await expect(page.getByText('bedroom-light')).toBeVisible({ timeout: 5000 });
