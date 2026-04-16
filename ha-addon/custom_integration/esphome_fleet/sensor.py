@@ -165,9 +165,14 @@ class _TargetSensorBase(CoordinatorEntity[EsphomeFleetCoordinator], SensorEntity
 
 
 class TargetScheduleSensor(_TargetSensorBase):
-    """Human-readable schedule for the next automatic compile (#28)."""
+    """Human-readable schedule for the next automatic compile (#28, #34).
 
-    _attr_name = "Schedule"
+    Exposed to HA as "Upgrade schedule" to make clear this is the cron
+    / one-shot that drives automatic compile + OTA upgrades — not the
+    device's own internal schedule.
+    """
+
+    _attr_name = "Upgrade schedule"
     _attr_icon = "mdi:calendar-clock"
 
     def __init__(
@@ -194,8 +199,8 @@ class TargetScheduleSensor(_TargetSensorBase):
 class TargetPinnedVersionSensor(_TargetSensorBase):
     """ESPHome version pin for this target (#28).
 
-    Reports the pinned version string, or "Auto" when no pin is set.
-    Useful for dashboards that want to flag targets stuck on old
+    Reports the pinned version string, or "None" (#35) when no pin is
+    set. Useful for dashboards that want to flag targets stuck on old
     releases.
     """
 
@@ -210,7 +215,7 @@ class TargetPinnedVersionSensor(_TargetSensorBase):
     @property
     def native_value(self) -> str:
         t = self._target or {}
-        return str(t.get("pinned_version") or "Auto")
+        return str(t.get("pinned_version") or "None")
 
 
 class _WorkerSensorBase(CoordinatorEntity[EsphomeFleetCoordinator], SensorEntity):

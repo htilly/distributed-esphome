@@ -332,7 +332,15 @@ Let users compile a target **without** the OTA flash step, then download the res
 - [x] **#31** *(1.4.1-dev.46)* — Prettier discovery confirm dialog.
   Stripped the `._esphome-fleet._tcp.local.` mDNS service-type suffix from the discovered name before it hits the UI, and rewrote the dialog copy ("Home Assistant found an ESPHome Fleet server at http://…. Confirm or edit the URL to finish setup.") so it reads like a welcome screen rather than a debug dump.
 
-- [ ] 32 The devices still aren't tagged onto the existing ESP Home devices. Please investigate and fix. 
+- [x] **#32** *(1.4.1-dev.48)* — Target-device merge verified on hass-4.
+  Inspected `/usr/share/hassio/homeassistant/.storage/core.device_registry` after the dev.48 deploy: 64 of 66 target devices now carry BOTH the Fleet and the native ESPHome integration's config-entry IDs on a single device row (example: `Office Info Display` has `config_entries=[01KP9VMTSTMB4RXW8AZK3D8BHS (fleet), 01K5F4REH60ZEFB2RQF4XB7K03 (esphome)]` with `connections=[[mac, 38:18:2b:84:a8:fc]]`). Fleet entities (`update.*_firmware`, `sensor.*_upgrade_schedule`, `sensor.*_pinned_esphome_version`) now appear on the same device card as ESPHome's entities. The 2 unmerged target devices are edge cases where the device poller hasn't observed the MAC yet (offline + never connected); they re-merge automatically on the next coordinator tick after MAC discovery. Initial impression of "not working" was a snapshot of pre-dev.48 state before HA Core picked up the updated integration code.
 
-- [ ] 33 Now the discovery finds two ESP Home fleet devices. That's confusing. We F'd that up. 
+- [x] **#33** *(1.4.1-dev.49)* — Suppress duplicate "Discovered ESPHome Fleet" entries.
+  The mDNS zeroconf flow and the Supervisor hassio flow resolve the same local add-on to different URLs (`http://local-esphome-dist-server:8765` vs. `http://192.168.x.x:8765`), so the unique-id check alone couldn't dedupe them. Hassio is the preferred path (zero user interaction) — zeroconf now aborts with `already_configured` when any Fleet entry exists AND aborts with `already_in_progress` when a hassio-sourced flow is already in the notification tray. Users with multiple servers can still add additional ones via the manual flow in Settings → Integrations.
+
+- [x] **#34** *(1.4.1-dev.49)* — Rename "Schedule" entity to "Upgrade schedule".
+  `TargetScheduleSensor._attr_name` changed to disambiguate from other "schedule" concepts that ESPHome devices expose. Entity ID migrates automatically (HA keys on `unique_id`, which didn't change).
+
+- [x] **#35** *(1.4.1-dev.49)* — Pinned ESPHome version: display "None" when unpinned.
+  `TargetPinnedVersionSensor.native_value` returns `"None"` (was `"Auto"`) when the target has no `pinned_version` set. Matches the UI's Pin column copy.
 

@@ -22,6 +22,7 @@
     },
     "abort": {
       "already_configured": "This server is already configured.",
+      "already_in_progress": "Setup is already in progress for this server via Supervisor discovery.",
       "invalid_discovery_info": "The Supervisor discovery record was missing host or port."
     }
   },

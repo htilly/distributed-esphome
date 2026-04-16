@@ -123,6 +123,25 @@ class EsphomeFleetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if not discovery_info.host or not discovery_info.port:
             return await self.async_step_user()
 
+        # #33: suppress the zeroconf "Discovered" notification when any
+        # Fleet entry is already configured OR a Supervisor-sourced flow
+        # is already in progress for the same local add-on. Hassio and
+        # zeroconf resolve the same server to different URLs
+        # (Supervisor internal hostname vs. LAN IP), so a unique-id
+        # check alone wouldn't dedupe. Users running multiple servers
+        # can still add additional ones manually via Settings.
+        if self._async_current_entries():
+            return self.async_abort(reason="already_configured")
+        for flow in self.hass.config_entries.flow.async_progress_by_handler(DOMAIN):
+            if flow.get("flow_id") == self.flow_id:
+                continue
+            if flow.get("context", {}).get("source") == config_entries.SOURCE_HASSIO:
+                return self.async_abort(reason="already_in_progress")
+
+        base_url = f"http://{discovery_info.host}:{discovery_info.port}"
+        await self.async_set_unique_id(base_url.lower())
+        self._abort_if_unique_id_configured(updates={CONF_BASE_URL: base_url})
+
         # `discovery_info.name` is the full mDNS service instance name,
         # e.g. "ESPHome Fleet._esphome-fleet._tcp.local.". Strip the
         # service-type suffix so the confirm dialog shows just the
@@ -131,7 +150,7 @@ class EsphomeFleetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             f".{ZEROCONF_TYPE}"
         ).removesuffix(ZEROCONF_TYPE)
         self._discovery_name = raw_name.strip(". ") or DEFAULT_TITLE
-        self._discovery_url = f"http://{discovery_info.host}:{discovery_info.port}"
+        self._discovery_url = base_url
         return await self.async_step_discovery_confirm()
 
     async def async_step_discovery_confirm(
