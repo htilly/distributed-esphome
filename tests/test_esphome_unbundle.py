@@ -221,7 +221,7 @@ def test_resolve_esphome_config_returns_none_when_venv_not_ready_and_no_bundle(
 
 async def test_server_info_reports_install_status_ready(tmp_path: Path) -> None:
     """SE.8 — /ui/api/server-info carries status='ready' when venv live."""
-    from tests.test_ui_api import _make_ui_app  # test harness
+    from test_ui_api import _make_ui_app  # test harness
 
     scanner._esphome_ready.set()
     scanner._server_esphome_bin = "/fake/bin/esphome"
@@ -238,7 +238,7 @@ async def test_server_info_reports_install_status_ready(tmp_path: Path) -> None:
 
 async def test_server_info_reports_install_status_installing(tmp_path: Path) -> None:
     """SE.8 — status='installing' when ready event is clear and no failure."""
-    from tests.test_ui_api import _make_ui_app
+    from test_ui_api import _make_ui_app
 
     # autouse fixture already cleared _esphome_ready.
     ta = await _make_ui_app(tmp_path)
@@ -252,7 +252,7 @@ async def test_server_info_reports_install_status_installing(tmp_path: Path) -> 
 
 async def test_server_info_reports_install_status_failed(tmp_path: Path) -> None:
     """SE.8 — status='failed' when the install task flagged a failure."""
-    from tests.test_ui_api import _make_ui_app
+    from test_ui_api import _make_ui_app
 
     scanner._esphome_install_failed = True
     ta = await _make_ui_app(tmp_path)
@@ -266,7 +266,7 @@ async def test_server_info_reports_install_status_failed(tmp_path: Path) -> None
 
 async def test_reinstall_endpoint_clears_failure_and_schedules_install(tmp_path: Path) -> None:
     """SE.8 — POST /ui/api/esphome/reinstall clears failure flag + returns ok."""
-    from tests.test_ui_api import _make_ui_app
+    from test_ui_api import _make_ui_app
     from unittest.mock import AsyncMock
 
     scanner._esphome_install_failed = True
