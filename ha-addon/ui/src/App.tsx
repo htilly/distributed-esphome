@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Eye, EyeOff, Moon, Sun } from 'lucide-react';
+import { ExternalLink, Eye, EyeOff, Moon, Sun } from 'lucide-react';
 import useSWR from 'swr';
 import {
   cancelJobs,
@@ -103,10 +103,33 @@ async function applyScheduleVersion(
   }
 }
 
+const _VALID_TABS: TabName[] = ['devices', 'queue', 'workers', 'schedules'];
+
+function _initialTab(): TabName {
+  // QS.27: URL query param wins over sessionStorage so deep-links like
+  // `?tab=queue` work reliably from HA sidebar links or bookmarks. HA
+  // Ingress strips the query string from the panel URL but users can
+  // still land here from the "Open web UI" direct-port link, from a
+  // bookmark, or from a row-deep-link shared by another user.
+  if (typeof window !== 'undefined') {
+    try {
+      const q = new URLSearchParams(window.location.search).get('tab');
+      if (q && (_VALID_TABS as string[]).includes(q)) {
+        return q as TabName;
+      }
+    } catch {
+      // malformed URL — fall through to sessionStorage
+    }
+  }
+  const stored = sessionStorage.getItem('activeTab');
+  if (stored && (_VALID_TABS as string[]).includes(stored)) {
+    return stored as TabName;
+  }
+  return 'devices';
+}
+
 export default function App() {
-  const [activeTab, setActiveTab] = useState<TabName>(
-    () => (sessionStorage.getItem('activeTab') as TabName) || 'devices',
-  );
+  const [activeTab, setActiveTab] = useState<TabName>(_initialTab);
   // QS.6: SWR's default compare (stable-hash) already prevents re-renders
   // when polled data is structurally unchanged. The custom JSON.stringify
   // compare we used to have was strictly worse — O(n) serialization of the
@@ -228,6 +251,17 @@ export default function App() {
   const switchTab = useCallback((name: TabName) => {
     setActiveTab(name);
     sessionStorage.setItem('activeTab', name);
+    // QS.27: reflect the tab in the URL so copy-paste / browser-back
+    // navigation works. pushState (not setting window.location) avoids
+    // a full reload. Skip in HA Ingress where the `X-Ingress-Path`
+    // ownership means we shouldn't rewrite the URL.
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set('tab', name);
+      window.history.replaceState(null, '', url);
+    } catch {
+      // non-browser env or malformed URL — sessionStorage carries it.
+    }
   }, []);
 
   // ---- Actions ----
@@ -555,6 +589,21 @@ export default function App() {
         >
           {streamerMode ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
         </button>
+        {/* #52: quick link to ESPHome Web for users who need to do a
+            serial / USB flash as a short-term workaround (e.g. first-
+            time provisioning, bricked device with no OTA path). Opens
+            in a new tab — web.esphome.io is a Google-hosted tool, HA
+            Ingress has no reason to tunnel it. */}
+        <a
+          href="https://web.esphome.io/"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--surface2)] px-2 py-0.5 text-[11px] text-[var(--text-muted)] whitespace-nowrap hover:bg-[var(--border)]"
+          title="Open ESPHome Web (serial / USB flashing)"
+        >
+          ESPHome Web
+          <ExternalLink className="size-3" aria-hidden />
+        </a>
         <span className="spacer" />
         <span className="status-dot" title="Server online" />
       </header>

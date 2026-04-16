@@ -791,8 +791,12 @@ def test_duplicate_device_preserves_include_tags(tmp_path):
     assert "!secret 'ap_password'" in result or "!secret ap_password" in result
 
 
-def test_duplicate_device_preserves_use_address(tmp_path):
-    """#53: wifi.use_address is preserved in the clone (reverted from #47)."""
+def test_duplicate_device_strips_use_address(tmp_path):
+    """#54: wifi.use_address is stripped so the duplicate doesn't inherit
+    the source's IP and show "online" just because the server can still
+    reach the original device at that address. Other wifi fields
+    (ssid, password) are preserved.
+    """
     import yaml
     src = tmp_path / "src.yaml"
     src.write_text(
@@ -801,8 +805,44 @@ def test_duplicate_device_preserves_use_address(tmp_path):
     )
     result = duplicate_device(str(tmp_path), "src.yaml", "device-copy")
     data = yaml.safe_load(result)
-    assert data["wifi"]["use_address"] == "192.168.1.100"
+    assert "use_address" not in data["wifi"]
     assert data["wifi"]["ssid"] == "home"
+
+
+def test_duplicate_device_strips_manual_static_ip(tmp_path):
+    """#54: wifi.manual_ip.static_ip is stripped for the same reason."""
+    import yaml
+    src = tmp_path / "src.yaml"
+    src.write_text(
+        "esphome:\n  name: device\n"
+        "wifi:\n"
+        "  ssid: home\n"
+        "  manual_ip:\n"
+        "    static_ip: 192.168.1.50\n"
+        "    gateway: 192.168.1.1\n"
+    )
+    result = duplicate_device(str(tmp_path), "src.yaml", "device-copy")
+    data = yaml.safe_load(result)
+    # static_ip removed; gateway preserved (not an identity pin).
+    manual_ip = data["wifi"].get("manual_ip") or {}
+    assert "static_ip" not in manual_ip
+    assert manual_ip.get("gateway") == "192.168.1.1"
+
+
+def test_duplicate_device_strips_ethernet_and_openthread_addresses(tmp_path):
+    """#54: same treatment for ethernet.use_address and openthread."""
+    import yaml
+    src = tmp_path / "src.yaml"
+    src.write_text(
+        "esphome:\n  name: device\n"
+        "ethernet:\n  use_address: 10.0.0.10\n  type: LAN8720\n"
+        "openthread:\n  use_address: fd00::1\n"
+    )
+    result = duplicate_device(str(tmp_path), "src.yaml", "device-copy")
+    data = yaml.safe_load(result)
+    assert "use_address" not in data["ethernet"]
+    assert data["ethernet"]["type"] == "LAN8720"
+    assert "use_address" not in data["openthread"]
 
 
 def test_duplicate_device_preserves_includes_with_substitution_rewrite(tmp_path):

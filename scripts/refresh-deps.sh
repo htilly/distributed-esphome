@@ -41,10 +41,17 @@ docker run --rm \
         apt-get update -qq && apt-get install -qq -y --no-install-recommends gcc libffi-dev libssl-dev git >/dev/null
         pip install --quiet pip-tools
         echo "  ▶ ha-addon/server/requirements.lock"
+        # --upgrade: pip-compile is conservative by default; without it,
+        # versions already in the existing lockfile are preserved even
+        # when a newer release is published. We WANT the lockfile to
+        # track the latest compatible versions of every dep on every
+        # refresh. Without this flag, refresh-deps.sh silently no-ops
+        # for deps whose lock entry was never manually bumped (#51).
         pip-compile \
             --generate-hashes \
             --resolver=backtracking \
             --strip-extras \
+            --upgrade \
             --quiet \
             --output-file ha-addon/server/requirements.lock \
             ha-addon/server/requirements.txt
@@ -53,6 +60,7 @@ docker run --rm \
             --generate-hashes \
             --resolver=backtracking \
             --strip-extras \
+            --upgrade \
             --quiet \
             --output-file ha-addon/client/requirements.lock \
             ha-addon/client/requirements.txt

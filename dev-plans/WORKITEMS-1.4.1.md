@@ -55,7 +55,12 @@ The current `DevicesTab.tsx` is **1,173 lines with 24 hooks** and an ESLint disa
 
 - [x] **QS.25** *(1.4.1-dev.21)* — Add missing e2e coverage. Now fully spans the originally-listed scope. Initial batch (dev.18) shipped PT.1 / PT.3 / PT.5 / PT.6 / PT.7 / PT.8. Follow-ups in dev.19 added PT.2 (schedule-modal) and PT.4 (bulk-schedule). dev.21 closes the rest of the QS.25 enumeration with three new mocked spec files: `rename-delete.spec.ts` (5 tests — rename POST with `new_name` payload, delete archive flow, "Delete Permanently" two-step confirmation), `worker-actions.spec.ts` (5 tests — Clean Cache POST, Remove worker DELETE, parallel-jobs slot control debounce + payload, Connect Worker modal opens), `persistence.spec.ts` (5 tests — column visibility hides + survives reload + writes `device-columns` to localStorage, theme toggle round-trips via `theme` localStorage key, theme defaults to dark when no value, `showUnmanaged` round-trips).
 - [x] **QS.26** *(1.4.1-dev.18)* — Add React Error Boundary around `<App />`. New `components/ErrorBoundary.tsx` class component wired into `main.tsx` between `<StrictMode>` and `<App />`. `getDerivedStateFromError` flips a state flag; the fallback UI is a centred card with the error message, a Reload button (window.location.reload), and a Dismiss button so transient render errors don't require a full reload. Stack trace forwarded to `console.error` for browser devtools / HA add-on log capture.
-- [ ] **QS.27 Optional polish** — lower-priority items: `ConnectWorkerModal` 8× useState → useReducer, `address_source` union type, `LogModal` setInterval comment, persist sort order, URL query params for deep-linking.
+- [x] **QS.27 Optional polish** *(1.4.1-dev.55)* — All five sub-items landed:
+  - `ConnectWorkerModal` consolidated 8× `useState` → `useReducer` with typed `FormState` + `{ type: 'set', field, value }` action. One dispatch replaces 8 fan-out effects; the `preset` pre-population path + docker-command derivation both read from one source of truth.
+  - `address_source` is now a `type AddressSource = 'mdns' | 'mdns_default' | 'wifi_use_address' | 'ethernet_use_address' | 'openthread_use_address' | 'wifi_static_ip' | 'ethernet_static_ip'` union in `types/index.ts`, imported by `DevicesTab` + `useDeviceColumns`. Stale cases (`static`, `override_yaml`, `override_static`, `override_use_address`) dropped.
+  - `LogModal` `setInterval` now carries a "why the 1 Hz tick exists" docstring — re-runs `timeAgo` every second so the elapsed counter ticks smoothly instead of stair-stepping with SWR's 1 Hz poll.
+  - Per-tab sort state persists via a new `utils/persistState.ts` `usePersistedState` helper. Keys: `devices-sort`, `queue-sort`, `workers-sort`, `schedules-sort`. Survives page reloads + add-on redeploys.
+  - URL query param `?tab=<name>` now deep-links to the tab. `_initialTab()` reads it on mount with sessionStorage fallback; `switchTab` calls `history.replaceState` so copy-paste/browser-back work. Invalid values fall through to the default.
 
 ## Playwright Coverage Backfill
 
@@ -383,8 +388,20 @@ Let users compile a target **without** the OTA flash step, then download the res
 - [x] **#48** *(1.4.1-dev.53)* — Cyd-office-info validation failure: compare pin against actual binary, not tracked version.
   The YAML uses `sram1_as_iram: true` (added in ESPHome 2026.4.0). The Fleet add-on's container bundles ESPHome 2026.3.3 but `pypi_version_refresher` updates the server's "selected" version from the HA Supervisor's ESPHome add-on (2026.4.0). The validate endpoint's `if pin and pin != get_esphome_version()` short-circuited when the pin matched the tracked "selected" version, silently using the 2026.3.3 binary instead of installing 2026.4.0 via version_manager. Fixed by comparing the pin against the ACTUAL installed binary version (`_get_installed_esphome_version()`). Added a `pin_version: 2026.4.0` comment in cyd-office-info.yaml (via the existing `/ui/api/targets/.../pin` endpoint) so validation installs and uses 2026.4.0.
 
-  - [ ] 49 Every time Home Assistant is restarted, all the worker entities appear to be duplicated. Let's figure out why and make sure that doesn't happen. 
+- [x] **#49** *(1.4.1-dev.55)* — Worker entities duplicated on HA/add-on restart.
+  Workers persist their `client_id` to `/esphome-versions/.client_id` and re-send it as `existing_client_id` on re-register. Server's `register()` reused the ID only if the worker was already in `_workers` — on add-on restart, that dict is empty, so every re-registration silently minted a NEW UUID, leaving the old client_id's HA device orphaned (the #39 stale-cleanup would eventually reap it, but only after a scan cycle, and only if no entities still referenced the old ID). Fixed: `register()` now reuses `existing_client_id` unconditionally, creating a fresh `Worker` entry with the SAME id when the server doesn't remember it. Logs "Re-attached worker X (...) — server didn't know this client" in that path.
 
-  - [ ] 51  Can we make sure that we always bundle the latest public ESPHome version in the Docker container?
+- [x] **#51** *(1.4.1-dev.55)* — Always bundle latest public ESPHome in Docker container.
+  `scripts/refresh-deps.sh` was silently conservative — `pip-compile` without `--upgrade` preserves versions already in the existing lockfile even when newer releases are published. Added `--upgrade` to both `pip-compile` invocations; re-ran and the lockfile jumped from `esphome==2026.3.3` to `esphome==2026.4.0`.
 
-  - [ ] 52 Let's add a link to ESPHome Web (to the header?) to allow people to perform operations via serial web as a short term solution. 
+- [x] **#52** *(1.4.1-dev.55)* — ESPHome Web link in header.
+  New pill-style link: "ESPHome Web ↗" opens `https://web.esphome.io/` in a new tab. Serial/USB flashing workaround for first-time provisioning or bricked devices with no OTA path.
+
+- [x] **#53** *(1.4.1-dev.55)* — Compile/validate actions accept HA target-injected keys.
+  When the user invoked the Compile action without picking a device, HA still passed `device_id: None` (plus `entity_id`, `area_id`, `floor_id`, `label_id`) in the service data. voluptuous rejected them as "extra keys not allowed". Added `_TARGET_KEYS` shared between `COMPILE_SCHEMA` and `VALIDATE_SCHEMA` declaring each as `vol.Optional` with `vol.Any(None, cv.string, [cv.string])`.
+
+- [x] **#54** *(1.4.1-dev.55)* — Duplicated device comes up online without responding.
+  `duplicate_device` now strips identity-pinning network fields from the clone: `wifi.use_address`, `wifi.manual_ip.static_ip`, `ethernet.use_address`, `openthread.use_address`. The clone inherited the source's IP; the poller connected to that address (still hosting the OLD device) and marked the duplicate online. Other fields (ssid, password, gateway) preserved. Three new tests; the former `preserves_use_address` test flipped to match the new behavior.
+
+- [x] **#55** *(1.4.1-dev.55)* — Selected ESPHome version broadcast + hub sensors event-driven.
+  `scanner.set_esphome_version` now broadcasts `targets_changed` on actual transitions so `SelectedEsphomeVersionSensor` updates in real time (previously only refreshed on the 30-s coordinator tick). The other hub sensors (Queue depth, Workers, Total slots, Total/Online/Outdated devices, Fleet version) were already event-driven via the coordinator-refresh path on any broadcast (#41).

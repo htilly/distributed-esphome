@@ -13,7 +13,7 @@ import {
 import type { Job, Target, Worker } from '../types';
 import { Button, buttonVariants } from './ui/button';
 import { SortHeader, getAriaSort } from './ui/sort-header';
-import { fmtDuration, getJobBadge, stripYaml, timeAgo, isJobSuccessful, isJobInProgress, isJobFailed, isJobFinished, isJobRetryable } from '../utils';
+import { fmtDuration, getJobBadge, stripYaml, timeAgo, isJobSuccessful, isJobInProgress, isJobFailed, isJobFinished, isJobRetryable, usePersistedState } from '../utils';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -75,7 +75,11 @@ export function QueueTab({
   onOpenLog,
   onEdit,
 }: Props) {
-  const [sorting, setSorting] = useState<SortingState>([{ id: 'state', desc: false }]);
+  // QS.27: persist sort across reloads via localStorage.
+  const [sorting, setSorting] = usePersistedState<SortingState>(
+    'queue-sort',
+    [{ id: 'state', desc: false }],
+  );
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [filter, setFilter] = useState('');
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useReducer, useRef, useState } from 'react';
 import type { ServerInfo, WorkerPreset } from '../types';
 import {
   Dialog,
@@ -63,6 +63,34 @@ function buildDockerCmd(params: {
   return lines.join('\n');
 }
 
+// QS.27: consolidate the modal's form fields under one reducer instead
+// of 8 parallel useState hooks. Makes the "preset" pre-population path
+// a single dispatch + keeps the pre-rendered docker command derived
+// from one source of truth.
+interface FormState {
+  serverUrl: string;
+  containerName: string;
+  hostname: string;
+  maxJobs: number;
+  seedVersion: string;
+  hostPlatform: string;
+  restartPolicy: string;
+  shell: Shell;
+}
+
+type FormAction =
+  | { type: 'set'; field: keyof FormState; value: FormState[keyof FormState] }
+  | { type: 'reset'; next: FormState };
+
+function formReducer(state: FormState, action: FormAction): FormState {
+  switch (action.type) {
+    case 'set':
+      return { ...state, [action.field]: action.value };
+    case 'reset':
+      return action.next;
+  }
+}
+
 export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset }: Props) {
   const port = serverInfo.port || 8765;
   const addrs = serverInfo.server_addresses?.length
@@ -70,31 +98,39 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
     : [serverInfo.server_ip || window.location.hostname];
   const urlOptions = addrs.map(addr => `http://${addr}:${port}`);
 
-  const [serverUrl, setServerUrl] = useState(urlOptions[0] || '');
-  const [containerName, setContainerName] = useState('distributed-esphome-worker');
-  // preset fields pre-populate when reconnecting an existing worker (bug #7).
-  // We read them once at mount and don't sync later — the modal is short-lived
-  // and a mid-edit prop change would be surprising.
-  const [hostname, setHostname] = useState(preset?.hostname ?? '');
-  const [maxJobs, setMaxJobs] = useState(preset?.max_parallel_jobs ?? 2);
-  const [seedVersion, setSeedVersion] = useState(esphomeVersion || '');
+  // Preset fields pre-populate when reconnecting an existing worker
+  // (bug #7). We read them once at mount and don't sync later — the
+  // modal is short-lived and a mid-edit prop change would be surprising.
+  const [form, dispatch] = useReducer(formReducer, {
+    serverUrl: urlOptions[0] || '',
+    containerName: 'distributed-esphome-worker',
+    hostname: preset?.hostname ?? '',
+    maxJobs: preset?.max_parallel_jobs ?? 2,
+    seedVersion: esphomeVersion || '',
+    hostPlatform: preset?.host_platform ?? '',
+    restartPolicy: 'unless-stopped',
+    shell: 'bash',
+  });
   const seedUserEdited = useRef(false);
-  const [hostPlatform, setHostPlatform] = useState(preset?.host_platform ?? '');
-  const [restartPolicy, setRestartPolicy] = useState('unless-stopped');
-  const [shell, setShell] = useState<Shell>('bash');
   const [copied, setCopied] = useState(false);
+
+  // Convenience aliases so JSX stays readable.
+  const { serverUrl, containerName, hostname, maxJobs, seedVersion,
+    hostPlatform, restartPolicy, shell } = form;
+  const set = <K extends keyof FormState>(field: K, value: FormState[K]) =>
+    dispatch({ type: 'set', field, value });
 
   // Sync seed version from props unless user manually edited it
   useEffect(() => {
     if (!seedUserEdited.current && esphomeVersion) {
-      setSeedVersion(esphomeVersion);
+      dispatch({ type: 'set', field: 'seedVersion', value: esphomeVersion });
     }
   }, [esphomeVersion]);
 
   // Keep server URL dropdown in sync when addresses change
   useEffect(() => {
     if (!urlOptions.includes(serverUrl)) {
-      setServerUrl(urlOptions[0] || '');
+      dispatch({ type: 'set', field: 'serverUrl', value: urlOptions[0] || '' });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverInfo.server_addresses, serverInfo.server_ip, serverInfo.port]);
@@ -142,7 +178,7 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
           <div className="connect-form">
             <div>
               <Label>Server URL</Label>
-              <Select value={serverUrl} onChange={e => setServerUrl(e.target.value)}>
+              <Select value={serverUrl} onChange={e => set('serverUrl', e.target.value)}>
                 {urlOptions.map(u => <option key={u} value={u}>{u}</option>)}
               </Select>
             </div>
@@ -160,7 +196,7 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
               <Input
                 type="text"
                 value={containerName}
-                onChange={e => setContainerName(e.target.value)}
+                onChange={e => set('containerName', e.target.value)}
               />
             </div>
             <div>
@@ -169,7 +205,7 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
                 type="text"
                 value={hostname}
                 placeholder="$(hostname)"
-                onChange={e => setHostname(e.target.value)}
+                onChange={e => set('hostname', e.target.value)}
               />
             </div>
             <div>
@@ -179,7 +215,7 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
                 value={maxJobs}
                 min={1}
                 max={8}
-                onChange={e => setMaxJobs(parseInt(e.target.value, 10) || 2)}
+                onChange={e => set('maxJobs', parseInt(e.target.value, 10) || 2)}
               />
             </div>
             <div>
@@ -187,7 +223,7 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
               <Input
                 type="text"
                 value={seedVersion}
-                onChange={e => { seedUserEdited.current = true; setSeedVersion(e.target.value); }}
+                onChange={e => { seedUserEdited.current = true; set('seedVersion', e.target.value); }}
               />
             </div>
             <div>
@@ -199,12 +235,12 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
                 type="text"
                 value={hostPlatform}
                 placeholder="e.g. macOS 15.3 (Apple M1 Pro)"
-                onChange={e => setHostPlatform(e.target.value)}
+                onChange={e => set('hostPlatform', e.target.value)}
               />
             </div>
             <div>
               <Label>Restart Policy</Label>
-              <Select value={restartPolicy} onChange={e => setRestartPolicy(e.target.value)}>
+              <Select value={restartPolicy} onChange={e => set('restartPolicy', e.target.value)}>
                 <option value="unless-stopped">unless-stopped</option>
                 <option value="always">always</option>
                 <option value="no">no</option>
@@ -217,14 +253,14 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
               <Button
                 variant={shell === 'bash' ? 'default' : 'secondary'}
                 size="sm"
-                onClick={() => setShell('bash')}
+                onClick={() => set('shell', 'bash')}
               >
                 Bash
               </Button>
               <Button
                 variant={shell === 'powershell' ? 'default' : 'secondary'}
                 size="sm"
-                onClick={() => setShell('powershell')}
+                onClick={() => set('shell', 'powershell')}
               >
                 PowerShell
               </Button>

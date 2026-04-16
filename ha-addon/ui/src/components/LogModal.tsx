@@ -39,13 +39,19 @@ export function LogModal({ jobId, queue, workers, onClose, onRetry, onEdit, stac
   const pollJobIdRef = useRef<string | null>(null);
   const mountedRef = useRef(false);
 
-  // Live header updates
+  // Live header updates (QS.27): the job header shows a running
+  // "elapsed since start" counter for in-flight compiles. The job
+  // object itself only re-renders when SWR polls (1 Hz for queue),
+  // but the human-readable elapsed value needs to tick every second
+  // so the user sees a smooth counter instead of a jittery stair-step
+  // tied to the polling cadence. `forceUpdate` bumps a dummy state
+  // counter purely to re-run `timeAgo` against the current wall-clock
+  // time. Cleaned up on modal close — no wasted timer while hidden.
   const [, forceUpdate] = useState(0);
   const headerTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const job = jobId ? queue.find(j => j.id === jobId) ?? null : null;
 
-  // Force header re-render every second while open
   useEffect(() => {
     if (!isOpen) return;
     headerTimerRef.current = setInterval(() => forceUpdate(n => n + 1), 1000);

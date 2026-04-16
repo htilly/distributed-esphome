@@ -10,8 +10,8 @@ import {
   type RowSelectionState,
 } from '@tanstack/react-table';
 import { pinTargetVersion, unpinTargetVersion } from '../api/client';
-import type { Device, Job, Target, Worker } from '../types';
-import { stripYaml, haDeepLink } from '../utils';
+import type { AddressSource, Device, Job, Target, Worker } from '../types';
+import { stripYaml, haDeepLink, usePersistedState } from '../utils';
 import { StatusDot } from './StatusDot';
 import { Button } from './ui/button';
 import { getAriaSort } from './ui/sort-header';
@@ -120,7 +120,7 @@ function matchesFilter(filter: string, ...fields: (string | null | undefined)[])
  * Returns null when the YAML didn't declare any of wifi/ethernet/openthread —
  * the column shows a dash in that case.
  */
-function formatAddressSource(source: string | null | undefined): string | null {
+function formatAddressSource(source: AddressSource | null | undefined): string | null {
   switch (source) {
     case 'mdns': return 'via mDNS';
     case 'wifi_use_address': return 'wifi.use_address';
@@ -139,7 +139,8 @@ export { RenameModal };
 
 export function DevicesTab({ targets, devices, workers, streamerMode, activeJobsByTarget, onCompile, onUpgradeOne, onEdit, onLogs, onToast, onDelete, onRename, onSchedule, onNewDevice, onDuplicate, onRefresh }: Props) {
   const [filter, setFilter] = useState('');
-  const [sorting, setSorting] = useState<SortingState>([]);
+  // QS.27: persist sort across reloads via localStorage.
+  const [sorting, setSorting] = usePersistedState<SortingState>('devices-sort', []);
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(loadColumnVisibility);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [renameTarget, setRenameTarget] = useState<string | null>(null);

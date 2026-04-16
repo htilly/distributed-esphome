@@ -10,7 +10,7 @@ import {
   type RowSelectionState,
 } from '@tanstack/react-table';
 import type { Target, Worker } from '../types';
-import { stripYaml, timeAgo, formatCronHuman } from '../utils';
+import { stripYaml, timeAgo, formatCronHuman, usePersistedState } from '../utils';
 import { Button } from './ui/button';
 import { SortHeader, getAriaSort } from './ui/sort-header';
 import {
@@ -51,7 +51,8 @@ export function SchedulesTab({ targets, workers, onSchedule, onRefresh, onToast 
     [targets],
   );
 
-  const [sorting, setSorting] = useState<SortingState>([]);
+  // QS.27: persist sort across reloads via localStorage.
+  const [sorting, setSorting] = usePersistedState<SortingState>('schedules-sort', []);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [filter, setFilter] = useState('');
 

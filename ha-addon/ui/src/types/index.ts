@@ -8,6 +8,23 @@ export interface ServerInfo {
   min_image_version?: string;
 }
 
+/**
+ * Where a device's reachable address came from (QS.27). Produced by
+ * `scanner.get_device_address` + `device_poller.discover`. Surfaced
+ * in the Devices tab as a small gray suffix next to the IP.
+ *
+ * Keep in sync with `ha-addon/server/scanner.py::get_device_address`
+ * and `ha-addon/server/device_poller.py`.
+ */
+export type AddressSource =
+  | 'mdns'
+  | 'mdns_default'
+  | 'wifi_use_address'
+  | 'ethernet_use_address'
+  | 'openthread_use_address'
+  | 'wifi_static_ip'
+  | 'ethernet_static_ip';
+
 export interface EsphomeVersions {
   selected: string | null;
   detected: string | null;
@@ -24,7 +41,7 @@ export interface Target {
   project_version?: string;
   ip_address?: string;
   /** How the IP was resolved — see Device.address_source for the value list. */
-  address_source?: string | null;
+  address_source?: AddressSource | null;
   running_version?: string;
   online?: boolean | null;
   needs_update?: boolean;
@@ -121,7 +138,7 @@ export interface Device {
    * Surfaced under the IP in the Devices tab so users can see at a glance
    * how each device's address was determined.
    */
-  address_source?: string | null;
+  address_source?: AddressSource | null;
   /**
    * True when Home Assistant confirms this device exists (MAC in the HA
    * ESPHome-device MAC set, or a matching entity in the HA registry).

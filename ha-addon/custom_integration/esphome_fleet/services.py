@@ -37,11 +37,25 @@ _TARGETS_SCHEMA = vol.Any(
     vol.In(["all", "outdated"]),
 )
 
+# #53: HA injects the target-resolved ``device_id`` / ``entity_id`` /
+# ``area_id`` keys (even as ``None`` when the user didn't use a target).
+# voluptuous rejects them without explicit declarations, producing the
+# user-visible "extra keys not allowed" error. Declare them as optional
+# so the schema accepts both device-targeted and explicit-list calls.
+_TARGET_KEYS = {
+    vol.Optional("device_id"): vol.Any(None, cv.string, [cv.string]),
+    vol.Optional("entity_id"): vol.Any(None, cv.string, [cv.string]),
+    vol.Optional("area_id"): vol.Any(None, cv.string, [cv.string]),
+    vol.Optional("floor_id"): vol.Any(None, cv.string, [cv.string]),
+    vol.Optional("label_id"): vol.Any(None, cv.string, [cv.string]),
+}
+
 COMPILE_SCHEMA = vol.Schema(
     {
         vol.Optional("targets"): _TARGETS_SCHEMA,
         vol.Optional("esphome_version"): cv.string,
         vol.Optional("worker_id"): cv.string,
+        **_TARGET_KEYS,
     }
 )
 
@@ -54,6 +68,7 @@ CANCEL_SCHEMA = vol.Schema(
 VALIDATE_SCHEMA = vol.Schema(
     {
         vol.Optional("target"): cv.string,
+        **_TARGET_KEYS,
     }
 )
 

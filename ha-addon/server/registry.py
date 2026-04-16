@@ -74,29 +74,54 @@ class WorkerRegistry:
     ) -> str:
         """Register a worker. Returns client_id.
 
-        If *existing_client_id* is provided and that worker is still in the
-        registry, update it in place (preserves the entry across auto-updates).
-        Otherwise create a new entry.
+        If *existing_client_id* is provided, reuse it — even if the server
+        doesn't remember the worker (e.g. add-on restart wiped in-memory
+        state). This preserves device-registry identity across server
+        restarts so HA doesn't end up with duplicate worker devices (#49).
         """
-        if existing_client_id and existing_client_id in self._workers:
-            worker = self._workers[existing_client_id]
-            worker.hostname = hostname
-            worker.platform = platform
-            worker.client_version = client_version
-            worker.image_version = image_version
-            worker.max_parallel_jobs = max_parallel_jobs
-            # Clear the request once the worker has applied the new value
-            if worker.requested_max_parallel_jobs == max_parallel_jobs:
-                worker.requested_max_parallel_jobs = None
-            worker.last_seen = _utcnow()
-            if system_info is not None:
-                worker.system_info = system_info
-            logger.info(
-                "Re-registered worker %s (%s / %s / v%s / image=%s / %d slots)",
-                existing_client_id, hostname, platform, client_version or "?",
-                image_version or "?", max_parallel_jobs,
-            )
-            return existing_client_id
+        if existing_client_id:
+            client_id = existing_client_id
+            worker = self._workers.get(client_id)
+            if worker is not None:
+                worker.hostname = hostname
+                worker.platform = platform
+                worker.client_version = client_version
+                worker.image_version = image_version
+                worker.max_parallel_jobs = max_parallel_jobs
+                if worker.requested_max_parallel_jobs == max_parallel_jobs:
+                    worker.requested_max_parallel_jobs = None
+                worker.last_seen = _utcnow()
+                if system_info is not None:
+                    worker.system_info = system_info
+                logger.info(
+                    "Re-registered worker %s (%s / %s / v%s / image=%s / %d slots)",
+                    client_id, hostname, platform, client_version or "?",
+                    image_version or "?", max_parallel_jobs,
+                )
+            else:
+                # #49: server restarted but the client persisted its ID —
+                # re-create the Worker with the SAME id rather than minting
+                # a fresh UUID. Without this, every add-on restart created
+                # a parallel device in HA's registry and the old one would
+                # only be removed by the 30-s stale-cleanup pass (if ever).
+                worker = Worker(
+                    client_id=client_id,
+                    hostname=hostname,
+                    platform=platform,
+                    client_version=client_version,
+                    image_version=image_version,
+                    max_parallel_jobs=max_parallel_jobs,
+                    system_info=system_info,
+                )
+                self._workers[client_id] = worker
+                logger.info(
+                    "Re-attached worker %s (%s / %s / v%s / image=%s / %d slots) "
+                    "— server didn't know this client, reusing persisted ID",
+                    client_id, hostname, platform, client_version or "?",
+                    image_version or "?", max_parallel_jobs,
+                )
+            _broadcast_workers_changed()
+            return client_id
 
         client_id = str(uuid.uuid4())
         worker = Worker(

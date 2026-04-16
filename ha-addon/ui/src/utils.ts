@@ -13,6 +13,7 @@
 
 export { timeAgo, stripYaml, fmtDuration, haDeepLink } from './utils/format';
 export { formatCronHuman } from './utils/cron';
+export { usePersistedState } from './utils/persistState';
 export {
   isJobSuccessful,
   isJobInProgress,

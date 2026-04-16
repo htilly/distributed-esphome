@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { Calendar, Clock, ExternalLink, Pin } from 'lucide-react';
 import { createColumnHelper } from '@tanstack/react-table';
-import type { Job, Target } from '../../types';
+import type { AddressSource, Job, Target } from '../../types';
 import { stripYaml, timeAgo, haDeepLink, formatCronHuman } from '../../utils';
 import { StatusDot } from '../StatusDot';
 import { SortHeader } from '../ui/sort-header';
@@ -67,13 +67,13 @@ function formatNetworkType(t: 'wifi' | 'ethernet' | 'thread' | null | undefined)
   }
 }
 
-function formatAddressSource(source: string | null | undefined): string | null {
+function formatAddressSource(source: AddressSource | null | undefined): string | null {
   switch (source) {
-    case 'static': return 'static';
-    case 'static_ip': return 'static_ip';
-    case 'override_yaml': return 'override (yaml)';
-    case 'override_static': return 'override (static)';
-    case 'override_use_address': return 'override (use_address)';
+    case 'mdns': return 'via mDNS';
+    case 'wifi_use_address': return 'wifi.use_address';
+    case 'ethernet_use_address': return 'ethernet.use_address';
+    case 'openthread_use_address': return 'openthread.use_address';
+    case 'wifi_static_ip': return 'wifi static_ip';
     case 'ethernet_static_ip': return 'ethernet static_ip';
     case 'mdns_default': return null;
     default: return null;

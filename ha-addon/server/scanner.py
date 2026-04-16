@@ -20,6 +20,7 @@ _selected_esphome_version: Optional[str] = None
 def set_esphome_version(version: str) -> None:
     """Set the active ESPHome version used for new compile jobs."""
     global _selected_esphome_version
+    previous = _selected_esphome_version
     _selected_esphome_version = version
     # SP.3 cleanup: the three callers (on_startup, pypi_version_refresher,
     # ui_api.set_esphome_version_handler) each log their own INFO message
@@ -27,6 +28,15 @@ def set_esphome_version(version: str) -> None:
     # "…changed to X via UI"). This helper firing its own INFO alongside
     # duplicated the message at startup and added log noise.
     logger.debug("ESPHome version set to %s", version)
+    # #55: broadcast so HA integrations update the
+    # `SelectedEsphomeVersionSensor` immediately instead of waiting on
+    # the 30-s coordinator poll. Only fire on actual transitions.
+    if previous != version:
+        try:
+            from event_bus import EVENT_TARGETS_CHANGED, broadcast  # noqa: PLC0415
+            broadcast(EVENT_TARGETS_CHANGED)
+        except Exception:
+            logger.debug("event_bus broadcast failed", exc_info=True)
 
 
 def get_esphome_version() -> str:
@@ -245,6 +255,25 @@ def duplicate_device(config_dir: str, source: str, new_name: str) -> str:
         pass
     else:
         data["esphome"] = {"name": new_name}
+
+    # #54: strip network-address pins inherited from the source so the
+    # duplicate doesn't get reported "online" just because its YAML
+    # points at the source's IP. The device poller would happily connect
+    # to the source's address, receive a successful response (from the
+    # OLD device still sitting at that IP), and mark the duplicate
+    # online even though nothing at the new identity actually responds.
+    # The user is expected to re-provision WiFi creds / IP for the new
+    # device — leaving these fields off the YAML is the natural default.
+    for block_name in ("wifi", "ethernet", "openthread"):
+        block = data.get(block_name)
+        if isinstance(block, dict):
+            block.pop("use_address", None)
+            manual_ip = block.get("manual_ip")
+            if isinstance(manual_ip, dict):
+                manual_ip.pop("static_ip", None)
+                # Drop the empty container so we don't litter the YAML.
+                if not manual_ip:
+                    block.pop("manual_ip", None)
 
     return yaml.dump(data, Dumper=Dumper, sort_keys=False, default_flow_style=False)
 

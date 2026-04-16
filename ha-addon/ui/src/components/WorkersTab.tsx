@@ -16,7 +16,7 @@ import {
   DropdownMenuGroup,
   DropdownMenuItem,
 } from './ui/dropdown-menu';
-import { stripYaml, timeAgo } from '../utils';
+import { stripYaml, timeAgo, usePersistedState } from '../utils';
 import { StatusDot } from './StatusDot';
 
 interface Props {
@@ -221,7 +221,11 @@ const columnHelper = createColumnHelper<Worker>();
 
 export function WorkersTab({ workers, queue, serverClientVersion, minImageVersion, onRemove, onSetParallelJobs, onCleanCache, onCleanAllCaches, onConnectWorker }: Props) {
   const [filter, setFilter] = useState('');
-  const [sorting, setSorting] = useState<SortingState>([{ id: 'hostname', desc: false }]);
+  // QS.27: persist sort across reloads via localStorage.
+  const [sorting, setSorting] = usePersistedState<SortingState>(
+    'workers-sort',
+    [{ id: 'hostname', desc: false }],
+  );
 
 
   // Filter before handing to TanStack — keeps filter state local, same as DevicesTab pattern
