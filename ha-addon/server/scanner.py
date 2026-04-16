@@ -472,8 +472,15 @@ def _resolve_esphome_config(config_dir: str, target: str) -> Optional[dict]:
 
         _config_cache[target] = (mtime, config)
         return config
-    except Exception:
-        logger.debug("Could not resolve config for %s", target, exc_info=True)
+    except Exception as exc:
+        # DL.1: promote to WARNING so operators can see which target fails
+        # to resolve (previously only visible at DEBUG; issue #60). Keep the
+        # full traceback at DEBUG so we don't spam the log with stack dumps.
+        logger.warning(
+            "Could not resolve config for %s: %s (%s) — stack trace at DEBUG",
+            target, type(exc).__name__, exc,
+        )
+        logger.debug("Full traceback for %s resolve failure:", target, exc_info=True)
         return None
 
 
@@ -844,6 +851,15 @@ def build_name_to_target_map(
         addr, src = get_device_address(config, key_name)
         address_overrides[key_name] = addr
         address_sources[key_name] = src
+        # DL.2: log the resolved address waterfall so operators can see
+        # at a glance which field the scanner used — narrows down
+        # live-logs "Device not found" reports (issue #60) to one of
+        # three buckets: name normalization, address resolution, or
+        # actual missing device. Fires once per target per scan.
+        logger.info(
+            "Target %s → device %r at %s (source=%s)",
+            target, key_name, addr, src,
+        )
     return name_map, encryption_keys, address_overrides, address_sources
 
 

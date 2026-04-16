@@ -205,6 +205,31 @@ for reqs in ha-addon/server/requirements.txt ha-addon/client/requirements.txt; d
 done
 
 # -----------------------------------------------------------------------------
+# (SC.1) Every `uses: <org>/<repo>@…` in .github/workflows/*.yml must reference
+# a 40-char commit SHA (not a moving tag like @v6). Tag refs are an attack
+# vector — whoever controls the tag controls what our CI runs. SHA pins
+# freeze the exact commit Dependabot already understands how to bump.
+# Closes F-19. Any new workflow action needs to be resolved via:
+#     gh api repos/<org>/<repo>/git/ref/tags/<tag> --jq .object.sha
+# and the result committed with a trailing "# <tag>" comment.
+# -----------------------------------------------------------------------------
+rule_count=$((rule_count + 1))
+for wf in .github/workflows/*.yml; do
+    [[ -f "$wf" ]] || continue
+    # Extract every non-local "uses:" reference. Skip ./ (local composite
+    # actions) since they live in the same repo and don't have a remote SHA.
+    while IFS= read -r line; do
+        # "uses: org/repo@REF [# comment]" — pull the REF token.
+        ref="$(echo "$line" | awk -F'@' '{print $2}' | awk '{print $1}')"
+        [[ -z "$ref" ]] && continue
+        # Require 40-char lowercase hex (full SHA).
+        if [[ ! "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+            fail "SC.1" "$wf: uses-line does not SHA-pin: $line"
+        fi
+    done < <(grep -E "^\s*(- )?uses:[[:space:]]+[^./]" "$wf")
+done
+
+# -----------------------------------------------------------------------------
 # Summary
 # -----------------------------------------------------------------------------
 

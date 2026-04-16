@@ -897,3 +897,28 @@ def test_duplicate_device_rewrites_substitutions_name_with_implicit_esphome_name
     assert "name" not in parsed["esphome"]
     # Other substitutions preserved
     assert parsed["substitutions"]["display_name"] == "Office Speakers"
+
+
+def test_resolve_failure_logs_warning(tmp_path, caplog):
+    """DL.5: malformed YAML resolve failure promotes to WARNING with
+    the target filename + exception type (issue #60 diagnostic).
+    """
+    import logging
+    from scanner import _resolve_esphome_config
+
+    bad = tmp_path / "broken.yaml"
+    # !secret reference a secret that doesn't exist — ESPHome's resolve
+    # pipeline raises. The test only cares that our catch path logs WARNING.
+    bad.write_text(
+        "esphome:\n"
+        "  name: broken\n"
+        "wifi:\n"
+        "  password: !secret nonexistent_secret\n"
+    )
+    with caplog.at_level(logging.WARNING, logger="scanner"):
+        result = _resolve_esphome_config(str(tmp_path), "broken.yaml")
+    assert result is None
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("broken.yaml" in r.getMessage() for r in warnings), (
+        f"expected WARNING mentioning broken.yaml, got: {[r.getMessage() for r in warnings]}"
+    )

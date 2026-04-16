@@ -561,12 +561,22 @@ class DevicePoller:
                     compile_target=compile_target,
                     address_source=source,
                 )
-                logger.debug("Created device %s from address %s (%s, no mDNS yet)",
-                             device_name, addr, source)
+                # DL.3: promoted from DEBUG so operators can see the
+                # poller picking up newly-discovered targets without
+                # turning on debug logging.
+                logger.info(
+                    "Proactively created device %s at %s (source=%s, mDNS pending)",
+                    device_name, addr, source,
+                )
             else:
                 dev = self._devices[existing_key]
                 # Update IP from address override if not already set from mDNS
                 if not dev.ip_address:
+                    # DL.3: filled-in-IP path — previously silent.
+                    logger.info(
+                        "Filled in address for existing device %s: %s (source=%s)",
+                        existing_key, addr, source,
+                    )
                     dev.ip_address = addr
                 # ALWAYS fill in the address source if it's missing — this
                 # covers cached devices loaded from /data/device_cache.json

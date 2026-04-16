@@ -481,6 +481,27 @@ async def ws_device_log(request: web.Request) -> web.WebSocketResponse:
             break
 
     if not dev or not dev.ip_address:
+        # DL.4: the user-facing "Device not found" error is cryptic when
+        # the real issue is a scanner/name-mapping regression. Dump the
+        # poller's current view so operators can see whether the target
+        # is absent entirely (→ scanner failure, look for a DL.1 WARNING),
+        # present but without an IP (→ resolution issue, look at DL.2),
+        # or mapped under a slightly different device_name (→ name-
+        # normalization). Kept at INFO so it's visible without debug.
+        known = [
+            {
+                "name": d.name,
+                "compile_target": d.compile_target,
+                "ip_address": d.ip_address,
+                "online": d.online,
+            }
+            for d in device_poller.get_devices()
+        ]
+        logger.info(
+            "ws_device_log: no device for target %r. Poller knows %d "
+            "device(s): %s",
+            filename, len(known), known,
+        )
         await ws.send_str(f"Device not found or no IP address for {filename}\n")
         await ws.close()
         return ws
