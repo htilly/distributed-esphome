@@ -249,6 +249,40 @@ for wf in .github/workflows/*.yml; do
 done
 
 # -----------------------------------------------------------------------------
+# (#57) Workflow YAML sanity check. The SC.1 mass-rewrite in eec0511 jammed
+# two `uses:` directives onto one line because the replacement regex included
+# `\s*` in a trailing group and swallowed newlines. SC.1 still saw a valid
+# SHA on each broken line so the rule didn't catch it — all four workflows
+# failed at GitHub's workflow-load step instead.
+#
+# Primary guard: no line can contain two `uses:` tokens — that's always a
+# bug, and it's what actually regressed. Secondary (optional) guard: if
+# PyYAML is available in the current Python, also run yaml.safe_load on
+# each workflow as a broader sanity check. CI's Python has pyyaml; the
+# local dev shell's Homebrew python often doesn't — don't fail the whole
+# invariant run just because yaml isn't importable locally.
+# -----------------------------------------------------------------------------
+rule_count=$((rule_count + 1))
+yaml_available=0
+if python3 -c "import yaml" 2>/dev/null; then
+    yaml_available=1
+fi
+for wf in .github/workflows/*.yml; do
+    [[ -f "$wf" ]] || continue
+    # Primary: two `uses:` on one line = jammed-line regression.
+    if grep -En '(^|[^a-zA-Z_])uses:.*[^a-zA-Z_]uses:' "$wf" >/dev/null 2>&1; then
+        offender=$(grep -En '(^|[^a-zA-Z_])uses:.*[^a-zA-Z_]uses:' "$wf" | head -1)
+        fail "#57" "$wf: line has two \`uses:\` directives — jammed-line regression (see SC.1 commit eec0511). Offender: $offender"
+    fi
+    # Secondary: yaml.safe_load parse check, only when pyyaml is present.
+    if [[ $yaml_available -eq 1 ]]; then
+        if ! python3 -c "import sys, yaml; yaml.safe_load(open(sys.argv[1]))" "$wf" 2>/dev/null; then
+            fail "#57" "$wf: does not parse as valid YAML. Run: python3 -c 'import yaml; yaml.safe_load(open(\"$wf\"))' for the error."
+        fi
+    fi
+done
+
+# -----------------------------------------------------------------------------
 # Summary
 # -----------------------------------------------------------------------------
 
