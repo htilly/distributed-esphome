@@ -214,3 +214,74 @@ def test_resolve_esphome_config_returns_none_when_venv_not_ready_and_no_bundle(
     with patch.object(_builtins, "__import__", side_effect=_no_esphome):
         result = scanner._resolve_esphome_config(str(tmp_path), "foo.yaml")
     assert result is None
+
+
+# --- SE.8 — server-info install status + reinstall endpoint ---
+
+
+async def test_server_info_reports_install_status_ready(tmp_path: Path) -> None:
+    """SE.8 — /ui/api/server-info carries status='ready' when venv live."""
+    from tests.test_ui_api import _make_ui_app  # test harness
+
+    scanner._esphome_ready.set()
+    scanner._server_esphome_bin = "/fake/bin/esphome"
+    ta = await _make_ui_app(tmp_path)
+    try:
+        resp = await ta.get("/ui/api/server-info")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["esphome_install_status"] == "ready"
+        assert "esphome_server_version" in data
+    finally:
+        await ta.close()
+
+
+async def test_server_info_reports_install_status_installing(tmp_path: Path) -> None:
+    """SE.8 — status='installing' when ready event is clear and no failure."""
+    from tests.test_ui_api import _make_ui_app
+
+    # autouse fixture already cleared _esphome_ready.
+    ta = await _make_ui_app(tmp_path)
+    try:
+        resp = await ta.get("/ui/api/server-info")
+        data = await resp.json()
+        assert data["esphome_install_status"] == "installing"
+    finally:
+        await ta.close()
+
+
+async def test_server_info_reports_install_status_failed(tmp_path: Path) -> None:
+    """SE.8 — status='failed' when the install task flagged a failure."""
+    from tests.test_ui_api import _make_ui_app
+
+    scanner._esphome_install_failed = True
+    ta = await _make_ui_app(tmp_path)
+    try:
+        resp = await ta.get("/ui/api/server-info")
+        data = await resp.json()
+        assert data["esphome_install_status"] == "failed"
+    finally:
+        await ta.close()
+
+
+async def test_reinstall_endpoint_clears_failure_and_schedules_install(tmp_path: Path) -> None:
+    """SE.8 — POST /ui/api/esphome/reinstall clears failure flag + returns ok."""
+    from tests.test_ui_api import _make_ui_app
+    from unittest.mock import AsyncMock
+
+    scanner._esphome_install_failed = True
+    scanner._selected_esphome_version = "2026.4.0"
+    ta = await _make_ui_app(tmp_path)
+    try:
+        # Patch ensure_esphome_installed so the background task doesn't
+        # actually try to hit the network.
+        with patch.object(scanner, "ensure_esphome_installed", AsyncMock()):
+            resp = await ta.post("/ui/api/esphome/reinstall", json={})
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["ok"] is True
+        assert data["version"] == "2026.4.0"
+        assert scanner._esphome_install_failed is False
+        assert not scanner._esphome_ready.is_set()
+    finally:
+        await ta.close()

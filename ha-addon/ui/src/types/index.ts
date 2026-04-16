@@ -6,6 +6,10 @@ export interface ServerInfo {
   addon_version?: string;
   server_client_version?: string;
   min_image_version?: string;
+  /** SE.8 — server-side ESPHome lazy-install lifecycle. */
+  esphome_install_status?: 'installing' | 'ready' | 'failed';
+  /** Version the server is trying to install / has installed. */
+  esphome_server_version?: string;
 }
 
 /**

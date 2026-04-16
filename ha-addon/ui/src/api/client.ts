@@ -108,6 +108,14 @@ export async function refreshEsphomeVersions(): Promise<EsphomeVersions> {
   );
 }
 
+/** SE.8: retry the server-side ESPHome install — wired to the banner's
+ * Retry button. Returns immediately; the UI polls /ui/api/server-info
+ * for the transition from installing/failed → ready. */
+export async function reinstallEsphome(): Promise<void> {
+  await expectOk(await apiFetch('./ui/api/esphome/reinstall', { method: 'POST' }),
+    'retrying ESPHome install');
+}
+
 export async function setEsphomeVersion(version: string): Promise<void> {
   await expectOk(await apiFetch('./ui/api/esphome-version', {
     method: 'POST',

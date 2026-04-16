@@ -31,6 +31,7 @@ import {
   unpinTargetVersion,
 } from './api/client';
 import { ConnectWorkerModal } from './components/ConnectWorkerModal';
+import { EsphomeInstallBanner } from './components/EsphomeInstallBanner';
 import { DeviceLogModal } from './components/DeviceLogModal';
 import { DevicesTab, RenameModal } from './components/DevicesTab';
 import { NewDeviceModal } from './components/NewDeviceModal';
@@ -141,10 +142,17 @@ export default function App() {
     console.error('SWR', key, err);
   }, []);
 
-  const { data: serverInfo = { token: '', port: 8765 } } = useSWR(
+  const { data: serverInfo = { token: '', port: 8765 }, mutate: mutateServerInfo } = useSWR(
     'serverInfo',
     getServerInfo,
-    { refreshInterval: 30_000, onError: logSwrError('serverInfo') },
+    {
+      // SE.8: tighten the poll during an in-flight ESPHome install so the
+      // banner + /ui/api/esphome-version dropdown refresh promptly once
+      // the server transitions to `ready`. 30 s otherwise.
+      refreshInterval: (data) =>
+        data?.esphome_install_status === 'installing' ? 3_000 : 30_000,
+      onError: logSwrError('serverInfo'),
+    },
   );
   const { data: esphomeVersions = { selected: null, detected: null, available: [] }, mutate: mutateEsphomeVersions } = useSWR(
     'versions',
@@ -607,6 +615,8 @@ export default function App() {
         <span className="spacer" />
         <span className="status-dot" title="Server online" />
       </header>
+
+      <EsphomeInstallBanner serverInfo={serverInfo} onRefresh={() => void mutateServerInfo()} />
 
       <nav className="sticky top-[52px] z-40 flex overflow-x-auto border-b border-[var(--border)] bg-[var(--surface)] px-5">
         {(['devices', 'queue', 'workers', 'schedules'] as TabName[]).map(tab => {

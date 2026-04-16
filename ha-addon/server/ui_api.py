@@ -190,6 +190,15 @@ async def get_server_info(request: web.Request) -> web.Response:
     server_ip = ip_addrs[0] if ip_addrs else (addrs[0] if addrs else None)
 
     from constants import MIN_IMAGE_VERSION  # noqa: PLC0415
+    # SE.8: surface the server's ESPHome install status so the UI can
+    # render a top-of-app banner during the first-boot install window.
+    import scanner as _scanner  # noqa: PLC0415
+    if _scanner._esphome_ready.is_set():
+        esphome_install_status = "ready"
+    elif _scanner._esphome_install_failed:
+        esphome_install_status = "failed"
+    else:
+        esphome_install_status = "installing"
     return web.json_response({
         "token": cfg.token,
         "port": cfg.port,
@@ -198,6 +207,9 @@ async def get_server_info(request: web.Request) -> web.Response:
         "server_client_version": addon_version,
         "addon_version": addon_version,
         "min_image_version": MIN_IMAGE_VERSION,
+        # SE.8: ESPHome install lifecycle fields for the UI banner.
+        "esphome_install_status": esphome_install_status,
+        "esphome_server_version": _scanner.get_esphome_version(),
     })
 
 
@@ -823,6 +835,38 @@ async def set_esphome_version_handler(request: web.Request) -> web.Response:
     set_esphome_version(version)
     logger.info("ESPHome version changed to %s via UI", version)
     return web.json_response({"ok": True, "version": version})
+
+
+@routes.post("/ui/api/esphome/reinstall")
+async def reinstall_esphome(request: web.Request) -> web.Response:
+    """SE.8: retry the server-side ESPHome lazy install.
+
+    Wired to the "Retry" button on the top-of-app install banner. The
+    handler schedules `ensure_esphome_installed` for the currently
+    selected version in an executor and returns immediately — the
+    install runs in the background; the UI polls /ui/api/server-info
+    for the transition from `failed` or `installing` → `ready`.
+    """
+    import asyncio as _asyncio  # noqa: PLC0415
+    import scanner as _scanner  # noqa: PLC0415
+
+    target_version = _scanner.get_esphome_version()
+    if target_version in ("unknown", "installing"):
+        return web.json_response(
+            {"error": "No target ESPHome version known yet"}, status=409,
+        )
+    # Clear the failure flag so get_esphome_version reports "installing"
+    # while this new attempt is in flight.
+    _scanner._esphome_install_failed = False
+    _scanner._esphome_ready.clear()
+
+    # run_in_executor returns a Future that's already scheduled; we don't
+    # need create_task around it. Fire-and-forget is fine since the UI
+    # polls server-info for the status transition.
+    loop = _asyncio.get_running_loop()
+    loop.run_in_executor(None, _scanner.ensure_esphome_installed, target_version)
+    logger.info("Retrying ESPHome %s install via /ui/api/esphome/reinstall", target_version)
+    return web.json_response({"ok": True, "version": target_version})
 
 
 @routes.post("/ui/api/validate")

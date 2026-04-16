@@ -954,11 +954,10 @@ async def pypi_version_refresher(app: web.Application) -> None:
                     # SE.4: lazy-install the newly-detected version in the
                     # background so the server's venv tracks whatever the HA
                     # ESPHome add-on is on. VersionManager is a fast cache
-                    # hit if the version is already installed.
+                    # hit if the version is already installed. run_in_executor
+                    # returns an already-scheduled Future — fire-and-forget.
                     loop = asyncio.get_running_loop()
-                    loop.create_task(
-                        loop.run_in_executor(None, ensure_esphome_installed, new_detected)
-                    )
+                    loop.run_in_executor(None, ensure_esphome_installed, new_detected)
 
                 # Refresh PyPI list periodically
                 pypi_countdown -= check_interval
