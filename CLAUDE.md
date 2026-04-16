@@ -208,3 +208,5 @@ Everything lives in `dev-plans/`:
 ## Deployment
 
 `hass-4` is the local Home Assistant instance. `./push-to-hass-4.sh` deploys the add-on, waits for the new version to report ready, and runs the full `e2e-hass-4` Playwright suite (real compile + OTA to `cyd-office-info`). Run after every turn.
+
+**HA Core restart when the custom integration changes.** Changes under `ha-addon/custom_integration/` require a full `ha core restart` to take effect — the integration_installer copies new files to `/config/custom_components/` on add-on boot, but HA Core loads Python modules once at startup and doesn't hot-reload them. The add-on restart during deploy does NOT restart HA Core (Supervisor only restarts the add-on container). `push-to-hass-4.sh` hashes the integration directory and compares to a remote stamp file (`/tmp/esphome_fleet_integration.hash`); on a mismatch it runs `ha core restart` before the smoke suite. Skipped when the integration is byte-identical to the last push so non-integration turns don't pay the 30-60s restart cost.

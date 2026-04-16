@@ -379,3 +379,6 @@ Let users compile a target **without** the OTA flash step, then download the res
 
 - [x] **#47** *(1.4.1-dev.52)* — Worker build-slot control via HA NumberEntity.
   New `NumberEntity` platform. One `WorkerSlotCountNumber` per worker (0–32, box mode). Setting the value POSTs to `/ui/api/workers/{client_id}/parallel-jobs`; the worker picks up the new count on its next heartbeat. Setting to 0 pauses the worker. Usable from automations (`number.set_value`). 
+
+- [x] **#48** *(1.4.1-dev.53)* — Cyd-office-info validation failure: compare pin against actual binary, not tracked version.
+  The YAML uses `sram1_as_iram: true` (added in ESPHome 2026.4.0). The Fleet add-on's container bundles ESPHome 2026.3.3 but `pypi_version_refresher` updates the server's "selected" version from the HA Supervisor's ESPHome add-on (2026.4.0). The validate endpoint's `if pin and pin != get_esphome_version()` short-circuited when the pin matched the tracked "selected" version, silently using the 2026.3.3 binary instead of installing 2026.4.0 via version_manager. Fixed by comparing the pin against the ACTUAL installed binary version (`_get_installed_esphome_version()`). Added a `pin_version: 2026.4.0` comment in cyd-office-info.yaml (via the existing `/ui/api/targets/.../pin` endpoint) so validation installs and uses 2026.4.0.

@@ -741,11 +741,19 @@ async def validate_config(request: web.Request) -> web.Response:
     # pinned, install that version via the version manager and validate with
     # its binary — not the server's default. This ensures pinned devices
     # validate against the version they'll actually compile with.
+    # #48: compare the pin against the ACTUAL installed binary, not the
+    # tracked "selected" version (pypi_version_refresher updates the
+    # selected version from the HA Supervisor's ESPHome add-on, which can
+    # differ from the version bundled in our own container). Otherwise a
+    # pin matching the "selected" version silently skips the version-
+    # manager install and uses the wrong binary.
+    from scanner import _get_installed_esphome_version  # noqa: PLC0415
     meta = read_device_meta(cfg.config_dir, target)
     pin = meta.get("pin_version")
     esphome_bin = "esphome"  # default: server's installed version
+    installed_binary_version = _get_installed_esphome_version()
 
-    if pin and pin != get_esphome_version():
+    if pin and pin != installed_binary_version:
         try:
             from pathlib import Path as _Path  # noqa: PLC0415
             import sys as _sys  # noqa: PLC0415
