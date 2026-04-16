@@ -8,7 +8,9 @@ If Home Assistant runs on a Raspberry Pi or other low-power hardware, ESPHome co
 
 Start the add-on, then open the web UI via the **ESPHome Fleet** entry in the HA sidebar.
 
-The add-on includes a built-in local worker (starts paused with 0 slots). Increase the slot count in the **Workers** tab to start compiling immediately. To offload builds to faster machines, click **+ Connect Worker** for a ready-to-run `docker run` command.
+> **First boot takes 1–3 minutes.** The add-on lazy-installs ESPHome into `/data/esphome-versions/` on first launch rather than shipping a pre-baked copy, so your install always picks up the version the HA ESPHome add-on reports. While the install runs, the UI shows an "Installing ESPHome…" banner and features that depend on the ESPHome binary (config validation, autocomplete, compiles) stay disabled. Subsequent restarts are instant because the venv is cached.
+
+The add-on includes a built-in local worker (starts paused with 0 slots). Increase the slot count in the **Workers** tab to start compiling immediately. To offload builds to faster machines, click **+ Connect Worker** for a ready-to-run `docker run` command (or a `docker-compose.yml` snippet).
 
 Configuration options (token, timeouts, polling intervals) are available in the add-on's **Configuration** tab in Home Assistant.
 
@@ -52,6 +54,8 @@ The add-on's web UI lives behind Home Assistant Ingress and is authenticated by 
 Requests without a valid token receive **401 Unauthorized** plus `WWW-Authenticate: Bearer realm="ESPHome Fleet"`. Ingress-tunneled requests are unaffected — HA already authenticated the user before forwarding.
 
 Every mutation (compile, cancel, pin, schedule, rename, delete, save) logs the authenticated user's HA username, so operators can trace who enqueued what.
+
+> **Trade-off note.** `require_ha_auth` defaults to `false` in 1.5.0 because the native **ESPHome Fleet** HA integration doesn't yet send a Bearer token on its coordinator GETs; flipping the option to `true` today would break the integration's polling loop (the browser UI continues to work via Ingress). If you're running tooling outside HA and don't use the integration, turning this on is safe. Full integration-side bearer wiring is queued for a follow-up release, and this note will change when that lands.
 
 ## Verifying Image Signatures
 

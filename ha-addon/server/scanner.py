@@ -208,8 +208,12 @@ def _get_installed_esphome_version() -> str:
         try:
             # ESPHome prints "Version: X.Y.Z" on stdout for this subcommand.
             # Short timeout; the venv binary is local so it's near-instant.
+            # CR.9 / PY-2: log the command line before invocation so "what
+            # subprocess actually ran?" is visible in the add-on log.
+            cmd = [_server_esphome_bin, "version"]
+            logger.debug("Running: %s", cmd)
             result = subprocess.run(
-                [_server_esphome_bin, "version"],
+                cmd,
                 capture_output=True, text=True, timeout=10, check=True,
             )
             for line in result.stdout.splitlines():

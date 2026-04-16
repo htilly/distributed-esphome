@@ -13,13 +13,16 @@ Structure adapted from Ardumine's PR #57 with the post-rebrand domain
 
 from __future__ import annotations
 
+import asyncio
 from urllib.parse import urlparse
 
+import aiohttp
 import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.components import zeroconf
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 
 from .const import CONF_BASE_URL, DEFAULT_TITLE, DOMAIN, ZEROCONF_TYPE
@@ -29,6 +32,22 @@ def _url_schema(default_url: str | None = None) -> vol.Schema:
     if default_url is None:
         return vol.Schema({vol.Required(CONF_BASE_URL): str})
     return vol.Schema({vol.Required(CONF_BASE_URL, default=default_url): str})
+
+
+async def _probe_server(hass, base_url: str) -> bool:
+    """CR.16: 3 s GET /ui/api/server-info to confirm reachability.
+
+    Returns False on any connectivity error so the caller can surface a
+    `cannot_connect` form error instead of creating an entry that
+    immediately shows red in Settings → Devices & Services.
+    """
+    session = async_get_clientsession(hass)
+    url = f"{base_url.rstrip('/')}/ui/api/server-info"
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+            return resp.status < 500
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        return False
 
 
 def _normalize_base_url(value: str) -> str:
@@ -72,7 +91,16 @@ class EsphomeFleetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except ValueError:
                 errors["base"] = "invalid_url"
             else:
-                return await self._async_create_entry(base_url)
+                # CR.16: probe the URL before creating the entry. If the
+                # server isn't reachable, surface the error in the form
+                # instead of creating an entry that immediately shows a
+                # red "failed to set up" banner. Supervisor-discovered
+                # flows skip this probe because Supervisor already vetted
+                # the URL via /discovery.
+                if not await _probe_server(self.hass, base_url):
+                    errors["base"] = "cannot_connect"
+                else:
+                    return await self._async_create_entry(base_url)
 
         return self.async_show_form(
             step_id="user",

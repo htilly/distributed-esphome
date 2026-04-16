@@ -13,6 +13,7 @@ trigger off "compile failed" etc.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta
 from typing import Any
@@ -54,17 +55,21 @@ class EsphomeFleetCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch the latest snapshot from the add-on.
 
-        Four independent GETs run sequentially — the UI does them in
-        parallel via SWR, but HA's DataUpdateCoordinator is happy with
-        anything under a second and the add-on runs on the same host.
+        CR.13: the six GETs are independent, so `asyncio.gather` them —
+        cuts wall time on each tick to roughly 1× RTT (instead of 6×)
+        and halves the server-side handler pressure. Add-on runs on
+        localhost, so the win is small in absolute terms, but it's a
+        trivial change with no downside.
         """
         try:
-            info = await self._get_json("/ui/api/server-info")
-            targets = await self._get_json("/ui/api/targets")
-            devices = await self._get_json("/ui/api/devices")
-            workers = await self._get_json("/ui/api/workers")
-            queue = await self._get_json("/ui/api/queue")
-            versions = await self._get_json("/ui/api/esphome-versions")
+            info, targets, devices, workers, queue, versions = await asyncio.gather(
+                self._get_json("/ui/api/server-info"),
+                self._get_json("/ui/api/targets"),
+                self._get_json("/ui/api/devices"),
+                self._get_json("/ui/api/workers"),
+                self._get_json("/ui/api/queue"),
+                self._get_json("/ui/api/esphome-versions"),
+            )
         except aiohttp.ClientError as err:
             raise UpdateFailed(f"Couldn't reach add-on at {self._base_url}: {err}") from err
 

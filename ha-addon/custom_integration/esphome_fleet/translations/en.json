@@ -18,7 +18,8 @@
       }
     },
     "error": {
-      "invalid_url": "Enter a valid http(s) URL."
+      "invalid_url": "Enter a valid http(s) URL.",
+      "cannot_connect": "Could not reach the ESPHome Fleet server at that URL. Check the URL, that the add-on is running, and that this host can reach it."
     },
     "abort": {
       "already_configured": "This server is already configured.",

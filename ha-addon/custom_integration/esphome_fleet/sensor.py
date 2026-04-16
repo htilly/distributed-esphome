@@ -108,7 +108,9 @@ class QueueDepthSensor(CoordinatorEntity[EsphomeFleetCoordinator], SensorEntity)
     _attr_icon = "mdi:tray-full"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = "jobs"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    # CR.7: this is a primary state sensor (users dashboard on it,
+    # trigger automations off it). DIAGNOSTIC hid it from the default
+    # Lovelace picker + entity-picker filters.
 
     def __init__(
         self, coordinator: EsphomeFleetCoordinator, entry_id: str, base_url: str
@@ -129,10 +131,17 @@ class QueueDepthSensor(CoordinatorEntity[EsphomeFleetCoordinator], SensorEntity)
 
 
 class _HubSensorBase(CoordinatorEntity[EsphomeFleetCoordinator], SensorEntity):
-    """Shared hub-device-scoping boilerplate."""
+    """Shared hub-device-scoping boilerplate.
+
+    CR.7: entity_category is NOT set here — subclasses opt in to
+    DIAGNOSTIC only when they represent genuinely diagnostic info
+    (version strings, build ids). State sensors (`WorkerCountSensor`,
+    `TotalSlotsSensor`, `TotalDevicesSensor`, `OnlineDevicesSensor`,
+    `OutdatedDevicesSensor`) are primary: users dashboard on them and
+    trigger automations off them.
+    """
 
     _attr_has_entity_name = True
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(
         self,
@@ -189,6 +198,7 @@ class SelectedEsphomeVersionSensor(_HubSensorBase):
 
     _attr_name = "Selected ESPHome version"
     _attr_icon = "mdi:tag"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator: EsphomeFleetCoordinator, entry_id: str, base_url: str) -> None:
         super().__init__(coordinator, entry_id, base_url, "selected_esphome_version")
@@ -204,6 +214,7 @@ class FleetVersionSensor(_HubSensorBase):
 
     _attr_name = "Fleet version"
     _attr_icon = "mdi:information-outline"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator: EsphomeFleetCoordinator, entry_id: str, base_url: str) -> None:
         super().__init__(coordinator, entry_id, base_url, "fleet_version")

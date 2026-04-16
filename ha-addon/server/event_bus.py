@@ -68,9 +68,30 @@ def unsubscribe(q: asyncio.Queue[dict[str, Any]]) -> None:
 def broadcast(event_type: str, **payload: Any) -> None:
     """Deliver an event to every subscriber, non-blocking.
 
-    Called from sync or async code — never awaits. If a subscriber's
-    queue is full, drops the OLDEST event from that queue and retries
-    once, so a slow-draining client loses the cheapest events first.
+    CR.22: **must be called from the aiohttp event loop** — `asyncio.Queue.put_nowait`
+    is loop-affine, so calling this from a thread pool (e.g. from a
+    ``loop.run_in_executor`` worker) would silently enqueue against the
+    wrong loop's queue and subscribers would never receive the event.
+    If you ever need to broadcast from a thread, wrap the call in
+    ``hass.loop.call_soon_threadsafe(broadcast, event_type, **payload)``.
+
+    If a subscriber's queue is full, drops the OLDEST event from that
+    queue and retries once, so a slow-draining client loses the cheapest
+    events first.
+
+    ## SLA against missed events
+
+    Two recovery paths for a dropped or missed event, by consumer:
+
+    - **Browser UI** — recovers within ~1 s via the SWR poll cadence
+      (the UI doesn't rely exclusively on WebSocket events; events just
+      force an earlier refetch).
+    - **HA integration** — recovers within up to 30 s via the coordinator
+      poll interval (``DEFAULT_POLL_INTERVAL_SECONDS`` in
+      ``custom_integration/esphome_fleet/const.py``).
+
+    So "I dropped an event" is never a user-visible bug, just a latency
+    penalty on the affected consumer.
     """
     if not _subscribers:
         return

@@ -1,9 +1,32 @@
 """Centralised application configuration.
 
-Loads values from ``/data/options.json`` (HA add-on) with environment-variable
-overrides and sensible defaults.  All other modules should import the singleton
-``config`` instance rather than reading env vars or ``request.app["config"]``
-directly.
+All other modules should read the singleton ``config`` instance rather
+than reaching for env vars or ``request.app["config"]`` directly.
+
+## Precedence (CR.21)
+
+Per-field precedence, highest wins:
+
+  1. **Environment variable** — `SERVER_TOKEN`, `SERVER_PORT`, etc. Wins
+     over everything else. Used for local development (non-Supervisor
+     runs) and for overriding a value on a per-container basis.
+  2. **``/data/options.json``** — the HA add-on's user-configurable
+     options persisted by Supervisor across restarts / upgrades. This
+     is the normal path for HA deployments.
+  3. **Built-in defaults** — the fallback hard-coded in this module
+     (token auto-generated and persisted to ``/data/auth_token`` if
+     nothing else supplies it; port defaults to 8765; etc.).
+
+The single legacy alias (`client_offline_threshold` → renamed to
+`worker_offline_threshold` as part of the Client→Worker terminology
+rewrite) is mapped on read with a one-time WARNING asking the user to
+rename the key. New aliases should not be added without a deprecation
+plan and a removal-version target.
+
+There is **no third config source** and no YAML/TOML config file — the
+server is meant to be configured entirely through Supervisor's options
+UI (or env vars in non-Supervisor deployments). If a new config field
+isn't going through this module, it's a bug.
 """
 
 from __future__ import annotations
@@ -32,6 +55,13 @@ def _get_or_create_token(explicit: str) -> str:
     token = secrets.token_hex(16)
     try:
         TOKEN_FILE.write_text(token)
+        # SA.2 / F-14: lock down file mode immediately after write so
+        # the token doesn't inherit the container umask. Least-privilege
+        # for secret material — owner-read-write only.
+        try:
+            TOKEN_FILE.chmod(0o600)
+        except OSError:
+            logger.debug("chmod 0o600 on %s failed; continuing", TOKEN_FILE, exc_info=True)
         logger.info("Generated new auth token and saved to %s", TOKEN_FILE)
     except Exception:
         logger.exception("Failed to save generated token to %s", TOKEN_FILE)

@@ -601,8 +601,12 @@ class JobQueue:
                     reason = "timeouts" if timed_out else "offline-worker requeues"
                     job.log = (job.log or "") + f"\nPermanently failed after {MAX_RETRIES} {reason}."
                 else:
-                    job.state = JobState.TIMED_OUT
-                    # Re-enqueue: reset to pending
+                    # CR.4: dropped the `job.state = JobState.TIMED_OUT`
+                    # write that used to sit here — the very next line
+                    # overwrote it with PENDING, and no persist/event ran
+                    # in between, so the transient TIMED_OUT value was
+                    # never observable. The retry path is semantically
+                    # "we abandoned this claim; re-enqueue as PENDING".
                     job.state = JobState.PENDING
                     job.assigned_client_id = None
                     job.assigned_at = None

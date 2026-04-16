@@ -14,7 +14,6 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -52,10 +51,12 @@ async def async_setup_entry(
 class WorkerOnlineBinarySensor(
     CoordinatorEntity[EsphomeFleetCoordinator], BinarySensorEntity
 ):
+    # CR.7: promote worker-online to a primary state sensor. Users
+    # build automations like "when all build workers are offline, alert
+    # me"; DIAGNOSTIC hid it from the default entity picker.
     _attr_has_entity_name = True
     _attr_name = "Online"
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(
         self, coordinator: EsphomeFleetCoordinator, entry_id: str, client_id: str

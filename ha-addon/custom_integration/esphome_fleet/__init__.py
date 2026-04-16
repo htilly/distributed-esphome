@@ -57,11 +57,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # HI.11: pre-register devices so they appear in HA's device registry
     # on the first poll even if their entities have no state yet. Keeps
     # HI.3/4/5 entities from creating orphan device rows later.
-    _register_devices(hass, entry, coordinator)
+    # CR.14: diff-skip the coordinator listener. `live_identifiers` rarely
+    # changes on the 30 s poll cadence (targets come + go; workers flap
+    # offline/online but that doesn't change the set). Tracking the
+    # last-seen identifier set and short-circuiting when it's unchanged
+    # keeps `async_get_or_create` + `async_entries_for_config_entry` off
+    # the hot path on idle systems.
+    last_live_ids: set[tuple[str, str]] = set()
+
+    def _on_coordinator_update() -> None:
+        nonlocal last_live_ids
+        live = _compute_live_identifiers(entry, coordinator)
+        if live == last_live_ids:
+            return
+        last_live_ids = live
+        _register_devices(hass, entry, coordinator, live_identifiers=live)
+
+    # Seed with a full registration on setup so the hub device + every
+    # current target/worker appear immediately.
+    last_live_ids = _compute_live_identifiers(entry, coordinator)
+    _register_devices(hass, entry, coordinator, live_identifiers=last_live_ids)
     entry.async_on_unload(
-        coordinator.async_add_listener(
-            lambda: _register_devices(hass, entry, coordinator)
-        )
+        coordinator.async_add_listener(_on_coordinator_update)
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -70,10 +87,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # #41: real-time event stream. Triggers coordinator refresh on every
     # server-side state change so HA entities update within milliseconds
     # instead of waiting on the 30 s polling interval.
+    # CR.12: `async_on_unload` accepts a coroutine function directly; HA
+    # awaits it as part of unload. The earlier `hass.async_create_task`
+    # wrapper decoupled unload completion from WS teardown, leaking on
+    # rapid reloads.
     from .ws_client import EventStreamClient  # noqa: PLC0415
     event_stream = EventStreamClient(hass, coordinator)
     event_stream.start()
-    entry.async_on_unload(lambda: hass.async_create_task(event_stream.stop()))
+    entry.async_on_unload(event_stream.stop)
 
     _LOGGER.info("ESPHome Fleet entry %s set up against %s", entry.entry_id, base_url)
     return True
@@ -93,15 +114,38 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
+def _compute_live_identifiers(
+    entry: ConfigEntry,
+    coordinator: EsphomeFleetCoordinator,
+) -> set[tuple[str, str]]:
+    """Return the identifier set the registry SHOULD contain right now.
+
+    Extracted from ``_register_devices`` so callers (CR.14 diff-skip)
+    can compare two snapshots cheaply without running the full register
+    + prune pass.
+    """
+    live: set[tuple[str, str]] = {(DOMAIN, f"hub:{entry.entry_id}")}
+    for t in (coordinator.data or {}).get("targets") or []:
+        if t.get("target"):
+            live.add((DOMAIN, f"target:{t['target']}"))
+    for w in (coordinator.data or {}).get("workers") or []:
+        if w.get("client_id"):
+            live.add((DOMAIN, f"worker:{w['client_id']}"))
+    return live
+
+
 def _register_devices(
     hass: HomeAssistant,
     entry: ConfigEntry,
     coordinator: EsphomeFleetCoordinator,
+    *,
+    live_identifiers: set[tuple[str, str]] | None = None,
 ) -> None:
     """Register/refresh the hub + per-target + per-worker HA devices.
 
     Idempotent — HA's device_registry.async_get_or_create deduplicates
-    by identifiers. Called on setup and on every coordinator update so
+    by identifiers. Called on setup and (via the CR.14 diff-skip gate)
+    on coordinator ticks where the identifier set actually changed, so
     newly-added targets/workers show up without an HA restart.
 
     #39: also removes stale devices for targets/workers that vanished
@@ -118,9 +162,8 @@ def _register_devices(
         **hub_device_info(entry.entry_id, coordinator.base_url),
     )
 
-    # Build the set of identifiers that SHOULD exist right now.
-    live_identifiers: set[tuple[str, str]] = set()
-    live_identifiers.add((DOMAIN, f"hub:{entry.entry_id}"))
+    if live_identifiers is None:
+        live_identifiers = {(DOMAIN, f"hub:{entry.entry_id}")}
 
     # Per-target
     for t in (coordinator.data or {}).get("targets") or []:

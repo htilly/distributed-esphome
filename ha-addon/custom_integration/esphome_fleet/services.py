@@ -78,7 +78,14 @@ VALIDATE_SCHEMA = vol.Schema(
 
 
 def _first_coordinator(hass: HomeAssistant):
-    """Return the first configured coordinator (services are global)."""
+    """Return the coordinator (services are global, integration is single-entry).
+
+    Single-entry by contract — `manifest.json` sets
+    `"single_config_entry": true` (CR.2), so HA refuses a second entry
+    at the config-flow layer. "First" here means "the one and only";
+    if `hass.data[DOMAIN]` is empty the user hasn't added the
+    integration yet.
+    """
     coordinators = list(hass.data.get(DOMAIN, {}).values())
     if not coordinators:
         raise HomeAssistantError(

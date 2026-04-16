@@ -990,6 +990,23 @@ async def serve_index(request: web.Request) -> web.Response:
     from constants import HEADER_X_INGRESS_PATH  # noqa: PLC0415
     ingress_path = request.headers.get(HEADER_X_INGRESS_PATH, "")
     if ingress_path:
+        # SA.1 / F-15: defence-in-depth. The header is Supervisor-supplied
+        # on the HA happy path, but we're injecting it directly into the
+        # `<base href="...">` attribute, so strip anything that isn't a
+        # URL-safe path character before interpolation. Keeps `"`/`<`/`>`
+        # / JS/HTML special characters out of the attribute even if an
+        # upstream proxy or misconfigured reverse proxy lets a crafted
+        # header through.
+        import re  # noqa: PLC0415
+        ingress_path = re.sub(r"[^/A-Za-z0-9._-]", "", ingress_path)
+        if not ingress_path:
+            # Nothing left after sanitization — fall back to the default
+            # `<base href="./">` rather than injecting an empty attribute.
+            return web.Response(
+                text=html,
+                content_type="text/html",
+                charset="utf-8",
+            )
         # Ensure trailing slash for base href
         if not ingress_path.endswith("/"):
             ingress_path += "/"

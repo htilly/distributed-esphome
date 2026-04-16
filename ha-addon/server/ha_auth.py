@@ -112,7 +112,14 @@ async def _validate_bearer_with_supervisor(token: str) -> dict[str, Any] | None:
                 try:
                     data = await resp.json()
                 except Exception:
-                    return {"name": None, "id": None, "is_admin": None}
+                    # CR.8: fail auth instead of attaching a ghost-user
+                    # dict ({"name": None, ...}). Six months later the
+                    # only thing worse than no audit trail is an audit
+                    # trail full of "action by None".
+                    logger.warning(
+                        "Supervisor /auth returned HTTP 200 with unparseable body — failing auth"
+                    )
+                    return None
                 return {
                     "name": data.get("name") or data.get("user_name"),
                     "id": data.get("id") or data.get("user_id"),
