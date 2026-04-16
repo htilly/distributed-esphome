@@ -443,5 +443,11 @@ Let users compile a target **without** the OTA flash step, then download the res
 
 - [x] **#63** *(1.4.1-dev.68)* — HA compile action: pick workers by device. The compile service's `target:` device picker already accepts ANY `esphome_fleet` device. Made the handler smart about it: picked **target** devices become the compile list; picked **worker** devices set `pinned_client_id`; mixing both works. Picking only workers defaults `targets: "all"` so "rebuild everything on this worker" is a one-click action. The legacy `worker_id` free-text field stays as a manual override for automations. Three new tests covering target+worker, worker-only, and "hub-only picked" rejection. 
 
-- [ ] 64 Do we have any actual testing for the home assistant actions? If not let's add some.
+- [x] **#64** *(1.4.1-dev.69)* — HA actions testing audit + additions. Audit of `tests/test_integration_services.py`: 14 existing unit tests covered handler transformation logic (device_id → targets/worker split, error paths). Gaps: schema validation, service-registry lifecycle, services.yaml parsability, end-to-end via HA's REST API. Added **8 new pytest cases** (schema accepts HA-injected keys, targets sentinels, dict-targets rejection, all-optional fields, cancel schema requires job_ids, register/unregister lifecycle, services.yaml parses + has expected `target: device: integration` blocks) + **new `e2e-hass-4/ha-services.spec.ts`** (3 tests that invoke `POST /api/services/esphome_fleet/*` directly against hass-4's REST API with an HA LLAT; self-skips when `HASS_TOKEN` isn't exported). Covers the end-to-end path users invoke from HA's Developer Tools → Services tab. Services tests: 14 → 25.
+
+- [ ] 65 Remove the worker_id field. We don't need it. 
+
+- [ ] 66 163 is confusing as all heck. Let's have two separate fields:
+1. to pick a device to compile
+2. to pick a worker to use
 

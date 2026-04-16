@@ -232,3 +232,165 @@ async def test_compile_worker_only_defaults_to_all_targets() -> None:
     _, payload = post.call_args.args
     assert payload["targets"] == "all"
     assert payload["pinned_client_id"] == "abc-client"
+
+
+# --- #64: schema validation + lifecycle ---
+
+from esphome_fleet.services import (
+    CANCEL_SCHEMA,
+    COMPILE_SCHEMA,
+    SERVICE_CANCEL,
+    SERVICE_COMPILE,
+    SERVICE_VALIDATE,
+    VALIDATE_SCHEMA,
+    async_register_services,
+    async_unregister_services,
+)
+import voluptuous as vol  # noqa: E402
+
+
+def test_compile_schema_accepts_target_injected_keys() -> None:
+    """#53 — HA passes device_id/entity_id/etc. on every service call.
+    The schema must not reject them.
+    """
+    # Common HA shapes: single string, list, None.
+    data = {
+        "device_id": ["dev-1"],
+        "entity_id": None,
+        "area_id": "living-room",
+        "floor_id": [],
+        "label_id": None,
+    }
+    # Doesn't raise — that's the assertion.
+    COMPILE_SCHEMA(data)
+
+
+def test_compile_schema_accepts_targets_list_and_all_sentinel() -> None:
+    COMPILE_SCHEMA({"targets": ["foo.yaml", "bar.yaml"]})
+    COMPILE_SCHEMA({"targets": "all"})
+    COMPILE_SCHEMA({"targets": "outdated"})
+    # cv.ensure_list wraps bare strings — plain "foo.yaml" is not valid
+    # targets list (would be "outdated"/"all" only). But via ensure_list
+    # wrapping, a single string becomes [string]:
+    COMPILE_SCHEMA({"targets": "living-room.yaml"})  # wrapped to [string]
+
+
+def test_compile_schema_rejects_dict_targets() -> None:
+    """Targets must be a list of strings OR the `all`/`outdated` sentinels.
+    cv.ensure_list will coerce a scalar (int/string) into a list, so
+    the interesting rejection is a dict — which can't be list-ified.
+    """
+    import pytest
+    with pytest.raises(vol.Invalid):
+        COMPILE_SCHEMA({"targets": {"weird": "dict"}})
+
+
+def test_compile_schema_all_fields_optional() -> None:
+    """After #53 + #63, every field is optional — empty dict is valid
+    (handler raises HomeAssistantError at runtime if nothing's pickable).
+    """
+    COMPILE_SCHEMA({})
+
+
+def test_cancel_schema_requires_job_ids() -> None:
+    import pytest
+    with pytest.raises(vol.Invalid):
+        CANCEL_SCHEMA({})
+    CANCEL_SCHEMA({"job_ids": ["uuid-1", "uuid-2"]})
+    # ensure_list wraps single strings
+    CANCEL_SCHEMA({"job_ids": "just-one"})
+
+
+def test_validate_schema_accepts_target_or_device_keys() -> None:
+    VALIDATE_SCHEMA({"target": "foo.yaml"})
+    VALIDATE_SCHEMA({"device_id": "dev-1"})
+    VALIDATE_SCHEMA({})  # runtime check raises; schema is lenient
+
+
+def test_async_register_services_registers_all_three() -> None:
+    """Lifecycle: register_services installs compile, cancel, validate."""
+    registered: dict[str, dict] = {}
+    def has_service(domain, service):
+        return service in registered
+    def async_register(domain, service, handler, schema=None):
+        registered[service] = {"handler": handler, "schema": schema, "domain": domain}
+    def async_remove(domain, service):
+        registered.pop(service, None)
+
+    hass = SimpleNamespace(
+        services=SimpleNamespace(
+            has_service=has_service,
+            async_register=async_register,
+            async_remove=async_remove,
+        ),
+        data={DOMAIN: {}},
+    )
+
+    async_register_services(hass)
+    assert set(registered.keys()) == {SERVICE_COMPILE, SERVICE_CANCEL, SERVICE_VALIDATE}
+    for svc in (SERVICE_COMPILE, SERVICE_CANCEL, SERVICE_VALIDATE):
+        assert registered[svc]["domain"] == DOMAIN
+        assert registered[svc]["schema"] is not None
+        assert callable(registered[svc]["handler"])
+
+
+def test_async_register_services_is_idempotent() -> None:
+    """Second register call is a no-op (has_service returns True)."""
+    register_calls: list = []
+    hass = SimpleNamespace(
+        services=SimpleNamespace(
+            has_service=lambda d, s: True,  # already registered
+            async_register=lambda *a, **kw: register_calls.append(a),
+        ),
+        data={DOMAIN: {}},
+    )
+    async_register_services(hass)
+    assert register_calls == []
+
+
+def test_async_unregister_services_removes_when_domain_empty() -> None:
+    """When the last config entry is gone, unregister tears services down."""
+    removed: list[str] = []
+    hass = SimpleNamespace(
+        services=SimpleNamespace(
+            has_service=lambda d, s: True,
+            async_remove=lambda d, s: removed.append(s),
+        ),
+        data={},  # no DOMAIN key = no entries
+    )
+    async_unregister_services(hass)
+    assert set(removed) == {SERVICE_COMPILE, SERVICE_CANCEL, SERVICE_VALIDATE}
+
+
+def test_async_unregister_services_noop_when_entries_remain() -> None:
+    """Don't tear down services if another config entry is still active."""
+    removed: list[str] = []
+    hass = SimpleNamespace(
+        services=SimpleNamespace(
+            has_service=lambda d, s: True,
+            async_remove=lambda d, s: removed.append(s),
+        ),
+        data={DOMAIN: {"entry-2": "coordinator"}},
+    )
+    async_unregister_services(hass)
+    assert removed == []
+
+
+def test_services_yaml_parses() -> None:
+    """#64 — services.yaml must be valid YAML with the expected structure.
+    HA's frontend loads this file directly; a syntax error means the
+    action editor shows no fields. Cheap CI guard.
+    """
+    from pathlib import Path
+    import yaml
+    path = Path(__file__).parent.parent / "ha-addon" / "custom_integration" / "esphome_fleet" / "services.yaml"
+    data = yaml.safe_load(path.read_text())
+    assert SERVICE_COMPILE in data
+    assert SERVICE_CANCEL in data
+    assert SERVICE_VALIDATE in data
+    # compile + validate both expose a device-target selector (#37/#63).
+    assert "target" in data[SERVICE_COMPILE]
+    assert "device" in data[SERVICE_COMPILE]["target"]
+    assert data[SERVICE_COMPILE]["target"]["device"]["integration"] == DOMAIN
+    assert "target" in data[SERVICE_VALIDATE]
+    assert "device" in data[SERVICE_VALIDATE]["target"]
