@@ -1,5 +1,5 @@
 name: "ESPHome Fleet"
-version: "1.4.1-dev.46"
+version: "1.4.1-dev.47"
 slug: "esphome_dist_server"
 description: "Manage fleets of ESPHome devices: distributed compilation, per-device version pinning, scheduled OTA upgrades, and a unified web UI"
 url: "https://github.com/weirded/distributed-esphome"
@@ -34,6 +34,14 @@ host_network: true
 hassio_api: true
 # HA Core REST API access — needed to read entity states (device connectivity)
 homeassistant_api: true
+
+# #26: declare that we POST to Supervisor's /discovery with service
+# "esphome_fleet". Without this, Supervisor rejects the POST with 403
+# "Apps must list services they provide via discovery in their config!"
+# The service name matches the integration DOMAIN that `async_step_hassio`
+# on the integration side dispatches against.
+discovery:
+  - esphome_fleet
 
 # GitHub #45: exclude the local worker's ESPHome version cache + build
 # artifacts from HA backups. These are large (~50-200MB per target) and
