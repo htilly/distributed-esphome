@@ -166,14 +166,12 @@ async def _heartbeat_handler(request: web.Request) -> web.Response:
     worker = registry.get(msg.client_id)
     resp = HeartbeatResponse(ok=True)
 
-    # Only advertise a newer source-code version to workers running an
-    # up-to-date Docker image. A stale image can't be fixed by rewriting
-    # .py files in place (missing system deps / Python version / libs),
-    # so suppressing server_client_version prevents an auto-update loop
-    # that would just fail to pick up the real changes.
-    if worker is None or _image_version_ok(worker.image_version):
-        resp.server_client_version = _get_server_client_version()
-    else:
+    # SC.4: source-code auto-update was removed. Stop advertising
+    # server_client_version on heartbeats so pre-1.4.1 workers don't
+    # tight-loop trying to fetch /api/v1/client/code (now 410 Gone).
+    # Stale Docker images still get flagged so the worker surfaces a
+    # "rebuild Docker image" WARNING to the operator.
+    if worker is not None and not _image_version_ok(worker.image_version):
         resp.image_upgrade_required = True
         resp.min_image_version = MIN_IMAGE_VERSION
 
@@ -515,39 +513,37 @@ async def get_client_version(request: web.Request) -> web.Response:
 
 @routes.get("/api/v1/client/code")
 async def get_client_code(request: web.Request) -> web.Response:
-    """Return all .py files from the bundled worker directory.
+    """SC.4: worker source-code auto-update REMOVED.
 
-    Gated on image version: workers with a stale Docker image are refused,
-    because source-code updates alone can't fix a stale image and would
-    just cause them to repeatedly exec into broken state.
+    The old behavior — serve all `.py` files from the bundled worker
+    directory, have the worker overwrite its local copies in place and
+    `os.execv` itself — was the supply-chain weak point F-02 in the
+    security audit. The payload was unsigned; a compromised server
+    token (or malicious peer on the bearer-auth path) could push
+    arbitrary Python to every connected worker.
+
+    Home-lab operators already update workers via `docker pull
+    ghcr.io/weirded/esphome-dist-client:latest` + container restart.
+    The auto-update mechanism added attack surface for a capability
+    nobody actually used the way it was documented. Endpoint now
+    returns 410 Gone with a pointer to the Docker upgrade path.
+
+    Leaving the route rather than removing it entirely keeps pre-1.4.1
+    workers from tight-looping on 404 + erroring out — they'll see a
+    clean 410 with a message they can log.
     """
-    # Look up the caller's image version from the registry
-    client_id = request.headers.get(HEADER_X_CLIENT_ID) or request.rel_url.query.get("client_id")
-    if client_id:
-        worker = request.app["registry"].get(client_id)
-        if worker and not _image_version_ok(worker.image_version):
-            return web.json_response(
-                {
-                    "error": "image_upgrade_required",
-                    "min_image_version": MIN_IMAGE_VERSION,
-                    "reported": worker.image_version,
-                },
-                status=409,
-            )
-
-    base = _CLIENT_CODE_DIR if _CLIENT_CODE_DIR.exists() else Path(__file__).parent
-    files = {}
-    for path in sorted(base.glob("*.py")):
-        if path.name.startswith("._"):
-            continue
-        try:
-            files[path.name] = path.read_text(encoding="utf-8")
-        except Exception:
-            logger.exception("Failed to read worker file %s", path.name)
-    return web.json_response({
-        "version": _get_server_client_version(),
-        "files": files,
-    })
+    return web.json_response(
+        {
+            "error": "auto_update_removed",
+            "message": (
+                "Worker source-code auto-update was removed in 1.4.1 (SC.4). "
+                "Update workers by rebuilding the Docker image: "
+                "docker pull ghcr.io/weirded/esphome-dist-client:latest && "
+                "docker restart <container>."
+            ),
+        },
+        status=410,
+    )
 
 
 @routes.post("/api/v1/jobs/{id}/log")

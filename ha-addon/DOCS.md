@@ -73,6 +73,32 @@ cosign verify \
 
 A successful verification prints the signature payload + the OIDC claims (workflow ref, run ID, commit SHA) — confirming the image was built by the official workflow on this repo and hasn't been tampered with in transit. Run this after `docker pull` and before any production deployment.
 
+### Verifying the SBOM
+
+Every image published from 1.4.1 onward also carries a CycloneDX-format SBOM as a cosign attestation. You can fetch and verify it with:
+
+```bash
+# Server image — print the attached CycloneDX SBOM
+cosign verify-attestation \
+  --certificate-identity-regexp 'https://github.com/weirded/distributed-esphome/.github/workflows/publish-server\.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --type cyclonedx \
+  ghcr.io/weirded/esphome-dist-server:latest \
+  | jq -r '.payload | @base64d | fromjson | .predicate' \
+  > esphome-dist-server.sbom.json
+
+# Client image
+cosign verify-attestation \
+  --certificate-identity-regexp 'https://github.com/weirded/distributed-esphome/.github/workflows/publish-client\.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --type cyclonedx \
+  ghcr.io/weirded/esphome-dist-client:latest \
+  | jq -r '.payload | @base64d | fromjson | .predicate' \
+  > esphome-dist-client.sbom.json
+```
+
+The JSON file lists every Python package, OS library, and pinned version baked into the image — handy for CVE auditing, compliance, and supply-chain review.
+
 ## Support
 
 If this add-on has saved you time or frustration, you can support continued development:

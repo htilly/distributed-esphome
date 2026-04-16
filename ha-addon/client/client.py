@@ -43,7 +43,7 @@ from sysinfo import collect_system_info
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.4.1-dev.59"
+CLIENT_VERSION = "1.4.1-dev.60"
 
 
 def _read_image_version() -> Optional[str]:
@@ -389,12 +389,19 @@ def heartbeat_loop(client_id: str, stop_event: threading.Event) -> None:
                         )
                         _image_upgrade_logged = True
                 else:
+                    # SC.4: source-code auto-update was removed. The
+                    # server no longer sets server_client_version on
+                    # heartbeat responses, so this branch is effectively
+                    # a no-op. Log once at DEBUG if a pre-1.4.1 server
+                    # still sends one, so the operator can correlate.
                     sv = data.server_client_version
                     if sv and sv != CLIENT_VERSION:
-                        logger.info(
-                            "Worker update available: local=%s server=%s", CLIENT_VERSION, sv
+                        logger.debug(
+                            "Server advertises worker version %s (local=%s); "
+                            "source-code auto-update is disabled — rebuild the "
+                            "Docker image with `docker pull` to update.",
+                            sv, CLIENT_VERSION,
                         )
-                        _update_available.set()
                 # Check for max_parallel_jobs config change from UI
                 new_jobs = data.set_max_parallel_jobs
                 if new_jobs is not None and new_jobs != MAX_PARALLEL_JOBS:
@@ -439,45 +446,12 @@ _update_attempts: int = 0
 _MAX_UPDATE_ATTEMPTS: int = 3
 
 
-def _apply_update(current_client_id: str) -> None:
-    """Download updated worker code from server and restart the process.
-
-    Stashes *current_client_id* in the environment so the restarted process
-    can re-register in place (keeping the same entry in the server's registry).
-    """
-    global _update_attempts
-    _update_available.clear()
-    _update_attempts += 1
-    if _update_attempts > _MAX_UPDATE_ATTEMPTS:
-        logger.warning(
-            "Update failed %d times; giving up until restart", _MAX_UPDATE_ATTEMPTS
-        )
-        return
-    logger.info("Downloading worker update from server...")
-    try:
-        resp = get("/api/v1/client/code", timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
-        files = data.get("files", {})
-        new_version = data.get("version", "?")
-        if not files:
-            logger.warning("Update response had no files; skipping")
-            return
-        client_dir = Path(__file__).parent.resolve()
-        for filename, content in files.items():
-            if not filename.endswith(".py"):
-                continue
-            target = (client_dir / filename).resolve()
-            if target.parent != client_dir:
-                logger.warning("Skipping suspicious path in update: %s", filename)
-                continue
-            target.write_text(content, encoding="utf-8")
-            logger.info("Updated %s", filename)
-        logger.info("Worker updated to %s — restarting", new_version)
-        os.environ["DISTRIBUTED_ESPHOME_CLIENT_ID"] = current_client_id
-        os.execv(sys.executable, [sys.executable] + sys.argv)
-    except Exception as exc:
-        logger.warning("Worker update failed: %s", exc)
+# SC.4: _apply_update removed. Source-code auto-update was the main
+# supply-chain attack surface (F-02 in SECURITY_AUDIT.md). Home-lab
+# operators update workers by rebuilding the Docker image:
+#   docker pull ghcr.io/weirded/esphome-dist-client:latest
+#   docker restart <container>
+# The server's /api/v1/client/code endpoint now returns 410 Gone.
 
 
 def _ota_network_diagnostics(target_path: str, cwd: str, env: dict) -> str:
@@ -1340,9 +1314,10 @@ def worker_loop(
     _log_context.current_target = None
     logger.info("Worker %d started", worker_id)
     while not stop_event.is_set():
-        # Pause polling when update or re-register is pending so the main
-        # thread can reach idle state and handle the event.
-        if _reregister_needed.is_set() or _update_available.is_set():
+        # Pause polling when re-register is pending so the main thread
+        # can reach idle state and handle it. (_update_available was the
+        # source-code auto-update gate, removed in SC.4.)
+        if _reregister_needed.is_set():
             stop_event.wait(1)
             continue
 
@@ -1397,26 +1372,16 @@ def worker_loop(
 # ---------------------------------------------------------------------------
 
 def _initial_version_check(client_id: str) -> None:
-    """Do one synchronous heartbeat immediately after registration.
+    """SC.4: no-op stub kept to preserve the main-loop shape.
 
-    If the server has a newer worker version, sets _update_available so the
-    main loop applies the update before picking up any jobs.
+    The original pre-1.4.1 behavior synchronized on the first heartbeat
+    and auto-updated the worker's source from the server before picking
+    up any jobs. That path is gone (see SC.4 / _apply_update). Kept as
+    an empty function so the call site in main() doesn't need to
+    restructure. Remove in a later release once the main loop is
+    refactored.
     """
-    try:
-        resp = post("/api/v1/workers/heartbeat", {
-            "client_id": client_id,
-            "system_info": collect_system_info(_ESPHOME_VERSIONS_DIR),
-        }, timeout=10)
-        if resp.ok:
-            sv = resp.json().get("server_client_version")
-            if sv and sv != CLIENT_VERSION:
-                logger.info(
-                    "Update available before first poll: local=%s server=%s",
-                    CLIENT_VERSION, sv,
-                )
-                _update_available.set()
-    except Exception as exc:
-        logger.debug("Initial version check failed (non-fatal): %s", exc)
+    return
 
 
 def _stop_workers(worker_stop: threading.Event, worker_threads: list[threading.Thread]) -> None:
@@ -1489,21 +1454,11 @@ def main() -> None:
     )
     hb_thread.start()
 
-    # Apply update immediately if detected (before starting workers)
-    if _update_available.is_set():
-        stop_heartbeat.set()
-        hb_thread.join(timeout=2)
-        _apply_update(client_id)  # may os.execv — never returns on success
-        # Update failed — restart heartbeat
-        stop_heartbeat = threading.Event()
-        hb_thread = threading.Thread(
-            target=heartbeat_loop,
-            args=(client_id, stop_heartbeat),
-            daemon=True,
-            name="heartbeat",
-        )
-        hb_thread.start()
-
+    # SC.4: source-code auto-update was removed. _update_available is
+    # never set anymore (the heartbeat path that used to set it is
+    # gone). Kept the event symbol + downstream drains as a no-op so
+    # the rest of this loop doesn't need restructuring; revisit when
+    # we re-introduce signed updates.
     logger.info("Starting %d worker(s), polling every %ds", MAX_PARALLEL_JOBS, POLL_INTERVAL)
     worker_stop, worker_threads = _launch_workers(client_id, version_manager)
 
@@ -1530,21 +1485,8 @@ def main() -> None:
                 worker_stop, worker_threads = _launch_workers(client_id, version_manager)
 
             # Apply pending update only when all workers are idle
-            elif _update_available.is_set() and _is_idle():
-                _stop_workers(worker_stop, worker_threads)
-                stop_heartbeat.set()
-                hb_thread.join(timeout=2)
-                _apply_update(client_id)  # may os.execv — never returns on success
-                # Update failed — restart heartbeat and workers
-                stop_heartbeat = threading.Event()
-                hb_thread = threading.Thread(
-                    target=heartbeat_loop,
-                    args=(client_id, stop_heartbeat),
-                    daemon=True,
-                    name="heartbeat",
-                )
-                hb_thread.start()
-                worker_stop, worker_threads = _launch_workers(client_id, version_manager)
+            # SC.4: source-code auto-update call site removed.
+            # _update_available is never set in post-SC.4 workers.
 
             time.sleep(1)
     except KeyboardInterrupt:

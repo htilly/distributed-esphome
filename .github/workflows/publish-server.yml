@@ -78,3 +78,26 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           echo "${TAGS}" | xargs -I {} cosign sign --yes "{}@${DIGEST}"
+
+      # SC.2: generate CycloneDX SBOM for the image we just pushed and
+      # attach it as a cosign attestation. Verifies alongside the image
+      # signature so downstream users can audit components without
+      # trusting a separate artifact store.
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          format: cyclonedx-json
+          output-file: esphome-dist-server-${{ steps.version.outputs.version }}.sbom.json
+          artifact-name: esphome-dist-server-${{ steps.version.outputs.version }}.sbom.json
+
+      - name: Attach SBOM as cosign attestation
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ steps.version.outputs.version }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        run: |
+          cosign attest --yes \
+            --predicate "esphome-dist-server-${VERSION}.sbom.json" \
+            --type cyclonedx \
+            "${IMAGE}@${DIGEST}"
