@@ -41,7 +41,7 @@ async def test_compile_service_posts_minimal_payload() -> None:
     assert payload == {"targets": ["living-room.yaml"]}
 
 
-async def test_compile_service_includes_version_and_worker_when_set() -> None:
+async def test_compile_service_includes_version_when_set() -> None:
     hass, post = _hass_with_coordinator()
     await _handle_compile(
         _FakeCall(
@@ -49,7 +49,6 @@ async def test_compile_service_includes_version_and_worker_when_set() -> None:
             {
                 "targets": ["a.yaml", "b.yaml"],
                 "esphome_version": "2026.3.2",
-                "worker_id": "worker-abc",
             },
         )
     )
@@ -57,8 +56,49 @@ async def test_compile_service_includes_version_and_worker_when_set() -> None:
     assert payload == {
         "targets": ["a.yaml", "b.yaml"],
         "esphome_version": "2026.3.2",
-        "pinned_client_id": "worker-abc",
     }
+
+
+async def test_compile_service_pins_worker_from_device_field() -> None:
+    """#66 — the `worker` field is a worker device_id; resolve to client_id."""
+    hass, post = _hass_with_coordinator()
+    worker_dev = SimpleNamespace(
+        identifiers={(DOMAIN, "worker:abc-client")},
+    )
+    fake_registry = SimpleNamespace(
+        async_get=lambda did: worker_dev if did == "dev-worker-1" else None,
+    )
+    with patch("esphome_fleet.services.dr.async_get", return_value=fake_registry):
+        await _handle_compile(
+            _FakeCall(
+                hass,
+                {
+                    "targets": ["a.yaml"],
+                    "worker": "dev-worker-1",
+                },
+            )
+        )
+    _, payload = post.call_args.args
+    assert payload == {
+        "targets": ["a.yaml"],
+        "pinned_client_id": "abc-client",
+    }
+
+
+async def test_compile_service_raises_when_worker_field_is_not_worker() -> None:
+    """#66 — if someone wires a non-worker device into the `worker` field."""
+    from homeassistant.exceptions import HomeAssistantError
+
+    hass, _ = _hass_with_coordinator()
+    target_dev = SimpleNamespace(
+        identifiers={(DOMAIN, "target:foo.yaml")},
+    )
+    fake_registry = SimpleNamespace(async_get=lambda did: target_dev)
+    with patch("esphome_fleet.services.dr.async_get", return_value=fake_registry):
+        with pytest.raises(HomeAssistantError, match="not a Fleet build worker"):
+            await _handle_compile(
+                _FakeCall(hass, {"targets": ["a.yaml"], "worker": "dev-x"})
+            )
 
 
 async def test_compile_service_accepts_string_all_targets() -> None:
@@ -122,22 +162,24 @@ async def test_compile_resolves_device_ids_to_targets() -> None:
 
 
 async def test_compile_rejects_unknown_fleet_device_identifier() -> None:
-    """#37/#63 — picking a device that's known to HA but doesn't carry
-    a `target:` or `worker:` Fleet identifier (e.g. the hub) raises.
+    """#37/#66 — picking a device that's known to HA but doesn't carry
+    a `target:` Fleet identifier (e.g. the hub) raises. The service's
+    ``target:`` filter in services.yaml should prevent this in the UI,
+    but the handler defends against it regardless.
     """
     from homeassistant.exceptions import HomeAssistantError
 
     hass, _ = _hass_with_coordinator()
 
     fake_device = SimpleNamespace(
-        identifiers={(DOMAIN, "hub:entry-xyz")},  # not target/worker
+        identifiers={(DOMAIN, "hub:entry-xyz")},  # not a target
     )
     fake_registry = SimpleNamespace(
         async_get=lambda did: fake_device,
     )
 
     with patch("esphome_fleet.services.dr.async_get", return_value=fake_registry):
-        with pytest.raises(HomeAssistantError, match="targets or workers"):
+        with pytest.raises(HomeAssistantError, match="managed ESPHome Fleet targets"):
             await _handle_compile(
                 _FakeCall(hass, {"device_id": ["dev-456"]})
             )
@@ -187,56 +229,14 @@ def test_resolve_device_ids_extracts_target_filename() -> None:
     assert result == ["foo.yaml"]
 
 
-async def test_compile_picks_worker_device_as_pin() -> None:
-    """#63 — picking a worker device in the target selector pins the
-    compile to that worker's client_id, falls back to 'all' targets.
-    """
-    hass, post = _hass_with_coordinator()
-
-    worker_dev = SimpleNamespace(
-        identifiers={(DOMAIN, "worker:abc-client")},
-    )
-    target_dev = SimpleNamespace(
-        identifiers={(DOMAIN, "target:living-room.yaml")},
-    )
-    fake_registry = SimpleNamespace(
-        async_get=lambda did: {"w1": worker_dev, "t1": target_dev}.get(did),
-    )
-
-    with patch("esphome_fleet.services.dr.async_get", return_value=fake_registry):
-        # Target + worker picked together — targets from the target,
-        # pin from the worker.
-        await _handle_compile(
-            _FakeCall(hass, {"device_id": ["t1", "w1"]})
-        )
-    _, payload = post.call_args.args
-    assert payload["targets"] == ["living-room.yaml"]
-    assert payload["pinned_client_id"] == "abc-client"
-
-
-async def test_compile_worker_only_defaults_to_all_targets() -> None:
-    """#63 — picking ONLY worker devices falls back to `targets: all`
-    with the worker as pin. Lets users say "rebuild everything on
-    this worker" with one picker action.
-    """
-    hass, post = _hass_with_coordinator()
-    worker_dev = SimpleNamespace(
-        identifiers={(DOMAIN, "worker:abc-client")},
-    )
-    fake_registry = SimpleNamespace(
-        async_get=lambda did: worker_dev if did == "w1" else None,
-    )
-
-    with patch("esphome_fleet.services.dr.async_get", return_value=fake_registry):
-        await _handle_compile(_FakeCall(hass, {"device_id": ["w1"]}))
-    _, payload = post.call_args.args
-    assert payload["targets"] == "all"
-    assert payload["pinned_client_id"] == "abc-client"
+# #63 tests removed in #66 — the "mix targets + workers in one picker"
+# approach was replaced with separate picker fields. See
+# test_compile_service_pins_worker_from_device_field for the new path.
 
 
 # --- #64: schema validation + lifecycle ---
 
-from esphome_fleet.services import (
+from esphome_fleet.services import (  # noqa: E402
     CANCEL_SCHEMA,
     COMPILE_SCHEMA,
     SERVICE_CANCEL,
@@ -388,9 +388,19 @@ def test_services_yaml_parses() -> None:
     assert SERVICE_COMPILE in data
     assert SERVICE_CANCEL in data
     assert SERVICE_VALIDATE in data
-    # compile + validate both expose a device-target selector (#37/#63).
+    # compile + validate both expose a device-target selector (#37/#66).
+    # The device filter is now a list of filter dicts (manufacturer-scoped).
     assert "target" in data[SERVICE_COMPILE]
     assert "device" in data[SERVICE_COMPILE]["target"]
-    assert data[SERVICE_COMPILE]["target"]["device"]["integration"] == DOMAIN
+    compile_filter = data[SERVICE_COMPILE]["target"]["device"]["filter"]
+    assert any(f.get("integration") == DOMAIN for f in compile_filter)
+    assert any(f.get("manufacturer") == "ESPHome" for f in compile_filter)
     assert "target" in data[SERVICE_VALIDATE]
     assert "device" in data[SERVICE_VALIDATE]["target"]
+    # #66: compile exposes a separate `worker` device-selector field,
+    # filtered to the worker manufacturer so stable/target devices hide.
+    worker_field = data[SERVICE_COMPILE]["fields"]["worker"]
+    worker_filter = worker_field["selector"]["device"]["filter"]
+    assert any(f.get("manufacturer") == "ESPHome Fleet Worker" for f in worker_filter)
+    # #65: legacy `worker_id` string field is gone.
+    assert "worker_id" not in data[SERVICE_COMPILE]["fields"]

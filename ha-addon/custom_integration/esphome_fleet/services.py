@@ -54,7 +54,11 @@ COMPILE_SCHEMA = vol.Schema(
     {
         vol.Optional("targets"): _TARGETS_SCHEMA,
         vol.Optional("esphome_version"): cv.string,
-        vol.Optional("worker_id"): cv.string,
+        # #66: the `worker` field is a device-selector-picked HA device
+        # ID (of a worker device). The handler resolves it to the
+        # worker's client_id via the device registry. Replaces the old
+        # free-text `worker_id` field (#65).
+        vol.Optional("worker"): vol.Any(None, cv.string),
         **_TARGET_KEYS,
     }
 )
@@ -84,76 +88,77 @@ def _first_coordinator(hass: HomeAssistant):
     return coordinators[0]
 
 
-def _resolve_device_ids(
+def _resolve_device_ids_to_targets(
     hass: HomeAssistant, device_ids: list[str]
-) -> tuple[list[str], list[str]]:
-    """Split HA device-registry IDs into (targets, worker_client_ids).
+) -> list[str]:
+    """Map HA device-registry IDs to YAML target filenames (#37/#66).
 
     Each Fleet target device has an identifier of the form
-    ``("esphome_fleet", "target:<filename>")``; worker devices use
-    ``("esphome_fleet", "worker:<client_id>")``. #63: let users pick
-    EITHER from the same device picker — targets go into the
-    compile list, workers become the ``pinned_client_id``.
+    ``("esphome_fleet", "target:<filename>")``. Non-target devices in
+    the picked set (workers, hub) are ignored here — workers flow
+    through the separate `worker` field (#66).
     """
-    targets: list[str] = []
-    workers: list[str] = []
     if not device_ids:
-        return targets, workers
+        return []
     registry = dr.async_get(hass)
+    targets: list[str] = []
     for did in device_ids:
         device = registry.async_get(did)
         if device is None:
             continue
         for domain, ident in device.identifiers:
-            if domain != DOMAIN:
-                continue
-            if ident.startswith("target:"):
+            if domain == DOMAIN and ident.startswith("target:"):
                 targets.append(ident.removeprefix("target:"))
                 break
-            if ident.startswith("worker:"):
-                workers.append(ident.removeprefix("worker:"))
-                break
-    return targets, workers
-
-
-def _resolve_device_ids_to_targets(
-    hass: HomeAssistant, device_ids: list[str]
-) -> list[str]:
-    """Back-compat wrapper for tests. Returns only the targets portion."""
-    targets, _ = _resolve_device_ids(hass, device_ids)
     return targets
+
+
+def _resolve_worker_device_id(
+    hass: HomeAssistant, device_id: str
+) -> str | None:
+    """Map a worker device_id to its Fleet client_id (#66).
+
+    Returns None when the device isn't a Fleet worker (e.g. someone
+    wired a target device into the `worker` field — the selector's
+    manufacturer filter should prevent this in the UI, but be defensive).
+    """
+    if not device_id:
+        return None
+    registry = dr.async_get(hass)
+    device = registry.async_get(device_id)
+    if device is None:
+        return None
+    for domain, ident in device.identifiers:
+        if domain == DOMAIN and ident.startswith("worker:"):
+            return ident.removeprefix("worker:")
+    return None
 
 
 async def _handle_compile(call: ServiceCall) -> None:
     coord = _first_coordinator(call.hass)
 
-    # #37/#63: resolve device-targeted calls. The user picks devices
-    # from HA's device picker; target devices become the compile list,
-    # worker devices become the pinned_client_id. Mixing both works.
+    # #37/#66: resolve target devices from the top-level device picker.
+    # The HA services.yaml filter restricts this selector to devices
+    # with manufacturer "ESPHome" (i.e. targets only) so we don't need
+    # to worry about stray hub/worker picks here.
     device_ids: list[str] = call.data.get("device_id", [])
     if isinstance(device_ids, str):
         device_ids = [device_ids]
 
-    picked_targets, picked_workers = _resolve_device_ids(call.hass, device_ids)
-
-    # Detect "picked device(s), but none are targets or workers"
-    # (e.g. only the hub) BEFORE falling through to the no-device path.
-    if device_ids and not picked_targets and not picked_workers:
-        raise HomeAssistantError(
-            "None of the selected devices are managed ESPHome Fleet "
-            "targets or workers"
-        )
+    picked_targets = _resolve_device_ids_to_targets(call.hass, device_ids)
 
     targets: Any
     if picked_targets:
         targets = picked_targets
     elif "targets" in call.data:
         targets = call.data["targets"]
-    elif picked_workers:
-        # #63: user picked ONLY worker devices — ambiguous without
-        # targets. Fall through to "all" so the pin-to-worker intent
-        # still works, and document it.
-        targets = "all"
+    elif device_ids:
+        # User picked device(s), but none resolve to managed targets.
+        # Shouldn't happen given the selector filter, but give a clean
+        # error rather than silently sending an empty list.
+        raise HomeAssistantError(
+            "None of the selected devices are managed ESPHome Fleet targets"
+        )
     else:
         raise HomeAssistantError(
             "Select at least one device or provide a 'targets' list"
@@ -162,11 +167,14 @@ async def _handle_compile(call: ServiceCall) -> None:
     payload: dict[str, Any] = {"targets": targets}
     if (version := call.data.get("esphome_version")):
         payload["esphome_version"] = version
-    # Pin order: explicit worker_id > picked worker device(s, first wins).
-    if (worker := call.data.get("worker_id")):
-        payload["pinned_client_id"] = worker
-    elif picked_workers:
-        payload["pinned_client_id"] = picked_workers[0]
+    # #66: worker pin comes from the dedicated `worker` device field.
+    if (worker_device := call.data.get("worker")):
+        client_id = _resolve_worker_device_id(call.hass, worker_device)
+        if client_id is None:
+            raise HomeAssistantError(
+                "The selected worker is not a Fleet build worker"
+            )
+        payload["pinned_client_id"] = client_id
     result = await coord.async_post_json("/ui/api/compile", payload)
     enqueued = (result or {}).get("enqueued", 0)
     _LOGGER.info("esphome_fleet.compile enqueued %s job(s) for %r", enqueued, targets)

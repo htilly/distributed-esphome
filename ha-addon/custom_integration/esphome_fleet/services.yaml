@@ -1,24 +1,36 @@
 # ESPHome Fleet service descriptors (HI.2).
 #
-# Surfaces each service to HA's automation editor with field selectors so
-# users get autocomplete + validation instead of typing raw YAML.
+# Two separate device pickers (#66): the top-level `target:` picks one
+# or more managed devices to compile (filtered to manufacturer "ESPHome"
+# so only target devices show). The `worker` field picks an optional
+# build worker to pin the job to (filtered to manufacturer "ESPHome
+# Fleet Worker" so only workers show). This replaces the earlier
+# "mix devices + workers in one picker" approach which was confusing.
 #
-# The compile service supports HA's device-targeting (#37): select one or
-# more ESPHome Fleet devices from the device picker → the handler resolves
-# them to YAML filenames automatically. The explicit `targets` field is
-# kept as a fallback for automations that know the filenames.
+# The explicit `targets` list field stays as an alternative for
+# automations that already know the YAML filenames.
 
 compile:
   name: Compile
   description: >
-    Compile and OTA-flash firmware for ESPHome devices managed by the
-    Fleet add-on. Pick devices AND/OR workers in the target selector:
-    device rows become the compile list, worker rows pin the job to
-    that specific build worker (#63). Mixing both works.
+    Compile and OTA-flash firmware for one or more ESPHome devices
+    managed by the Fleet add-on.
   target:
     device:
-      integration: esphome_fleet
+      filter:
+        - integration: esphome_fleet
+          manufacturer: "ESPHome"
   fields:
+    worker:
+      name: Worker (optional)
+      description: >
+        Pin the compile to a specific build worker. Leave empty to let
+        the scheduler pick an available worker.
+      selector:
+        device:
+          filter:
+            - integration: esphome_fleet
+              manufacturer: "ESPHome Fleet Worker"
     targets:
       name: Targets (alternative)
       description: >
@@ -30,17 +42,10 @@ compile:
         object:
     esphome_version:
       name: ESPHome version
-      description: Optional ESPHome version to compile against (defaults to the server's selected version).
-      example: "2026.3.2"
-      selector:
-        text:
-    worker_id:
-      name: Worker client_id (advanced)
       description: >
-        #63: prefer picking a Worker device in the target selector
-        above — same effect, better UX. This field stays as a manual
-        override for automations that want to pin by raw client_id.
-      example: "12345-abc..."
+        Optional ESPHome version to compile against (defaults to the
+        server's selected version).
+      example: "2026.4.0"
       selector:
         text:
 
@@ -61,7 +66,9 @@ validate:
   description: Run ESPHome config validation against a single target YAML.
   target:
     device:
-      integration: esphome_fleet
+      filter:
+        - integration: esphome_fleet
+          manufacturer: "ESPHome"
   fields:
     target:
       name: Target (alternative)

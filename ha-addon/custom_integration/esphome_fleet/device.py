@@ -119,7 +119,11 @@ def worker_device_info(worker: dict[str, Any], hub_entry_id: str) -> DeviceInfo:
     return DeviceInfo(
         identifiers={(DOMAIN, f"worker:{client_id}")},
         name=f"{hostname} (worker)",
-        manufacturer="ESPHome Fleet",
+        # #66: a distinct manufacturer string lets the compile service
+        # filter the "worker" device selector to only show workers
+        # (and the target selector to only show devices via a
+        # `manufacturer: "ESPHome"` filter). Hub keeps "ESPHome Fleet".
+        manufacturer="ESPHome Fleet Worker",
         model=model,
         sw_version=worker.get("client_version") or None,
         via_device=(DOMAIN, f"hub:{hub_entry_id}"),
