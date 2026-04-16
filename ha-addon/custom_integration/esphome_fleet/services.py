@@ -2,9 +2,10 @@
 
 Three services, all thin wrappers over the add-on's `/ui/api/*` JSON API:
 
-  esphome_fleet.compile    — enqueue a compile for one or more targets
-                             (or "all" / "outdated"). Optional worker
-                             pin and ESPHome version override.
+  esphome_fleet.compile    — enqueue a compile for one or more targets.
+                             Supports HA device-targeting (#37) so users
+                             can pick devices from the UI picker instead
+                             of typing YAML filenames.
   esphome_fleet.cancel     — cancel a queued/working job by id.
   esphome_fleet.validate   — run esphome config validation on a target.
 
@@ -21,7 +22,7 @@ import voluptuous as vol
 
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import config_validation as cv, device_registry as dr
 
 from .const import DOMAIN
 
@@ -31,7 +32,6 @@ SERVICE_COMPILE = "compile"
 SERVICE_CANCEL = "cancel"
 SERVICE_VALIDATE = "validate"
 
-# `targets`: explicit list, or the string "all" / "outdated".
 _TARGETS_SCHEMA = vol.Any(
     vol.All(cv.ensure_list, [cv.string]),
     vol.In(["all", "outdated"]),
@@ -39,7 +39,7 @@ _TARGETS_SCHEMA = vol.Any(
 
 COMPILE_SCHEMA = vol.Schema(
     {
-        vol.Required("targets"): _TARGETS_SCHEMA,
+        vol.Optional("targets"): _TARGETS_SCHEMA,
         vol.Optional("esphome_version"): cv.string,
         vol.Optional("worker_id"): cv.string,
     }
@@ -53,19 +53,13 @@ CANCEL_SCHEMA = vol.Schema(
 
 VALIDATE_SCHEMA = vol.Schema(
     {
-        vol.Required("target"): cv.string,
+        vol.Optional("target"): cv.string,
     }
 )
 
 
 def _first_coordinator(hass: HomeAssistant):
-    """Return the first configured coordinator (services are global).
-
-    Most users will have exactly one add-on instance. If there are
-    multiple config entries and the caller didn't target one, we hit
-    the first — good enough for 1.4.1. Later we can add a
-    `config_entry` service param if anyone asks.
-    """
+    """Return the first configured coordinator (services are global)."""
     coordinators = list(hass.data.get(DOMAIN, {}).values())
     if not coordinators:
         raise HomeAssistantError(
@@ -75,9 +69,52 @@ def _first_coordinator(hass: HomeAssistant):
     return coordinators[0]
 
 
+def _resolve_device_ids_to_targets(
+    hass: HomeAssistant, device_ids: list[str]
+) -> list[str]:
+    """Map HA device-registry IDs to YAML target filenames.
+
+    Each Fleet target device has an identifier of the form
+    ``("esphome_fleet", "target:<filename>")``. We extract the
+    filename from that identifier.
+    """
+    registry = dr.async_get(hass)
+    targets: list[str] = []
+    for did in device_ids:
+        device = registry.async_get(did)
+        if device is None:
+            continue
+        for domain, ident in device.identifiers:
+            if domain == DOMAIN and ident.startswith("target:"):
+                targets.append(ident.removeprefix("target:"))
+                break
+    return targets
+
+
 async def _handle_compile(call: ServiceCall) -> None:
     coord = _first_coordinator(call.hass)
-    targets = call.data["targets"]
+
+    # #37: resolve device-targeted calls to YAML filenames. The user
+    # picks devices from HA's device picker; we map them to filenames
+    # via the device registry's identifiers.
+    device_ids: list[str] = call.data.get("device_id", [])
+    if isinstance(device_ids, str):
+        device_ids = [device_ids]
+
+    targets: Any
+    if device_ids:
+        targets = _resolve_device_ids_to_targets(call.hass, device_ids)
+        if not targets:
+            raise HomeAssistantError(
+                "None of the selected devices are managed ESPHome Fleet targets"
+            )
+    elif "targets" in call.data:
+        targets = call.data["targets"]
+    else:
+        raise HomeAssistantError(
+            "Select at least one device or provide a 'targets' list"
+        )
+
     payload: dict[str, Any] = {"targets": targets}
     if (version := call.data.get("esphome_version")):
         payload["esphome_version"] = version
@@ -98,7 +135,26 @@ async def _handle_cancel(call: ServiceCall) -> None:
 
 async def _handle_validate(call: ServiceCall) -> None:
     coord = _first_coordinator(call.hass)
-    target = call.data["target"]
+
+    # #37: resolve device-targeted validate calls the same way.
+    device_ids: list[str] = call.data.get("device_id", [])
+    if isinstance(device_ids, str):
+        device_ids = [device_ids]
+
+    if device_ids:
+        targets = _resolve_device_ids_to_targets(call.hass, device_ids)
+        if not targets:
+            raise HomeAssistantError(
+                "None of the selected devices are managed ESPHome Fleet targets"
+            )
+        target = targets[0]
+    elif "target" in call.data:
+        target = call.data["target"]
+    else:
+        raise HomeAssistantError(
+            "Select a device or provide a 'target' filename"
+        )
+
     result = await coord.async_post_json("/ui/api/validate", {"target": target})
     job_id = (result or {}).get("job_id")
     _LOGGER.info("esphome_fleet.validate started for %s (job_id=%s)", target, job_id)
@@ -117,7 +173,6 @@ def async_register_services(hass: HomeAssistant) -> None:
 def async_unregister_services(hass: HomeAssistant) -> None:
     """Unregister services when the last config entry is removed."""
     if hass.data.get(DOMAIN):
-        # Another entry is still active — keep services registered.
         return
     for service in (SERVICE_COMPILE, SERVICE_CANCEL, SERVICE_VALIDATE):
         if hass.services.has_service(DOMAIN, service):

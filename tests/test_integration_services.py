@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -13,6 +13,7 @@ from esphome_fleet.services import (
     _handle_cancel,
     _handle_compile,
     _handle_validate,
+    _resolve_device_ids_to_targets,
 )
 
 
@@ -64,8 +65,6 @@ async def test_compile_service_accepts_string_all_targets() -> None:
     hass, post = _hass_with_coordinator()
     await _handle_compile(_FakeCall(hass, {"targets": "all"}))
     _, payload = post.call_args.args
-    # "all" should pass through untouched — server's bulk endpoint
-    # understands the sentinel.
     assert payload == {"targets": "all"}
 
 
@@ -99,3 +98,88 @@ def test_first_coordinator_raises_when_domain_missing() -> None:
     hass = SimpleNamespace(data={})
     with pytest.raises(HomeAssistantError):
         _first_coordinator(hass)
+
+
+async def test_compile_resolves_device_ids_to_targets() -> None:
+    """#37 — device-targeted compile resolves IDs to YAML filenames."""
+    hass, post = _hass_with_coordinator()
+
+    # Mock the device registry
+    fake_device = SimpleNamespace(
+        identifiers={(DOMAIN, "target:living-room.yaml")},
+    )
+    fake_registry = SimpleNamespace(
+        async_get=lambda did: fake_device if did == "dev-123" else None,
+    )
+
+    with patch("esphome_fleet.services.dr.async_get", return_value=fake_registry):
+        await _handle_compile(
+            _FakeCall(hass, {"device_id": ["dev-123"]})
+        )
+
+    _, payload = post.call_args.args
+    assert payload == {"targets": ["living-room.yaml"]}
+
+
+async def test_compile_device_targeting_rejects_non_target_devices() -> None:
+    """#37 — selecting a worker device (not a target) raises."""
+    from homeassistant.exceptions import HomeAssistantError
+
+    hass, _ = _hass_with_coordinator()
+
+    fake_device = SimpleNamespace(
+        identifiers={(DOMAIN, "worker:abc123")},
+    )
+    fake_registry = SimpleNamespace(
+        async_get=lambda did: fake_device,
+    )
+
+    with patch("esphome_fleet.services.dr.async_get", return_value=fake_registry):
+        with pytest.raises(HomeAssistantError, match="managed ESPHome Fleet targets"):
+            await _handle_compile(
+                _FakeCall(hass, {"device_id": ["dev-456"]})
+            )
+
+
+async def test_compile_raises_when_no_targets_and_no_devices() -> None:
+    """#38 — calling compile with empty data gives a clear error."""
+    from homeassistant.exceptions import HomeAssistantError
+
+    hass, _ = _hass_with_coordinator()
+    with pytest.raises(HomeAssistantError, match="Select at least one device"):
+        await _handle_compile(_FakeCall(hass, {}))
+
+
+async def test_validate_resolves_device_id() -> None:
+    """#37 — device-targeted validate."""
+    hass, post = _hass_with_coordinator()
+
+    fake_device = SimpleNamespace(
+        identifiers={(DOMAIN, "target:garage-door.yaml")},
+    )
+    fake_registry = SimpleNamespace(
+        async_get=lambda did: fake_device if did == "dev-789" else None,
+    )
+
+    with patch("esphome_fleet.services.dr.async_get", return_value=fake_registry):
+        await _handle_validate(
+            _FakeCall(hass, {"device_id": "dev-789"})
+        )
+
+    _, payload = post.call_args.args
+    assert payload == {"target": "garage-door.yaml"}
+
+
+def test_resolve_device_ids_extracts_target_filename() -> None:
+    """Unit test for the device-id → filename resolver."""
+    fake_device = SimpleNamespace(
+        identifiers={(DOMAIN, "target:foo.yaml")},
+    )
+    fake_registry = SimpleNamespace(
+        async_get=lambda did: fake_device if did == "d1" else None,
+    )
+
+    with patch("esphome_fleet.services.dr.async_get", return_value=fake_registry):
+        hass = SimpleNamespace()
+        result = _resolve_device_ids_to_targets(hass, ["d1", "d-unknown"])
+    assert result == ["foo.yaml"]

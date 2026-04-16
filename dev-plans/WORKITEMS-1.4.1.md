@@ -344,3 +344,11 @@ Let users compile a target **without** the OTA flash step, then download the res
 - [x] **#35** *(1.4.1-dev.49)* — Pinned ESPHome version: display "None" when unpinned.
   `TargetPinnedVersionSensor.native_value` returns `"None"` (was `"Auto"`) when the target has no `pinned_version` set. Matches the UI's Pin column copy.
 
+- [x] **#36** *(1.4.1-dev.50)* — Suppress duplicate zeroconf discovery under Supervisor.
+  Under Supervisor, both hassio and zeroconf fire for the same local add-on but resolve to different URLs (internal hostname vs. LAN IP). Zeroconf now aborts unconditionally when `hassio` is in `hass.config.components`. Non-Supervisor installs keep zeroconf. The previous per-flow progress check (#33) was a timing race — hassio and zeroconf fire before either creates an entry.
+
+- [x] **#37** *(1.4.1-dev.50)* — Device-targeted Compile + Validate actions.
+  `esphome_fleet.compile` and `esphome_fleet.validate` services now support HA's standard `target:` device picker — select one or more managed devices from the UI and click "Perform action". The handler resolves device-registry IDs to YAML filenames via the `("esphome_fleet", "target:<filename>")` identifier. The old explicit `targets` / `target` fields remain as a fallback for automations. Worker/hub devices are rejected with a clear error.
+
+- [x] **#38** *(1.4.1-dev.50)* — Compile action fix + tests.
+  Made `targets` optional in the schema (was `vol.Required`; broke the service call when using device targeting). Added 4 new pytest cases: device-targeted compile resolves IDs, non-target device rejection, empty-call error message, device-targeted validate. Total service tests: 8 → 12.

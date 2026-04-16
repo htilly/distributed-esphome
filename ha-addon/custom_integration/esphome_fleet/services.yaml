@@ -2,18 +2,28 @@
 #
 # Surfaces each service to HA's automation editor with field selectors so
 # users get autocomplete + validation instead of typing raw YAML.
+#
+# The compile service supports HA's device-targeting (#37): select one or
+# more ESPHome Fleet devices from the device picker → the handler resolves
+# them to YAML filenames automatically. The explicit `targets` field is
+# kept as a fallback for automations that know the filenames.
 
 compile:
   name: Compile
-  description: Enqueue one or more ESPHome firmware compiles on the ESPHome Fleet add-on.
+  description: >
+    Compile and OTA-flash firmware for one or more ESPHome devices
+    managed by the Fleet add-on.
+  target:
+    device:
+      integration: esphome_fleet
   fields:
     targets:
-      name: Targets
+      name: Targets (alternative)
       description: >
-        List of YAML filenames to compile (e.g. ['living-room.yaml']),
-        or the string "all" / "outdated" to batch-enqueue.
-      required: true
-      example: "['living-room.yaml']"
+        YAML filenames to compile — used when you don't want to pick
+        devices from the target selector above. List of filenames
+        (e.g. ['living-room.yaml']), or the keyword "all" / "outdated".
+        Leave empty when using the device picker.
       selector:
         object:
     esphome_version:
@@ -44,11 +54,14 @@ cancel:
 validate:
   name: Validate
   description: Run ESPHome config validation against a single target YAML.
+  target:
+    device:
+      integration: esphome_fleet
   fields:
     target:
-      name: Target
-      description: YAML filename to validate (e.g. living-room.yaml).
-      required: true
-      example: "living-room.yaml"
+      name: Target (alternative)
+      description: >
+        YAML filename to validate (e.g. living-room.yaml).
+        Leave empty when using the device picker.
       selector:
         text:

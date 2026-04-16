@@ -123,20 +123,16 @@ class EsphomeFleetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if not discovery_info.host or not discovery_info.port:
             return await self.async_step_user()
 
-        # #33: suppress the zeroconf "Discovered" notification when any
-        # Fleet entry is already configured OR a Supervisor-sourced flow
-        # is already in progress for the same local add-on. Hassio and
-        # zeroconf resolve the same server to different URLs
-        # (Supervisor internal hostname vs. LAN IP), so a unique-id
-        # check alone wouldn't dedupe. Users running multiple servers
-        # can still add additional ones manually via Settings.
+        # #36: when running under Supervisor, hassio discovery is the
+        # preferred path (single notification, internal hostname). Abort
+        # zeroconf unconditionally — both fire on every HA restart and
+        # resolve to different URLs (Supervisor internal hostname vs.
+        # LAN IP), so unique-id alone can't dedupe (#33). Non-Supervisor
+        # installs (standalone Docker) still get zeroconf normally.
+        if "hassio" in self.hass.config.components:
+            return self.async_abort(reason="already_configured")
         if self._async_current_entries():
             return self.async_abort(reason="already_configured")
-        for flow in self.hass.config_entries.flow.async_progress_by_handler(DOMAIN):
-            if flow.get("flow_id") == self.flow_id:
-                continue
-            if flow.get("context", {}).get("source") == config_entries.SOURCE_HASSIO:
-                return self.async_abort(reason="already_in_progress")
 
         base_url = f"http://{discovery_info.host}:{discovery_info.port}"
         await self.async_set_unique_id(base_url.lower())
