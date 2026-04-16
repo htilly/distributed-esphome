@@ -387,6 +387,20 @@ Let users compile a target **without** the OTA flash step, then download the res
 - [x] **#55** *(1.4.1-dev.55)* — Selected ESPHome version broadcast + hub sensors event-driven.
   `scanner.set_esphome_version` now broadcasts `targets_changed` on actual transitions so `SelectedEsphomeVersionSensor` updates in real time (previously only refreshed on the 30-s coordinator tick). The other hub sensors (Queue depth, Workers, Total slots, Total/Online/Outdated devices, Fleet version) were already event-driven via the coordinator-refresh path on any broadcast (#41).
 
+- [ ] **#57** — **All four CI workflows broken by SC.1 regex mishap.** Commit `eec0511` ("feat(SC.1, DL.1-5): SHA-pin GitHub Actions + diagnostic logging cluster") applied SHA pins across `ci.yml`, `compile-test.yml`, `publish-client.yml`, `publish-server.yml` but the replacement regex stripped newlines at comment-to-directive boundaries. Result: **25 malformed lines across 4 files** where two `uses:` directives (or one `uses:` plus a trailing `with:` / `name:`) got mashed onto a single line. Example:
+  > `- uses: actions/checkout@de0fac2e... # v6.0.2- uses: actions/setup-python@a309ff8... # v6.2.0with:`
+  
+  GitHub can't parse the YAML → all four workflows fail with `"jobs": [], "conclusion": "failure"` at workflow-load time. Zero jobs ran on any of them.
+  
+  **Why the SC.1 invariant didn't catch it:** the new `scripts/check-invariants.sh` rule asserts every `uses: <org>/<repo>@...` line contains a 40-char lowercase hex SHA. On these malformed lines, SHAs *are* present (both of them) — the rule just doesn't detect "two `uses:` directives on one line" or "this YAML doesn't parse as valid GitHub workflow syntax."
+  
+  **Fix:**
+  1. **Regenerate the 4 workflow files** with proper line breaks. The SHAs themselves look correct — just re-split the jammed lines.
+  2. **Strengthen the invariant**: replace (or augment) the current SHA-regex check with `actionlint` (the canonical GitHub workflow validator). If actionlint isn't trivial to wire up, a simpler grep guard that rejects any line containing two `uses:` tokens (`grep -Pn '^.*\buses:.*\buses:' .github/workflows/*.yml`) catches the specific class of mistake this commit made.
+  3. **Local preflight (optional belt-and-suspenders):** `scripts/check-invariants.sh` could parse each workflow with `python3 -c "import yaml; yaml.safe_load(open(f))"` to catch YAML-level corruption before CI rejects the workflow.
+  
+  Ship (1) + (2) in the same commit. (3) is bonus; overlaps with what actionlint already does.
+
 - [ ] **#56** — **PyObjC leak in server `requirements.lock` (second occurrence).** CI failed on `7b7c54c` ("fix: bugs #49, #51-55 + QS.27 polish + ESPHome 2026.4.0 bundled") with both the `audit` and `compile-server (*)` workflows erroring at `error: PyObjC requires macOS to build`. Root cause: when bundling ESPHome 2026.4.0, someone regenerated `ha-addon/server/requirements.lock` by running `pip-compile` directly on a Mac host instead of via the Docker-based `scripts/refresh-deps.sh`. `pyobjc-core==12.1` + `pyobjc-framework-cocoa==12.1` leaked in as macOS-only transitive deps (pulled in by zeroconf's platform-conditional deps when resolved on Darwin). Working tree has been re-generated cleanly; fix just needs to ship. **This is the same regression class as 1.3.1-dev.9**, which is exactly what `refresh-deps.sh`'s header comment warns about:
   > CRITICAL: lockfiles must be generated on the same platform the Dockerfiles install on (linux/amd64), otherwise platform-conditional transitive deps leak in.
   
