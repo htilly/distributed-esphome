@@ -173,7 +173,9 @@ The safest fix is to remove the auto-update mechanism entirely and rely on Docke
 
 ### F-03 — UI API Has No Authentication; Relies Entirely on HA Ingress
 
-**Severity:** MEDIUM (HIGH if port 8765 is directly reachable)
+**Status:** FIXED in 1.4.1 via opt-in `require_ha_auth` add-on option (AU.3). Default remains `false` to preserve backwards compatibility; flip to `true` in 1.5 once the path is proven. With `require_ha_auth: true` set, direct-port `/ui/api/*` requests that don't carry a valid HA Bearer token are rejected with 401 + `WWW-Authenticate: Bearer realm="ESPHome Fleet"`. Ingress-tunneled access is unaffected (Supervisor adds the `X-Ingress-Path` header). See AU.1–AU.6 in WORKITEMS-1.4.1.md.
+
+**Severity:** MEDIUM (HIGH if port 8765 is directly reachable) — pre-fix
 
 **Description:**
 
@@ -682,7 +684,7 @@ Status as of 1.4.1-dev.33 (last reviewed 2026-04-15 against current code).
 |------|------------------------------------------------------|----------|--------|-------|
 | F-01 | Auth token exposed to browser via server-info API    | High     | WONTFIX | Required for the Connect Worker modal's `docker run` command UX. Risk accepted: the token lives behind HA Ingress authentication, same trust boundary as the rest of HA. |
 | F-02 | Worker auto-update executes arbitrary server code    | High     | PARTIAL (1.3.0) | LIB.0/LIB.1 added `IMAGE_VERSION` / `MIN_IMAGE_VERSION` gating so the server refuses source-code auto-updates to workers running a stale Docker image. The arbitrary-code path itself remains; no signature verification. Full fix (signing or removal) still OPEN. |
-| F-03 | UI API unauthenticated if port 8765 is directly accessible | Medium | WONTFIX | By design — HA Ingress is the only intended access path. Documented in README. |
+| F-03 | UI API unauthenticated if port 8765 is directly accessible | Medium | FIXED (1.4.1, opt-in `require_ha_auth`) | AU.1–AU.6. `auth_api: true` + HA Bearer validation via Supervisor `/auth`. Opt-in default for 1.4.1 to avoid breaking existing setups; flip to mandatory in 1.5. |
 | F-04 | `secrets.yaml` included in every build bundle        | Medium   | WONTFIX | Required for ESPHome's `!secret` resolution on the worker. Workers are authenticated and trusted machines in the stated threat model. |
 | F-05 | Worker-server communication is plaintext HTTP        | Medium   | WONTFIX | By design for the home-network threat model. Users with remote workers across segments can front the server with their own reverse proxy (documented). |
 | F-06 | Supervisor IP bypass grants unauthenticated API access | Low    | PARTIAL (1.3.1) | 1.3.0: PY.4 moved the hardcoded `172.30.32.2` into `constants.HA_SUPERVISOR_IP`. 1.3.1 C.2: `_normalize_peer_ip()` strips IPv6 zone IDs, unwraps IPv4-mapped IPv6, handles `peername=None`. Bug #3 added structured 401 reasons + peer IP logging. The IP-based trust model itself remains. |

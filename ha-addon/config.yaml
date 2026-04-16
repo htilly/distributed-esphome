@@ -1,5 +1,5 @@
 name: "ESPHome Fleet"
-version: "1.4.1-dev.56"
+version: "1.4.1-dev.57"
 slug: "esphome_dist_server"
 description: "Manage fleets of ESPHome devices: distributed compilation, per-device version pinning, scheduled OTA upgrades, and a unified web UI"
 url: "https://github.com/weirded/distributed-esphome"
@@ -34,6 +34,12 @@ host_network: true
 hassio_api: true
 # HA Core REST API access — needed to read entity states (device connectivity)
 homeassistant_api: true
+# AU.1: Supervisor /auth endpoint — lets the add-on validate HA user
+# credentials (Authorization: Bearer <HA long-lived access token>) on
+# direct-port requests so mutations can be attributed to the HA user,
+# and direct-port access can be locked down via the `require_ha_auth`
+# add-on option (AU.3).
+auth_api: true
 
 # #26: declare that we POST to Supervisor's /discovery with service
 # "esphome_fleet". Without this, Supervisor rejects the POST with 403
@@ -64,9 +70,13 @@ options:
   ota_timeout: 120
   worker_offline_threshold: 30
   device_poll_interval: 60
+  require_ha_auth: false
 schema:
   token: password
   job_timeout: int
   ota_timeout: int
   worker_offline_threshold: int
   device_poll_interval: int
+  # AU.3: when true, direct-port /ui/api/* calls must carry a valid
+  # HA Bearer token. Ingress-tunneled access is unaffected.
+  require_ha_auth: bool

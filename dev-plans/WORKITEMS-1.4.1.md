@@ -149,23 +149,12 @@ Currently, `/ui/api/*` is unauthenticated by design — we trust HA Ingress (F-0
 
 Scope: additive. Ingress-trusted access keeps working unchanged. Direct-port access gains an auth requirement. Action attribution surfaces in the server log + queue entries. **No new login UI** — for Ingress, the user is already logged into HA; for direct-port, we return 401 + a clean `WWW-Authenticate` challenge and document that direct-port clients must send `Authorization: Bearer <HA-long-lived-access-token>`.
 
-- [ ] **AU.1 Enable `auth_api: true`** — add to `ha-addon/config.yaml` alongside the existing `homeassistant_api: true`. Document in `DOCS.md` what this grants us (access to Supervisor's `/auth` for HA user validation; no new capabilities on HA's side). **Not a PY-4 trigger** (config.yaml, not Dockerfile).
-- [ ] **AU.2 `ha_auth_middleware` helper** — new aiohttp middleware in `main.py` that, for `/ui/api/*` requests, resolves the requesting HA user via one of three paths (in order):
-  1. **HA Ingress trust** (existing): `X-Ingress-Path` header present → trust, extract user from `X-Remote-User-Name` / `X-Remote-User-Id` headers the Supervisor injects.
-  2. **Bearer token** (new): `Authorization: Bearer <token>` → POST to `http://supervisor/auth` with the token; if Supervisor returns 200, extract the user info from the response.
-  3. **Neither** → 401 with `WWW-Authenticate: Bearer realm="ESPHome Fleet"`.
-  
-  The middleware attaches `request["ha_user"] = {name, id, is_admin}` (or `None` for the legacy Ingress-without-user case) for downstream handlers. Behavior change is gated behind a `require_ha_auth: bool` add-on option (default `false` in 1.4.1 to avoid breaking existing setups; flip to `true` in 1.5 once we've verified it's stable in the wild).
-- [ ] **AU.3 Close F-03 when `require_ha_auth` is true** — when the add-on option is enabled, the middleware rejects direct-port requests that don't carry a valid Bearer token. Ingress-tunneled requests continue to work because Supervisor adds the `X-Ingress-Path` header. Update `SECURITY_AUDIT.md` F-03 from WONTFIX to `FIXED (1.4.1, opt-in via require_ha_auth)`.
-- [ ] **AU.4 Attribute mutations to the HA user** — `/ui/api/compile`, `/ui/api/queue/cancel`, `/ui/api/queue/retry`, `POST /ui/api/targets/{f}/*` (save content, rename, delete, pin, schedule, tags, meta): if `request["ha_user"]` is set, log the user name at INFO on the mutation log line. Example: `"Compile run X enqueued by stefan: 1 job"`. Non-goal: persisting user identity on queue entries — just log it for now; fold into a proper audit log if users ask.
-- ~~**AU.5**~~ REMOVED — Admin-only gating for destructive actions. Struck: this is a home-lab tool used by 1-2 people; role-based access control adds complexity without value for the target audience. If a multi-user deployment ever needs it, revisit then.
-- [ ] **AU.6 Tests + docs** — `tests/test_auth.py` gains:
-  - An Ingress-path-present test (current 401 pattern still works when `require_ha_auth=false`)
-  - A valid-Bearer test that mocks Supervisor `/auth` returning 200 with `{name, id, group_ids}` and asserts the handler gets the resolved user attached
-  - An invalid-Bearer test that mocks Supervisor returning 401 and asserts a clean 401 with `WWW-Authenticate` header (no stack trace in response)
-  - A `require_ha_auth=true` + no-token test that asserts direct-port requests are rejected
-  
-  `DOCS.md` gets a "Direct-port API access" section explaining how to get an HA long-lived access token and use it with curl/automation.
+- [x] **AU.1** *(1.4.1-dev.57)* — `auth_api: true` added to `ha-addon/config.yaml`. Gives the add-on access to Supervisor's `/auth` endpoint so it can validate HA-user tokens on direct-port calls. Config-only change; no PY-4 trigger.
+- [x] **AU.2** *(1.4.1-dev.57)* — `ha_auth_middleware` in new `ha-addon/server/ha_auth.py`, wired after the worker-tier `auth_middleware`. Three paths (in order): (1) Supervisor peer trust — request from `172.30.32.2` gets `request["ha_user"]` from `X-Remote-User-Name`/`X-Remote-User-Id` headers; (2) Bearer token — `POST http://supervisor/auth` with the token, parse the response to `{name, id, is_admin}`; (3) neither → pass through (legacy) OR 401 + `WWW-Authenticate: Bearer realm="ESPHome Fleet"` when `require_ha_auth` is on. The bearer path uses the add-on's own `SUPERVISOR_TOKEN` to authenticate to Supervisor; the user's token is the body payload.
+- [x] **AU.3** *(1.4.1-dev.57)* — `require_ha_auth: bool` add-on option (default `false`), plumbed through `AppConfig`. When enabled, direct-port `/ui/api/*` calls must carry a valid HA Bearer. Ingress-tunneled requests continue to work because `X-Ingress-Path` arrives via the trusted Supervisor peer. `SECURITY_AUDIT.md` F-03 updated from WONTFIX to FIXED.
+- [x] **AU.4** *(1.4.1-dev.57)* — Mutation attribution. New `_who(request)` helper in `ui_api.py` appends `" by <name>"` to mutation log lines when `request["ha_user"]` was resolved. Applied to: compile enqueue, cancel, pin, unpin, meta update, schedule set/remove/toggle/once, save content, delete, rename — 11 handlers in total. Unauthenticated requests continue to log unchanged (no trailing "by …").
+- ~~**AU.5**~~ REMOVED — Admin-only gating for destructive actions. Struck: this is a home-lab tool used by 1-2 people; role-based access control adds complexity without value for the target audience.
+- [x] **AU.6** *(1.4.1-dev.57)* — 11 new tests in `tests/test_ha_auth.py`: Supervisor-peer trust (w/ and w/o user headers), bearer-valid / bearer-invalid paths, `require_ha_auth=true` 401s, non-`/ui/api/` bypass, Supervisor-peer precedence over bearer, `_validate_bearer_with_supervisor` returns None without `SUPERVISOR_TOKEN`, parses user from 200 response, and returns None on non-200. `DOCS.md` gains a "Direct-Port API Access" section with the long-lived-access-token + `require_ha_auth` + `curl` walkthrough.
 
 ## Server Performance
 
@@ -405,3 +394,12 @@ Let users compile a target **without** the OTA flash step, then download the res
 
 - [x] **#55** *(1.4.1-dev.55)* — Selected ESPHome version broadcast + hub sensors event-driven.
   `scanner.set_esphome_version` now broadcasts `targets_changed` on actual transitions so `SelectedEsphomeVersionSensor` updates in real time (previously only refreshed on the 30-s coordinator tick). The other hub sensors (Queue depth, Workers, Total slots, Total/Online/Outdated devices, Fleet version) were already event-driven via the coordinator-refresh path on any broadcast (#41).
+
+- [ ] **#56** — **PyObjC leak in server `requirements.lock` (second occurrence).** CI failed on `7b7c54c` ("fix: bugs #49, #51-55 + QS.27 polish + ESPHome 2026.4.0 bundled") with both the `audit` and `compile-server (*)` workflows erroring at `error: PyObjC requires macOS to build`. Root cause: when bundling ESPHome 2026.4.0, someone regenerated `ha-addon/server/requirements.lock` by running `pip-compile` directly on a Mac host instead of via the Docker-based `scripts/refresh-deps.sh`. `pyobjc-core==12.1` + `pyobjc-framework-cocoa==12.1` leaked in as macOS-only transitive deps (pulled in by zeroconf's platform-conditional deps when resolved on Darwin). Working tree has been re-generated cleanly; fix just needs to ship. **This is the same regression class as 1.3.1-dev.9**, which is exactly what `refresh-deps.sh`'s header comment warns about:
+  > CRITICAL: lockfiles must be generated on the same platform the Dockerfiles install on (linux/amd64), otherwise platform-conditional transitive deps leak in.
+  
+  Follow-up: add a guardrail to prevent a third occurrence. Two options:
+  1. **CI check**: `scripts/check-invariants.sh` greps `ha-addon/server/requirements.lock` for any `pyobjc` / `darwin` / `macos` markers and fails if found. One line; closes the simple case.
+  2. **Harder to bypass**: make `pip-compile` invocation itself refuse to run outside Docker. `refresh-deps.sh` already uses `docker run --platform linux/amd64`, but there's nothing stopping someone from running `pip-compile` directly. A `scripts/pip-compile-wrapper.sh` that just errors with "use refresh-deps.sh" is low-value (doesn't prevent IDE integrations); option 1 is better.
+  
+  Ship option 1 in the same commit that fixes the lockfile.

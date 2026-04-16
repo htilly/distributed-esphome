@@ -49,6 +49,11 @@ class AppConfig:
     device_poll_interval: int = 60
     config_dir: str = "/config/esphome"
     port: int = 8765
+    # AU.3: when true, direct-port /ui/api/* calls must carry a valid
+    # HA Bearer token. Ingress-tunneled access is unaffected. Default
+    # false in 1.4.1 so existing setups keep working; flip to true in
+    # 1.5 once the path is proven in the wild.
+    require_ha_auth: bool = False
 
     # Set of keys we recognise from options.json. Anything else gets logged
     # at WARNING on startup so a typo (``worker_ofline_threshold``) is
@@ -60,6 +65,7 @@ class AppConfig:
         "worker_offline_threshold",
         "client_offline_threshold",  # legacy alias
         "device_poll_interval",
+        "require_ha_auth",
     })
 
     @classmethod
@@ -148,6 +154,17 @@ class AppConfig:
             env = os.environ.get("WORKER_OFFLINE_THRESHOLD") or os.environ.get("CLIENT_OFFLINE_THRESHOLD")
             threshold = int(env) if env is not None else threshold_default
 
+        # AU.3: require_ha_auth — bool, defaults to False. options.json
+        # may send either a bool or a string like "true"/"false".
+        raw_require_ha_auth = file_opts.get(
+            "require_ha_auth",
+            os.environ.get("REQUIRE_HA_AUTH", ""),
+        )
+        if isinstance(raw_require_ha_auth, bool):
+            require_ha_auth = raw_require_ha_auth
+        else:
+            require_ha_auth = str(raw_require_ha_auth).strip().lower() in ("1", "true", "yes", "on")
+
         return cls(
             token=token,
             job_timeout=_val("job_timeout", "JOB_TIMEOUT", cls.job_timeout),
@@ -156,4 +173,5 @@ class AppConfig:
             device_poll_interval=_val("device_poll_interval", "DEVICE_POLL_INTERVAL", cls.device_poll_interval),
             config_dir=os.environ.get("ESPHOME_CONFIG_DIR", cls.config_dir),
             port=int(os.environ.get("PORT", str(cls.port))),
+            require_ha_auth=require_ha_auth,
         )

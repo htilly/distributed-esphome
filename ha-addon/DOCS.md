@@ -34,6 +34,25 @@ Configuration options (token, timeouts, polling intervals) are available in the 
 
 **ESPHome version errors** — check the build log. Pre-install a known-good version with `ESPHOME_SEED_VERSION` on the worker.
 
+## Direct-Port API Access
+
+The add-on's web UI lives behind Home Assistant Ingress and is authenticated by HA itself — no extra step needed to open it from the HA sidebar. Workers connect over the direct port (`:8765`) with a shared `token` from the add-on options.
+
+**For tooling / automation that wants to call `/ui/api/*` directly from *outside* HA** (shell scripts, CI, a bash prompt), the 1.4.1 add-on can validate Home Assistant user credentials via Supervisor's `/auth` endpoint. Turn it on:
+
+1. Add-on **Configuration** → enable `require_ha_auth`.
+2. In HA, create a **Long-Lived Access Token** (Profile → Security → Long-Lived Access Tokens → Create Token).
+3. Send the token as a Bearer header on every request:
+
+   ```bash
+   curl -H "Authorization: Bearer $HA_LLAT" \
+        http://homeassistant.local:8765/ui/api/targets
+   ```
+
+Requests without a valid token receive **401 Unauthorized** plus `WWW-Authenticate: Bearer realm="ESPHome Fleet"`. Ingress-tunneled requests are unaffected — HA already authenticated the user before forwarding.
+
+Every mutation (compile, cancel, pin, schedule, rename, delete, save) logs the authenticated user's HA username, so operators can trace who enqueued what.
+
 ## Verifying Image Signatures
 
 Both the server and client Docker images on GHCR are signed with [cosign](https://docs.sigstore.dev/) using GitHub OIDC keyless signing — no long-lived keys are involved, the signature is anchored to the GitHub Actions workflow's identity. You can verify what you pull matches a build from this repo:

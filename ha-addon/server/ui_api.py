@@ -43,6 +43,21 @@ def _broadcast_ws(event_type: str, **payload: object) -> None:
     except Exception:
         logger.debug("event_bus broadcast failed", exc_info=True)
 
+
+def _who(request: web.Request) -> str:
+    """AU.4: attribution suffix for mutation log lines.
+
+    Returns ``" by <name>"`` when the ha_auth_middleware resolved an HA
+    user on this request, empty string otherwise. Used to tack a "by
+    stefan" onto log lines like ``Pinned foo.yaml to 2026.4.0`` so
+    operators can trace who enqueued what.
+    """
+    user = request.get("ha_user")
+    if not user:
+        return ""
+    name = user.get("name")
+    return f" by {name}" if name else ""
+
 # Module-level cache: populated once per server lifetime (components don't
 # change until ESPHome is upgraded, which restarts the add-on).
 _esphome_components_cache: list[str] | None = None
@@ -893,7 +908,7 @@ async def pin_target_version(request: web.Request) -> web.Response:
     meta = read_device_meta(cfg.config_dir, filename)
     meta["pin_version"] = version
     write_device_meta(cfg.config_dir, filename, meta)
-    logger.info("Pinned %s to version %s", filename, version)
+    logger.info("Pinned %s to version %s%s", filename, version, _who(request))
     return web.json_response({"ok": True, "pinned_version": version})
 
 
@@ -909,7 +924,7 @@ async def unpin_target_version(request: web.Request) -> web.Response:
     meta = read_device_meta(cfg.config_dir, filename)
     meta.pop("pin_version", None)
     write_device_meta(cfg.config_dir, filename, meta)
-    logger.info("Unpinned %s", filename)
+    logger.info("Unpinned %s%s", filename, _who(request))
     return web.json_response({"ok": True})
 
 @routes.post("/ui/api/targets/{filename}/meta")
@@ -939,7 +954,7 @@ async def update_target_meta(request: web.Request) -> web.Response:
         else:
             meta[key] = value
     write_device_meta(cfg.config_dir, filename, meta)
-    logger.info("Updated metadata for %s: %s", filename, list(body.keys()))
+    logger.info("Updated metadata for %s: %s%s", filename, list(body.keys()), _who(request))
     return web.json_response({"ok": True})
 
 
@@ -999,7 +1014,7 @@ async def set_target_schedule(request: web.Request) -> web.Response:
     write_device_meta(cfg.config_dir, filename, meta)
     import scheduler as _sched  # noqa: PLC0415
     _sched.sync_target(filename)
-    logger.info("Schedule set for %s: %s (tz=%s)", filename, cron_expr, tz or "UTC")
+    logger.info("Schedule set for %s: %s (tz=%s)%s", filename, cron_expr, tz or "UTC", _who(request))
     return web.json_response({
         "ok": True,
         "schedule": cron_expr,
@@ -1033,7 +1048,7 @@ async def delete_target_schedule(request: web.Request) -> web.Response:
     write_device_meta(cfg.config_dir, filename, meta)
     import scheduler as _sched  # noqa: PLC0415
     _sched.sync_target(filename)
-    logger.info("Schedule removed for %s", filename)
+    logger.info("Schedule removed for %s%s", filename, _who(request))
     return web.json_response({"ok": True})
 
 
@@ -1053,7 +1068,7 @@ async def toggle_target_schedule(request: web.Request) -> web.Response:
     write_device_meta(cfg.config_dir, filename, meta)
     import scheduler as _sched  # noqa: PLC0415
     _sched.sync_target(filename)
-    logger.info("Schedule toggled for %s: enabled=%s", filename, meta["schedule_enabled"])
+    logger.info("Schedule toggled for %s: enabled=%s%s", filename, meta["schedule_enabled"], _who(request))
     return web.json_response({"ok": True, "schedule_enabled": meta["schedule_enabled"]})
 
 
@@ -1099,7 +1114,7 @@ async def set_target_schedule_once(request: web.Request) -> web.Response:
     write_device_meta(cfg.config_dir, filename, meta)
     import scheduler as _sched  # noqa: PLC0415
     _sched.sync_target(filename)
-    logger.info("One-time schedule set for %s at %s", filename, dt_str)
+    logger.info("One-time schedule set for %s at %s%s", filename, dt_str, _who(request))
     return web.json_response({"ok": True, "schedule_once": dt_str})
 
 
@@ -1203,10 +1218,11 @@ async def start_compile(request: web.Request) -> web.Response:
             enqueued += 1
 
     logger.info(
-        "Compile run %s: enqueued %d jobs (version=%s%s%s)",
+        "Compile run %s: enqueued %d jobs (version=%s%s%s)%s",
         run_id, enqueued, job_version,
         " (override)" if version_override else "",
         f" pinned={pinned_client_id}" if pinned_client_id else "",
+        _who(request),
     )
     return web.json_response({"run_id": run_id, "enqueued": enqueued})
 
@@ -1273,7 +1289,7 @@ async def save_target_content(request: web.Request) -> web.Response:
     # Invalidate config cache so changes are picked up immediately
     from scanner import _config_cache  # noqa: PLC0415
     _config_cache.pop(filename, None)
-    logger.info("Saved %s (%d bytes)", filename, len(content))
+    logger.info("Saved %s (%d bytes)%s", filename, len(content), _who(request))
     _broadcast_ws("targets_changed")
     return web.json_response({"ok": True})
 
@@ -1397,7 +1413,7 @@ async def delete_target(request: web.Request) -> web.Response:
     from scanner import _config_cache  # noqa: PLC0415
     _config_cache.pop(filename, None)
 
-    logger.info("Deleted config %s (archive=%s)", filename, archive)
+    logger.info("Deleted config %s (archive=%s)%s", filename, archive, _who(request))
     _broadcast_ws("targets_changed")
     return web.json_response({"ok": True})
 
@@ -1550,7 +1566,7 @@ async def rename_target(request: web.Request) -> web.Response:
         name_map, enc_keys, addr_overrides, addr_sources = build_name_to_target_map(cfg.config_dir, targets)
         device_poller.update_compile_targets(targets, name_map, enc_keys, addr_overrides, addr_sources)
 
-    logger.info("Renamed config %s → %s", filename, new_filename)
+    logger.info("Renamed config %s → %s%s", filename, new_filename, _who(request))
     _broadcast_ws("targets_changed")
 
     queue = request.app["queue"]
@@ -2028,4 +2044,5 @@ async def cancel_jobs(request: web.Request) -> web.Response:
 
     queue = request.app["queue"]
     cancelled = await queue.cancel(job_ids)
+    logger.info("Cancelled %d of %d job(s)%s", cancelled, len(job_ids), _who(request))
     return web.json_response({"cancelled": cancelled})

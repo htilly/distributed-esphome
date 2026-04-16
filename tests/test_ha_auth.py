@@ -1,0 +1,211 @@
+"""HA user auth middleware tests (AU.6)."""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, patch
+
+from aiohttp import web
+from aiohttp.test_utils import make_mocked_request
+
+from app_config import AppConfig
+from constants import HA_SUPERVISOR_IP
+from ha_auth import _validate_bearer_with_supervisor, ha_auth_middleware
+
+
+def _make_app(require_ha_auth: bool = False) -> web.Application:
+    app = web.Application()
+    app["config"] = AppConfig(require_ha_auth=require_ha_auth)
+    return app
+
+
+async def _run_middleware(
+    *,
+    path: str = "/ui/api/targets",
+    peer_ip: str | None = None,
+    auth: str | None = None,
+    user_headers: dict | None = None,
+    require_ha_auth: bool = False,
+    supervisor_valid: object = None,
+) -> web.Response:
+    """Execute the middleware against a constructed request.
+
+    *supervisor_valid*: ``None`` = bearer path untouched; dict = validator
+    returns that user; ``"invalid"`` = validator returns ``None``.
+    """
+    hdrs = {}
+    if auth:
+        hdrs["Authorization"] = auth
+    if user_headers:
+        hdrs.update(user_headers)
+
+    class _T:
+        def get_extra_info(self, k):
+            if k == "peername" and peer_ip:
+                return (peer_ip, 1)
+            return None
+
+    app = _make_app(require_ha_auth=require_ha_auth)
+    request = make_mocked_request(
+        "GET", path, headers=hdrs, transport=_T(), app=app,
+    )
+
+    async def handler(req):
+        return web.json_response({"ha_user": req.get("ha_user")})
+
+    if supervisor_valid is None:
+        return await ha_auth_middleware(request, handler)
+    mock = AsyncMock(
+        return_value=None if supervisor_valid == "invalid" else supervisor_valid
+    )
+    with patch("ha_auth._validate_bearer_with_supervisor", mock):
+        return await ha_auth_middleware(request, handler)
+
+
+# --- ha_auth_middleware ---
+
+
+async def test_supervisor_peer_trusted_without_auth_header() -> None:
+    """Path 1: Supervisor IP peer trusted, user extracted from headers."""
+    resp = await _run_middleware(
+        peer_ip=HA_SUPERVISOR_IP,
+        user_headers={"X-Remote-User-Name": "stefan", "X-Remote-User-Id": "abc"},
+    )
+    assert resp.status == 200
+    body = resp.body.decode() if resp.body else ""
+    assert '"stefan"' in body
+    assert '"abc"' in body
+
+
+async def test_supervisor_peer_without_user_headers_passes_through() -> None:
+    """Path 1 fallback: trusted peer, no user headers → still allowed, no ha_user."""
+    resp = await _run_middleware(peer_ip=HA_SUPERVISOR_IP)
+    assert resp.status == 200
+    # No user headers means request["ha_user"] wasn't set.
+    body = resp.body.decode() if resp.body else ""
+    assert '"ha_user": null' in body
+
+
+async def test_bearer_token_validated_against_supervisor() -> None:
+    """Path 2: valid Bearer → user attached from Supervisor response."""
+    resp = await _run_middleware(
+        peer_ip="10.0.0.5",
+        auth="Bearer good-token",
+        supervisor_valid={"name": "stefan", "id": "abc", "is_admin": True},
+    )
+    assert resp.status == 200
+    body = resp.body.decode() if resp.body else ""
+    assert '"stefan"' in body
+    assert '"is_admin": true' in body
+
+
+async def test_invalid_bearer_falls_through_without_require_ha_auth() -> None:
+    """Path 3 with require_ha_auth=false: unauthenticated request allowed."""
+    resp = await _run_middleware(
+        peer_ip="10.0.0.5",
+        auth="Bearer bad-token",
+        supervisor_valid="invalid",
+        require_ha_auth=False,
+    )
+    assert resp.status == 200
+    body = resp.body.decode() if resp.body else ""
+    assert '"ha_user": null' in body
+
+
+async def test_no_auth_and_require_ha_auth_returns_401() -> None:
+    """AU.3: with require_ha_auth=true, no auth → 401 + WWW-Authenticate."""
+    resp = await _run_middleware(
+        peer_ip="10.0.0.5",
+        require_ha_auth=True,
+    )
+    assert resp.status == 401
+    assert resp.headers.get("WWW-Authenticate", "").startswith("Bearer")
+
+
+async def test_invalid_bearer_with_require_ha_auth_returns_401() -> None:
+    """AU.3: invalid Bearer + require_ha_auth=true → 401."""
+    resp = await _run_middleware(
+        peer_ip="10.0.0.5",
+        auth="Bearer bad",
+        supervisor_valid="invalid",
+        require_ha_auth=True,
+    )
+    assert resp.status == 401
+
+
+async def test_non_ui_api_path_bypasses_middleware() -> None:
+    """The middleware only gates /ui/api/* paths."""
+    resp = await _run_middleware(
+        path="/api/v1/workers/heartbeat",
+        require_ha_auth=True,
+    )
+    assert resp.status == 200
+
+
+async def test_supervisor_peer_takes_precedence_over_bearer() -> None:
+    """When the request is from Supervisor, we don't hit the bearer path."""
+    # supervisor_valid set to invalid would 401 the bearer path — but we
+    # should short-circuit on the trusted peer IP check BEFORE it runs.
+    resp = await _run_middleware(
+        peer_ip=HA_SUPERVISOR_IP,
+        auth="Bearer anything",
+        supervisor_valid="invalid",
+        require_ha_auth=True,
+    )
+    assert resp.status == 200
+
+
+# --- _validate_bearer_with_supervisor ---
+
+
+async def test_validate_bearer_returns_none_without_supervisor_token(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
+    assert await _validate_bearer_with_supervisor("user-token") is None
+
+
+async def test_validate_bearer_parses_supervisor_response(monkeypatch) -> None:
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "super-token")
+
+    class _Resp:
+        status = 200
+        async def json(self):
+            return {"name": "stefan", "id": "abc", "is_admin": True}
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        def post(self, *args, **kwargs):
+            return _Resp()
+
+    with patch("ha_auth.aiohttp.ClientSession", return_value=_Session()):
+        user = await _validate_bearer_with_supervisor("user-token")
+    assert user == {"name": "stefan", "id": "abc", "is_admin": True}
+
+
+async def test_validate_bearer_returns_none_on_non_200(monkeypatch) -> None:
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "super-token")
+
+    class _Resp:
+        status = 401
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        def post(self, *args, **kwargs):
+            return _Resp()
+
+    with patch("ha_auth.aiohttp.ClientSession", return_value=_Session()):
+        assert await _validate_bearer_with_supervisor("user-token") is None

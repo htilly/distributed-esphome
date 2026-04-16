@@ -1017,9 +1017,21 @@ def create_app() -> web.Application:
     # cyd-office-info hit this limit at 1.05 MB with the 1 MB default.
     # 16 MB is well above any plausible ESP firmware size.
     FIRMWARE_MAX_SIZE = 16 * 1024 * 1024
+    # AU.2: ha_auth_middleware attaches request["ha_user"] for /ui/api/*
+    # and (when require_ha_auth is on) 401s unauthenticated direct-port
+    # calls. Kept separate from the worker-tier auth_middleware so the
+    # two auth contracts don't collide — both run, each is a no-op for
+    # paths outside its scope.
+    from ha_auth import ha_auth_middleware  # noqa: PLC0415
     app = web.Application(
         client_max_size=FIRMWARE_MAX_SIZE,
-        middlewares=[compression_middleware, security_headers_middleware, version_header_middleware, auth_middleware],
+        middlewares=[
+            compression_middleware,
+            security_headers_middleware,
+            version_header_middleware,
+            auth_middleware,
+            ha_auth_middleware,
+        ],
     )
     app["config"] = cfg
     app["queue"] = queue
