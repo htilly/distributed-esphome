@@ -173,7 +173,7 @@ The safest fix is to remove the auto-update mechanism entirely and rely on Docke
 
 ### F-03 — UI API Has No Authentication; Relies Entirely on HA Ingress
 
-**Status:** FIXED in 1.4.1 via opt-in `require_ha_auth` add-on option (AU.3). Default remains `false` to preserve backwards compatibility; flip to `true` in 1.5 once the path is proven. With `require_ha_auth: true` set, direct-port `/ui/api/*` requests that don't carry a valid HA Bearer token are rejected with 401 + `WWW-Authenticate: Bearer realm="ESPHome Fleet"`. Ingress-tunneled access is unaffected (Supervisor adds the `X-Ingress-Path` header). See AU.1–AU.6 in WORKITEMS-1.4.1.md.
+**Status:** FIXED in 1.5.0 via opt-in `require_ha_auth` add-on option (AU.3). Default remains `false` to preserve backwards compatibility; flip to `true` in a later release once the path is proven. With `require_ha_auth: true` set, direct-port `/ui/api/*` requests that don't carry a valid HA Bearer token are rejected with 401 + `WWW-Authenticate: Bearer realm="ESPHome Fleet"`. Ingress-tunneled access is unaffected (Supervisor adds the `X-Ingress-Path` header). See AU.1–AU.6 in WORKITEMS-1.5.md.
 
 **Severity:** MEDIUM (HIGH if port 8765 is directly reachable) — pre-fix
 

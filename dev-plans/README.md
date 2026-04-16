@@ -4,10 +4,10 @@ Roadmap and bug tracking for ESPHome Fleet, organized by release.
 
 ## Active files
 
-- **[WORKITEMS-1.4.1.md](WORKITEMS-1.4.1.md)** — **Current release.** UI quality sprint (DevicesTab split, shadcn context menu, accessibility, API cleanup, e2e coverage)
-- **[WORKITEMS-1.5.md](WORKITEMS-1.5.md)** — Planned: Editor & config management (file tree, config diff, git integration)
-- **[WORKITEMS-1.6.md](WORKITEMS-1.6.md)** — Planned: LLM-powered assistance (AI editor, release breaking-change analyzer)
-- **[WORKITEMS-1.7.md](WORKITEMS-1.7.md)** — Planned: Dashboard parity (create device, web serial, log tail, adoption, remote compilation)
+- **[WORKITEMS-1.5.md](WORKITEMS-1.5.md)** — **Current release.** UI quality + rebrand to ESPHome Fleet + HA native integration + ESPHome unbundling (formerly in-flight as 1.4.1, renamed per #70)
+- **[WORKITEMS-1.6.md](WORKITEMS-1.6.md)** — Planned: Editor & config management (file tree, config diff, git integration)
+- **[WORKITEMS-1.7.md](WORKITEMS-1.7.md)** — Planned: LLM-powered assistance (AI editor, release breaking-change analyzer)
+- **[WORKITEMS-1.8.md](WORKITEMS-1.8.md)** — Planned: Dashboard parity (create device, web serial, log tail, adoption, remote compilation)
 - **[WORKITEMS-future.md](WORKITEMS-future.md)** — Backlog without committed scope
 - **[SECURITY_AUDIT.md](SECURITY_AUDIT.md)** — Security audit findings (refer when making security-relevant changes)
 - **[RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)** — Step-by-step release process
