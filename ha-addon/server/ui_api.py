@@ -154,6 +154,47 @@ async def get_esphome_schema(request: web.Request) -> web.Response:
     return web.json_response({"components": _esphome_components_cache})
 
 
+@routes.get("/ui/api/settings")
+async def get_settings_handler(request: web.Request) -> web.Response:
+    """SP.3: return the current in-app Settings blob.
+
+    Editable via :func:`patch_settings_handler`. Distinct from the
+    Supervisor-owned ``options.json`` (see ``app_config.py``).
+    """
+    from settings import settings_as_dict  # noqa: PLC0415
+    return web.json_response(settings_as_dict())
+
+
+@routes.patch("/ui/api/settings")
+async def patch_settings_handler(request: web.Request) -> web.Response:
+    """SP.3: partial update of in-app Settings.
+
+    Body is a JSON object ``{key: value, ...}`` — any subset of the
+    known fields. Unknown keys or out-of-range values return 400 with
+    the offending field name so the UI can surface the error.
+    """
+    from settings import SettingsValidationError, settings_as_dict, update_settings  # noqa: PLC0415
+
+    try:
+        partial = await request.json()
+    except Exception:
+        return json_error("Request body must be JSON", status=400)
+
+    if not isinstance(partial, dict):
+        return json_error("Request body must be a JSON object", status=400)
+
+    try:
+        await update_settings(partial)
+    except SettingsValidationError as exc:
+        return web.json_response(
+            {"error": str(exc), "field": exc.field},
+            status=400,
+        )
+
+    logger.info("Settings updated%s: %s", _who(request), ", ".join(sorted(partial.keys())))
+    return web.json_response(settings_as_dict())
+
+
 @routes.get("/ui/api/server-info")
 async def get_server_info(request: web.Request) -> web.Response:
     """Return server configuration needed by the UI (token, port, versions)."""

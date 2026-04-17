@@ -965,3 +965,123 @@ async def test_firmware_download_404_when_job_missing(tmp_path):
         assert resp.status == 404
     finally:
         await ta.close()
+
+
+# ---------------------------------------------------------------------------
+# settings (SP.3)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def _settings_init(tmp_path):
+    """Redirect the settings module to a scratch dir for each test."""
+    import settings as settings_mod
+    settings_mod._reset_for_tests()
+    settings_mod.init_settings(
+        settings_path=tmp_path / "settings.json",
+        options_path=tmp_path / "options.json",
+    )
+    yield
+    settings_mod._reset_for_tests()
+
+
+async def test_get_settings_returns_defaults_on_fresh_boot(tmp_path, _settings_init):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        resp = await ta.get("/ui/api/settings")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data == {
+            "auto_commit_on_save": True,
+            "job_history_retention_days": 365,
+            "firmware_cache_max_gb": 2.0,
+            "job_log_retention_days": 30,
+        }
+    finally:
+        await ta.close()
+
+
+async def test_patch_settings_updates_and_returns_full_blob(tmp_path, _settings_init):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        resp = await ta.client.patch(
+            "/ui/api/settings",
+            json={"auto_commit_on_save": False, "job_history_retention_days": 90},
+        )
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["auto_commit_on_save"] is False
+        assert data["job_history_retention_days"] == 90
+        # Unspecified fields preserved.
+        assert data["firmware_cache_max_gb"] == 2.0
+    finally:
+        await ta.close()
+
+
+async def test_patch_settings_rejects_unknown_key(tmp_path, _settings_init):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        resp = await ta.client.patch(
+            "/ui/api/settings",
+            json={"bogus": 1},
+        )
+        assert resp.status == 400
+        data = await resp.json()
+        assert data["field"] == "bogus"
+    finally:
+        await ta.close()
+
+
+async def test_patch_settings_rejects_out_of_range(tmp_path, _settings_init):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        resp = await ta.client.patch(
+            "/ui/api/settings",
+            json={"firmware_cache_max_gb": 0.0},
+        )
+        assert resp.status == 400
+        data = await resp.json()
+        assert data["field"] == "firmware_cache_max_gb"
+    finally:
+        await ta.close()
+
+
+async def test_patch_settings_rejects_non_json_body(tmp_path, _settings_init):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        resp = await ta.client.patch(
+            "/ui/api/settings",
+            data="not json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status == 400
+    finally:
+        await ta.close()
+
+
+async def test_patch_settings_rejects_non_object_body(tmp_path, _settings_init):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        resp = await ta.client.patch(
+            "/ui/api/settings",
+            json=[1, 2, 3],
+        )
+        assert resp.status == 400
+    finally:
+        await ta.close()
+
+
+async def test_patch_settings_persists_across_get(tmp_path, _settings_init):
+    """Live-effect floor: a PATCH is immediately observable via GET."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        patch_resp = await ta.client.patch(
+            "/ui/api/settings",
+            json={"auto_commit_on_save": False},
+        )
+        assert patch_resp.status == 200
+
+        get_resp = await ta.get("/ui/api/settings")
+        data = await get_resp.json()
+        assert data["auto_commit_on_save"] is False
+    finally:
+        await ta.close()

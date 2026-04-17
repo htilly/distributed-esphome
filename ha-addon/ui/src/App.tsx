@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ExternalLink, Eye, EyeOff, Moon, Sun } from 'lucide-react';
+import { ExternalLink, Eye, EyeOff, Moon, Settings as SettingsIcon, Sun } from 'lucide-react';
 import useSWR from 'swr';
 import {
   cancelJobs,
@@ -43,6 +43,7 @@ import { EditorModal } from './components/EditorModal';
 import { EsphomeVersionDropdown } from './components/EsphomeVersionDropdown';
 import { LogModal } from './components/LogModal';
 import { QueueTab } from './components/QueueTab';
+import { SettingsDrawer } from './components/SettingsDrawer';
 import { toast } from 'sonner';
 import { Toaster } from './components/ui/sonner';
 import { WorkersTab } from './components/WorkersTab';
@@ -133,6 +134,10 @@ function _initialTab(): TabName {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabName>(_initialTab);
+  // SP.4: Settings drawer (gear icon in header). Lifted here so other
+  // surfaces can deep-link into Settings later (e.g. a tooltip's
+  // "Configure auto-commit →").
+  const [settingsOpen, setSettingsOpen] = useState(false);
   // QS.6: SWR's default compare (stable-hash) already prevents re-renders
   // when polled data is structurally unchanged. The custom JSON.stringify
   // compare we used to have was strictly worse — O(n) serialization of the
@@ -644,6 +649,17 @@ export default function App() {
           ESPHome Web
           <ExternalLink className="size-3" aria-hidden />
         </a>
+        {/* SP.4: Settings drawer — gear icon follows the same icon-button
+            shape as theme and streamer above. */}
+        <button
+          type="button"
+          aria-label="Settings"
+          className="inline-flex items-center justify-center w-7 h-7 rounded-full border border-[var(--border)] bg-[var(--surface2)] text-[var(--text-muted)] cursor-pointer hover:bg-[var(--border)]"
+          onClick={() => setSettingsOpen(true)}
+          title="Settings"
+        >
+          <SettingsIcon className="size-3.5" />
+        </button>
         <span className="spacer" />
         <span className="status-dot" title="Server online" />
       </header>
@@ -822,6 +838,11 @@ export default function App() {
           onClose={() => { setConnectModalOpen(false); setConnectModalPreset(null); }}
         />
       )}
+
+      {/* SP.4: Settings drawer — always mounted so the Sheet component
+          can animate its own open/close; internal SWR fetch is gated
+          on the `open` prop so closed state is zero network traffic. */}
+      <SettingsDrawer open={settingsOpen} onOpenChange={setSettingsOpen} />
 
       {/* #22: Unified Upgrade modal — handles both immediate upgrades and scheduling */}
       {upgradeModalTarget && (() => {

@@ -156,6 +156,32 @@ export async function getServerInfo(): Promise<ServerInfo> {
   return parseResponse<ServerInfo>(await apiFetch('./ui/api/server-info'), 'fetching server info');
 }
 
+// SP.3 — in-app Settings (separate from Supervisor's options.json).
+// Keep the shape alphabetical-ish and mirrored from AppSettings in
+// ha-addon/server/settings.py. Any rename there is a UI contract change
+// — update this interface in the same commit.
+export interface AppSettings {
+  auto_commit_on_save: boolean;
+  job_history_retention_days: number;
+  firmware_cache_max_gb: number;
+  job_log_retention_days: number;
+}
+
+export async function getSettings(): Promise<AppSettings> {
+  return parseResponse<AppSettings>(await apiFetch('./ui/api/settings'), 'fetching settings');
+}
+
+export async function updateSettings(partial: Partial<AppSettings>): Promise<AppSettings> {
+  return parseResponse<AppSettings>(
+    await apiFetch('./ui/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(partial),
+    }),
+    'updating settings',
+  );
+}
+
 export async function getEsphomeVersions(): Promise<EsphomeVersions> {
   return parseResponse<EsphomeVersions>(await apiFetch('./ui/api/esphome-versions'), 'fetching ESPHome versions');
 }

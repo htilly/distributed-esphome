@@ -1029,6 +1029,12 @@ async def serve_index(request: web.Request) -> web.Response:
 def create_app() -> web.Application:
     cfg = AppConfig.load()
 
+    # SP.1/SP.2: load in-app settings (/data/settings.json) — created on
+    # first boot after 1.6 upgrade and seeded from the current options.json
+    # for any fields that have migrated. See ha-addon/server/settings.py.
+    from settings import init_settings  # noqa: PLC0415
+    init_settings()
+
     queue = JobQueue()
     queue.load()
 

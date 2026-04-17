@@ -15,6 +15,14 @@ Start the add-on, then open the web UI via the **ESPHome Fleet** entry in the HA
 
 Add-on configuration options (token, job / OTA timeouts, polling intervals, auth knob) live in the add-on's **Configuration** tab in Home Assistant.
 
+Product-level settings — what the UI calls **Settings**, opened with the gear icon in the top-right of the header — live inside the add-on and are edited through the web UI. Changes take effect immediately (no add-on restart). Settings are persisted to `/data/settings.json` inside the add-on and survive updates. As of 1.6.0 the in-app Settings drawer covers:
+
+- **Config versioning → Auto-commit on save.** Fleet keeps a local git history of everything under `/config/esphome/` so you can see diffs and restore previous versions without thinking about git. Turn this off if you manage this directory with your own git workflow and don't want Fleet writing commits into it.
+- **Job history → Retention (days).** How long to keep the record of past compile jobs. `0` = unlimited.
+- **Disk management → Firmware cache size (GB) / Job log retention (days).** Per-cache disk budgets so the add-on doesn't silently fill your volume.
+
+On first boot after upgrading to 1.6.0, any of these fields that previously lived in the add-on Configuration tab are seeded into `settings.json` automatically. After the upgrade, editing them in Supervisor has no effect — edit them in the Settings drawer instead.
+
 ## What's on the Web UI
 
 **Devices.** Every ESPHome config in one place. Columns for online status, current firmware version, HA entity link, IP address, WiFi vs Ethernet, network details, schedule, and ESPHome version. Click Upgrade on any row to compile + OTA that device. The row menu (⋮) exposes live logs, restart, rename, duplicate, pin, delete, and copy-api-key (for devices with a native-API encryption key).

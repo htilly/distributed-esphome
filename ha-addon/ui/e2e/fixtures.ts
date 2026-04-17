@@ -341,4 +341,35 @@ export async function mockApi(page: Page) {
     }
     return route.fallback();
   });
+
+  // SP.3 — in-app Settings store. In-memory so GET + PATCH behave like
+  // the real server during a spec: a PATCH returns the updated blob,
+  // and a subsequent GET reflects the change. Reset on each test by
+  // virtue of mockApi running once per beforeEach.
+  const settingsState: Record<string, unknown> = {
+    auto_commit_on_save: true,
+    job_history_retention_days: 365,
+    firmware_cache_max_gb: 2.0,
+    job_log_retention_days: 30,
+  };
+  await page.route('**/ui/api/settings', async (route) => {
+    const method = route.request().method();
+    if (method === 'PATCH') {
+      let body: Record<string, unknown> = {};
+      try {
+        body = JSON.parse(route.request().postData() ?? '{}');
+      } catch {
+        return route.fulfill({ status: 400, json: { error: 'bad json' } });
+      }
+      // Reject unknown keys the way the real endpoint does.
+      for (const key of Object.keys(body)) {
+        if (!(key in settingsState)) {
+          return route.fulfill({ status: 400, json: { error: `${key}: unknown settings key`, field: key } });
+        }
+        settingsState[key] = body[key];
+      }
+      return route.fulfill({ json: settingsState });
+    }
+    return route.fulfill({ json: settingsState });
+  });
 }
