@@ -9,7 +9,11 @@ from aiohttp.test_utils import make_mocked_request
 
 from app_config import AppConfig
 from constants import HA_SUPERVISOR_IP
-from ha_auth import _validate_bearer_with_supervisor, ha_auth_middleware
+from ha_auth import (
+    _is_protected_ui_path,
+    _validate_bearer_with_supervisor,
+    ha_auth_middleware,
+)
 
 
 def _make_app(require_ha_auth: bool = False, token: str = "") -> web.Application:
@@ -134,12 +138,117 @@ async def test_invalid_bearer_with_require_ha_auth_returns_401() -> None:
 
 
 async def test_non_ui_api_path_bypasses_middleware() -> None:
-    """The middleware only gates /ui/api/* paths."""
+    """The middleware only gates protected UI paths — /api/v1/* is handled
+    by the worker-tier auth_middleware in main.py."""
     resp = await _run_middleware(
         path="/api/v1/workers/heartbeat",
         require_ha_auth=True,
     )
     assert resp.status == 200
+
+
+# --- #82: static UI shell gated under require_ha_auth ---
+
+
+async def test_static_index_html_requires_auth_when_mandatory() -> None:
+    """#82: direct-port `GET /` with no auth must 401 under require_ha_auth=true.
+    Before the fix, the SPA shell was readable by anyone on the LAN."""
+    resp = await _run_middleware(
+        path="/",
+        peer_ip="10.0.0.5",
+        require_ha_auth=True,
+    )
+    assert resp.status == 401
+    assert resp.headers.get("WWW-Authenticate", "").startswith("Bearer")
+
+
+async def test_static_assets_require_auth_when_mandatory() -> None:
+    """#82: Vite bundle at /assets/* must 401 — the JS bundle leaks the
+    API surface to an unauthenticated attacker."""
+    resp = await _run_middleware(
+        path="/assets/index-abc123.js",
+        peer_ip="10.0.0.5",
+        require_ha_auth=True,
+    )
+    assert resp.status == 401
+
+
+async def test_static_static_dir_requires_auth_when_mandatory() -> None:
+    """#82: legacy /static/* assets (favicon, icons) also gated."""
+    resp = await _run_middleware(
+        path="/static/favicon.svg",
+        peer_ip="10.0.0.5",
+        require_ha_auth=True,
+    )
+    assert resp.status == 401
+
+
+async def test_static_allowed_via_supervisor_peer_without_auth() -> None:
+    """HA Ingress browser load of the SPA shell: Supervisor peer IP
+    short-circuits path 1 of the 4-path auth logic, so no 401 even
+    without a Bearer. This is the 99% case — browsers iframing the
+    add-on via HA Supervisor must keep working."""
+    resp = await _run_middleware(
+        path="/",
+        peer_ip=HA_SUPERVISOR_IP,
+        require_ha_auth=True,
+    )
+    assert resp.status == 200
+
+
+async def test_static_allowed_with_system_token_bearer() -> None:
+    """Direct-port power-user access: curl -H 'Authorization: Bearer <system-token>'
+    loads the HTML shell for scripting. AU.7 path 2."""
+    resp = await _run_middleware(
+        path="/",
+        peer_ip="10.0.0.5",
+        auth="Bearer the-add-on-shared-token",
+        server_token="the-add-on-shared-token",
+        require_ha_auth=True,
+    )
+    assert resp.status == 200
+
+
+async def test_static_allowed_with_valid_ha_bearer() -> None:
+    """Direct-port with HA long-lived access token (path 3). Supervisor
+    validates and the user identity is attached — same as /ui/api/*."""
+    resp = await _run_middleware(
+        path="/index.html",
+        peer_ip="10.0.0.5",
+        auth="Bearer user-llat",
+        supervisor_valid={"name": "stefan", "id": "abc", "is_admin": True},
+        require_ha_auth=True,
+    )
+    assert resp.status == 200
+
+
+async def test_non_ui_path_still_bypasses_ha_auth() -> None:
+    """Defensive: paths outside the protected set (e.g. a stray /foo)
+    still bypass ha_auth_middleware completely — this middleware only
+    gates the UI tier, and we don't want it to accidentally swallow
+    worker-tier or unrelated paths."""
+    resp = await _run_middleware(
+        path="/foo/bar",
+        peer_ip="10.0.0.5",
+        require_ha_auth=True,
+    )
+    assert resp.status == 200
+
+
+def test_is_protected_ui_path_covers_ui_surface() -> None:
+    """Whitebox check: the set of protected paths matches the routes
+    registered in main.py (`/`, `/index.html`, `/assets/*`, `/static/*`,
+    `/ui/api/*`)."""
+    assert _is_protected_ui_path("/")
+    assert _is_protected_ui_path("/index.html")
+    assert _is_protected_ui_path("/assets/index-abc.js")
+    assert _is_protected_ui_path("/static/favicon.svg")
+    assert _is_protected_ui_path("/ui/api/targets")
+    # /api/v1/* is worker-tier, handled elsewhere.
+    assert not _is_protected_ui_path("/api/v1/workers/heartbeat")
+    # Nothing else.
+    assert not _is_protected_ui_path("/foo")
+    assert not _is_protected_ui_path("")
 
 
 async def test_supervisor_peer_takes_precedence_over_bearer() -> None:

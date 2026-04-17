@@ -17,6 +17,7 @@ import {
   getServerInfo,
   getTargets,
   getWorkers,
+  isUnauthorizedError,
   removeWorker,
   renameTarget,
   setWorkerParallelJobs,
@@ -142,7 +143,7 @@ export default function App() {
     console.error('SWR', key, err);
   }, []);
 
-  const { data: serverInfo = { token: '', port: 8765 }, mutate: mutateServerInfo } = useSWR(
+  const { data: serverInfo = { token: '', port: 8765 }, error: serverInfoError, mutate: mutateServerInfo } = useSWR(
     'serverInfo',
     getServerInfo,
     {
@@ -164,22 +165,35 @@ export default function App() {
   // checks (metadata resolution is cached and only re-fires when a file
   // changes), which is cheap on Linux but not free — if this becomes a
   // concern on large config dirs, add a server-side snapshot cache.
-  const { data: workers = [], mutate: mutateWorkers } = useSWR(
+  const { data: workers = [], error: workersError, mutate: mutateWorkers } = useSWR(
     'workers',
     getWorkers,
     { refreshInterval: 1_000, onError: logSwrError('workers') },
   );
-  const { data: devicesAndTargets, mutate: mutateDevices } = useSWR(
+  const { data: devicesAndTargets, error: devicesError, mutate: mutateDevices } = useSWR(
     'devices',
     async () => { const [t, d] = await Promise.all([getTargets(), getDevices()]); return { targets: t, devices: d }; },
     { refreshInterval: 1_000, onError: logSwrError('devices') },
   );
   const targets = devicesAndTargets?.targets ?? [];
   const devices = devicesAndTargets?.devices ?? [];
-  const { data: queue = [], mutate: mutateQueue } = useSWR(
+  const { data: queue = [], error: queueError, mutate: mutateQueue } = useSWR(
     'queue',
     getQueue,
     { refreshInterval: 1_000, onError: logSwrError('queue') },
+  );
+
+  // #84: if the session expired (or direct-port user has a stale/wrong
+  // ?token=), every protected endpoint now returns 401. The tabs would
+  // otherwise show "No devices found" / "No workers registered" etc.,
+  // which falsely implies the fleet is empty. Detect the 401 on any of
+  // the four always-polling SWR hooks and render a dedicated
+  // "Session expired" overlay instead.
+  const isUnauthenticated = (
+    isUnauthorizedError(serverInfoError) ||
+    isUnauthorizedError(workersError) ||
+    isUnauthorizedError(devicesError) ||
+    isUnauthorizedError(queueError)
   );
   // Exclude validation-only jobs from display (they run server-side and auto-prune)
   const displayQueue = useMemo(() => queue.filter(j => !j.validate_only), [queue]);
@@ -699,6 +713,35 @@ export default function App() {
           />
         )}
       </main>
+
+      {isUnauthenticated && (
+        <div
+          role="alertdialog"
+          aria-labelledby="unauth-heading"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(0,0,0,0.55)] backdrop-blur-sm"
+        >
+          <div className="w-[min(440px,92vw)] rounded-lg border border-[var(--border)] bg-[var(--surface)] p-6 shadow-xl">
+            <h2 id="unauth-heading" className="mb-2 text-lg font-semibold text-[var(--text)]">
+              Session expired
+            </h2>
+            <p className="mb-4 text-sm text-[var(--text-muted)]">
+              ESPHome Fleet requires a valid Home Assistant session. Your
+              session likely timed out, or the <code>?token=</code> you used
+              for direct-port access is no longer valid. Reload to
+              re-authenticate through Home Assistant.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => location.reload()}
+                className="inline-flex h-9 items-center rounded-md bg-[var(--accent)] px-4 text-sm font-medium text-white hover:opacity-90"
+              >
+                Reload
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <Toaster />
 

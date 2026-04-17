@@ -38,6 +38,26 @@ export interface EsphomeSchemaResponse { components?: string[] }
 // no JSON body that callers care about.
 // ---------------------------------------------------------------------------
 
+// #84: typed error so callers can distinguish 401 (session expired) from
+// other failures. Previously every non-OK response threw a plain `Error`
+// whose message was the only signal — SWR hooks couldn't tell a real
+// empty result apart from "you're logged out" and the Devices/Workers/
+// Queue tabs ended up rendering "No devices found" after the session
+// expired. Keep `Error` as the base so callers that only care about
+// `.message` still work unchanged.
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
+export function isUnauthorizedError(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 401;
+}
+
 async function _readError(r: Response, fallback: string): Promise<string> {
   // Try to read the server-provided error string. Falls back to the supplied
   // tag (e.g. "fetching workers") + status code when the body isn't JSON or
@@ -50,12 +70,12 @@ async function _readError(r: Response, fallback: string): Promise<string> {
 }
 
 async function parseResponse<T = unknown>(r: Response, errorTag: string): Promise<T> {
-  if (!r.ok) throw new Error(await _readError(r, errorTag));
+  if (!r.ok) throw new ApiError(await _readError(r, errorTag), r.status);
   return r.json() as Promise<T>;
 }
 
 async function expectOk(r: Response, errorTag: string): Promise<void> {
-  if (!r.ok) throw new Error(await _readError(r, errorTag));
+  if (!r.ok) throw new ApiError(await _readError(r, errorTag), r.status);
 }
 
 // Version sentinel for auto-reload detection

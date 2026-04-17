@@ -1,7 +1,15 @@
 """HA user authentication middleware (AU.2, extended by AU.7 in 1.5.0).
 
-Resolves the requesting Home Assistant user for every ``/ui/api/*``
-request via one of four paths (checked in order):
+Resolves the requesting Home Assistant user for every protected UI path
+via one of four paths (checked in order). Protected UI paths are
+``/ui/api/*`` (the JSON API) **and the static UI shell** (``/``,
+``/index.html``, ``/assets/*``, ``/static/*``) — see ``_is_protected_ui_path``.
+Gating the API alone (bug #82) left the React SPA HTML + JS bundle
+publicly readable on the direct port even with ``require_ha_auth=true``,
+which let an LAN attacker version-fingerprint the add-on and enumerate
+the API surface without a token, violating AU.7's "mandatory direct-port
+auth" contract. Browser access via HA Ingress still works because it
+arrives from the Supervisor peer IP (path 1).
 
   1. **Supervisor peer trust.** When the request arrives from
      172.30.32.2 (Supervisor's internal Ingress proxy), trust it — HA
@@ -57,6 +65,26 @@ logger = logging.getLogger(__name__)
 
 SUPERVISOR_URL = "http://supervisor"
 _WWW_AUTHENTICATE = 'Bearer realm="ESPHome Fleet"'
+
+
+def _is_protected_ui_path(path: str) -> bool:
+    """Paths that ``ha_auth_middleware`` protects.
+
+    The React SPA is a 2-tier surface: ``/ui/api/*`` carries the JSON
+    data, and ``/`` / ``/index.html`` / ``/assets/*`` / ``/static/*``
+    serve the HTML shell + bundled JS/CSS that talks to it. Both tiers
+    need the same HA user auth when ``require_ha_auth`` is on — gating
+    only the API left the shell publicly readable (bug #82). Ingress
+    browser access still works via the Supervisor peer-IP path.
+    ``/api/v1/*`` is worker-tier and is separately bearer-gated by
+    ``auth_middleware`` in ``main.py``; we deliberately don't touch it
+    here.
+    """
+    if path.startswith("/ui/api/"):
+        return True
+    if path in ("/", "/index.html"):
+        return True
+    return path.startswith("/assets/") or path.startswith("/static/")
 
 
 def _normalize_peer_ip(raw: str) -> str:
@@ -141,9 +169,9 @@ async def _validate_bearer_with_supervisor(token: str) -> dict[str, Any] | None:
 
 @web.middleware
 async def ha_auth_middleware(request: web.Request, handler):
-    """Attach ``request["ha_user"]`` for ``/ui/api/*``, optionally reject."""
+    """Attach ``request["ha_user"]`` for protected UI paths, optionally reject."""
     path = request.path
-    if not path.startswith("/ui/api/"):
+    if not _is_protected_ui_path(path):
         return await handler(request)
 
     cfg: AppConfig = request.app["config"]
