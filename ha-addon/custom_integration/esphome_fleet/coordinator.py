@@ -20,7 +20,9 @@ from typing import Any
 
 import aiohttp
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -41,6 +43,7 @@ class EsphomeFleetCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         hass: HomeAssistant,
         base_url: str,
         token: str | None = None,
+        entry: ConfigEntry | None = None,
     ) -> None:
         super().__init__(
             hass,
@@ -48,6 +51,11 @@ class EsphomeFleetCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             name=DOMAIN,
             update_interval=timedelta(seconds=DEFAULT_POLL_INTERVAL_SECONDS),
         )
+        # #73: hold the config entry so we can trigger
+        # `async_start_reauth` from the coordinator when the add-on
+        # rejects us with 401 (e.g. the user rotated `token` in the
+        # add-on options, or the entry pre-dates AU.7 and has no token).
+        self._entry = entry
         self._base_url = base_url.rstrip("/")
         self._session: aiohttp.ClientSession = async_get_clientsession(hass)
         # AU.7: server accepts this as a system Bearer for /ui/api/*
@@ -86,6 +94,19 @@ class EsphomeFleetCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._get_json("/ui/api/queue"),
                 self._get_json("/ui/api/esphome-versions"),
             )
+        except aiohttp.ClientResponseError as err:
+            if err.status == 401:
+                # #73: bubble a ConfigEntryAuthFailed so HA prompts the
+                # user to re-enter the token via the reauth flow. Common
+                # causes: entry pre-dates AU.7 (no CONF_TOKEN), or the
+                # user rotated the add-on token.
+                raise ConfigEntryAuthFailed(
+                    "Add-on rejected the request with 401 — re-enter the "
+                    "token from the add-on's Configuration tab"
+                ) from err
+            raise UpdateFailed(
+                f"Add-on returned HTTP {err.status} at {self._base_url}: {err.message}"
+            ) from err
         except aiohttp.ClientError as err:
             raise UpdateFailed(f"Couldn't reach add-on at {self._base_url}: {err}") from err
 

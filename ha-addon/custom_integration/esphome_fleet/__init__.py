@@ -52,7 +52,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Authorization header when the token is missing).
     token = entry.data.get(CONF_TOKEN)
 
-    coordinator = EsphomeFleetCoordinator(hass, base_url, token=token)
+    coordinator = EsphomeFleetCoordinator(hass, base_url, token=token, entry=entry)
     # Block setup until the first poll succeeds so entities + services
     # have real data (and a real UpdateFailed bubbles up to HA as a
     # setup error).

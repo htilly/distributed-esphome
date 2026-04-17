@@ -17,6 +17,13 @@
           "base_url": "Base URL",
           "token": "Add-on token"
         }
+      },
+      "reauth_confirm": {
+        "title": "ESPHome Fleet needs a new token",
+        "description": "The add-on at {url} is rejecting requests. Re-enter the shared token from Settings → Add-ons → ESPHome Fleet → Configuration.",
+        "data": {
+          "token": "Add-on token"
+        }
       }
     },
     "error": {
@@ -27,7 +34,8 @@
     "abort": {
       "already_configured": "This server is already configured.",
       "already_in_progress": "Setup is already in progress for this server via Supervisor discovery.",
-      "invalid_discovery_info": "The Supervisor discovery record was missing host or port."
+      "invalid_discovery_info": "The Supervisor discovery record was missing host or port.",
+      "reauth_successful": "The token was updated and the integration reloaded."
     }
   },
   "services": {

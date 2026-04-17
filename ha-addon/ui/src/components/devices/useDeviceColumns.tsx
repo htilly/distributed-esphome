@@ -127,7 +127,11 @@ export function useDeviceColumns(options: Options) {
       ),
     }),
     columnHelper.accessor(
-      row => row.friendly_name || row.device_name || stripYaml(row.target),
+      // #72: sort by the YAML filename stem (the stable identifier) —
+      // not the friendly name. Friendly names change with substitutions
+      // and don't exist for every device; the YAML stem is what users
+      // reason about in logs, file systems, and the Queue tab.
+      row => stripYaml(row.target),
       {
         id: 'device',
         enableHiding: false,

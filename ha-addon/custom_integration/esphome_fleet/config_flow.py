@@ -92,6 +92,54 @@ class EsphomeFleetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     _discovery_name: str | None = None
     _discovery_url: str | None = None
     _discovery_token: str | None = None
+    # #73: reauth context — the entry being re-authenticated so
+    # `async_step_reauth_confirm` can update its data.
+    _reauth_entry: config_entries.ConfigEntry | None = None
+
+    async def async_step_reauth(
+        self, _entry_data: dict[str, object] | None = None
+    ) -> FlowResult:
+        """#73: triggered by coordinator on 401 — prompt for a fresh token.
+
+        The user reaches this flow when the add-on rejects our Bearer:
+        entry pre-dates AU.7 (no CONF_TOKEN), the add-on token was
+        rotated, or the entry was copied from a different install. We
+        keep the base URL but rewrite the token.
+        """
+        self._reauth_entry = self.hass.config_entries.async_get_entry(
+            self.context["entry_id"]
+        )
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, str] | None = None
+    ) -> FlowResult:
+        """Capture a new token for an existing entry."""
+        errors: dict[str, str] = {}
+        assert self._reauth_entry is not None
+
+        if user_input is not None:
+            token = (user_input.get(CONF_TOKEN) or "").strip()
+            if not token:
+                errors[CONF_TOKEN] = "token_required"
+            else:
+                self.hass.config_entries.async_update_entry(
+                    self._reauth_entry,
+                    data={**self._reauth_entry.data, CONF_TOKEN: token},
+                )
+                await self.hass.config_entries.async_reload(
+                    self._reauth_entry.entry_id
+                )
+                return self.async_abort(reason="reauth_successful")
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema({vol.Required(CONF_TOKEN): str}),
+            description_placeholders={
+                "url": str(self._reauth_entry.data.get(CONF_BASE_URL, "")),
+            },
+            errors=errors,
+        )
 
     async def async_step_user(
         self, user_input: dict[str, str] | None = None
