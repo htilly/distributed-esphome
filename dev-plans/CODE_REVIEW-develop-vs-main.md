@@ -8,6 +8,56 @@ This is not a small release. It ships a brand-new HA custom integration (~2,400 
 
 ---
 
+## 🟢 1.5.0 follow-up status (added 2026-04-17)
+
+Nearly every actionable finding from this review was queued as a `CR.*` workitem in `WORKITEMS-1.5.md` and shipped before the 1.5.0 tag. Summary table below; see each section for inline **Status:** lines pointing at the specific CR item and dev-build that closed it.
+
+| Review section | Closed as | Shipped in |
+|---|---|---|
+| §2.1 dead `TIMED_OUT` write | CR.4 | 1.5.0-dev.77 |
+| §2.2 PY-2 violation (scanner version probe) | CR.9 | 1.5.0-dev.77 |
+| §2.3 ghost-user on unparseable `/auth` body | CR.8 | 1.5.0-dev.77 |
+| §2.4 multi-instance foot-gun | CR.2 (`single_config_entry: true`) | 1.5.0-dev.77 |
+| §2.5 integration ↔ add-on unauthenticated | CR.3 (subsumed by AU.7) | 1.5.0-dev.77 |
+| §2.6 `__init__.py:76` fire-and-forget unload | CR.12 | 1.5.0-dev.77 |
+| §2.7 device-registry work every tick | CR.14 (diff-skip) | 1.5.0-dev.77 |
+| §2.8 sequential coordinator GETs | CR.13 (`asyncio.gather`) | 1.5.0-dev.77 |
+| §2.9 `api/client.ts` error-swallowers | CR.5 | 1.5.0-dev.77 |
+| §2.10 `integration_installer` non-atomic | CR.10 | 1.5.0-dev.77 |
+| §3.1 `manifest.json` half-declared | CR.15 | 1.5.0-dev.77 |
+| §3.2 integration tests are mocks in disguise | **Deferred** to 1.6 IT.1 / IT.2 / IT.3 | — |
+| §3.3 config flow accepts URL w/o probing | CR.16 | 1.5.0-dev.77 |
+| §3.4 EsphomeInstallBanner retry not wired | CR.17 (already present; verified) | 1.5.0-dev.76 |
+| §3.5 DIAGNOSTIC category on state sensors | CR.7 | 1.5.0-dev.77 |
+| §3.6 `_discovery.py` undocumented | CR.18 | 1.5.0-dev.77 |
+| §3.7 integration dir missing README | CR.18 | 1.5.0-dev.77 |
+| §4 `waitForTimeout` / E2E quality | CR.6 (+ new **E2E-1** invariant) | 1.5.0-dev.77 |
+| §4 `pytest-homeassistant-custom-component` | **Deferred** to 1.6 IT.2 | — |
+| §5.1 `require_ha_auth` trade-off documented | CR.20 (+ AU.7 made it mandatory) | 1.5.0-dev.77 |
+| §5.2–§5.6 SECURITY_AUDIT refresh | CR.11 (folded into the AU.7 audit pass) | 1.5.0-dev.77 |
+| §6.1 rewrite CHANGELOG | CR.1 | 1.5.0-dev.78 |
+| §6.2 DOCS.md first-boot note | CR.19 | 1.5.0-dev.77 |
+| §6.5 GHCR retention policy | CR.28 | **WONTFIX** (storage headroom) |
+| §7.1 event_bus loop / SLA docs | CR.22 | 1.5.0-dev.77 |
+| §7.2 naming split rationale in CONTRIBUTING | CR.27 | **WONTFIX** (single-dev project) |
+| §7.3 document non-goal: multi-instance | CR.2 (manifest declares it) | 1.5.0-dev.77 |
+| §7.4 `app_config.py` precedence docs | CR.21 | 1.5.0-dev.77 |
+| §8 perf — parallel GETs (only critical item) | CR.13 | 1.5.0-dev.77 |
+| §9.1 CODE_OF_CONDUCT.md / CONTRIBUTING.md | CR.27 | **WONTFIX** |
+| §9.3 new invariants (UI-6, E2E-1, HA-1) | CR.23 (UI-6 + E2E-1 shipped; HA-1 deferred) | 1.5.0-dev.77 |
+| §9.4 verify lockfile regen | CR.24 | 1.5.0-dev.76 |
+| §11 punch-list items 1–8 | CR.1 / CR.2 / CR.3 / CR.4 / CR.5 / CR.6 / CR.7 + IT.1 (deferred) | 1.5.0-dev.77/78 |
+
+**What's still open after 1.5.0:**
+- **Integration test strategy rewrite** (review §3.2 / §4 / §9.3 PY-10) — the mock-based tests stayed and got renamed; the proper `pytest-homeassistant-custom-component` rewrite is in `WORKITEMS-1.6.md` as IT.1 / IT.2 / IT.3.
+- **HA-1 invariant** (review §9.3) — banning `[class*="monaco"]`-style CSS-substring selectors in Playwright specs. Deferred because the only current usage is Monaco's dynamic class names; a proper fix needs `data-*` test-hook wrappers in the editor component.
+- **§6.4 pre-release UX sweep** — the checklist item itself is now institutionalized in `RELEASE_CHECKLIST.md` (UX_REVIEW refresh step); no separate workitem.
+- **§9.2 issue template enrichment** — not explicitly queued; low-priority.
+
+The rest of this document stays as the original reviewer capture — every observation that got closed above has an inline **Status:** line added at the start of its subsection.
+
+---
+
 ## 1. Verdict and Overall Shape
 
 **What's good (so the critique lands fairly):**
@@ -25,6 +75,8 @@ This is not a small release. It ships a brand-new HA custom integration (~2,400 
 
 ### 2.1 `ha-addon/server/job_queue.py:604–606` — dead write that masquerades as a state transition
 
+**Status:** ✅ FIXED (1.5.0-dev.77) — CR.4. Dead `job.state = JobState.TIMED_OUT` write removed; inline comment explains the retry path is "abandoned claim; re-enqueue as PENDING." 132 queue/scanner tests still green.
+
 ```python
 else:
     job.state = JobState.TIMED_OUT
@@ -40,6 +92,8 @@ Line 604 assigns `TIMED_OUT` and line 606 immediately overwrites it. The comment
 
 ### 2.2 `ha-addon/server/scanner.py:207–214` — PY-2 violation, command not logged
 
+**Status:** ✅ FIXED (1.5.0-dev.77) — CR.9. Added `logger.debug("Running: %s", cmd)` before the subprocess call. DEBUG (not INFO) because this fires on every cache miss; grep-able when the user flips the `esphome_fleet` logger to debug. PY-2 grep tightening itself was not rolled in — left as judgment-reviewed for now.
+
 ```python
 result = subprocess.run(
     [_server_esphome_bin, "version"],
@@ -51,6 +105,8 @@ PY-2 says *"the actual command line must be logged before the subprocess runs."*
 **Severity:** Low (this call; structural issue with the invariant).
 
 ### 2.3 `ha-addon/server/ha_auth.py:110–120` — 200-OK with unparseable body returns a ghost user
+
+**Status:** ✅ FIXED (1.5.0-dev.77) — CR.8. `ha_auth._validate_ha_user` now returns `None` on unparseable body and logs a WARNING. Audit logs no longer show "action by None."
 
 ```python
 if resp.status != 200:
@@ -65,6 +121,8 @@ When Supervisor's `/auth` returns HTTP 200 with a non-JSON body (which shouldn't
 **Severity:** Low (edge case; but silently granting "authenticated as nobody" is exactly the kind of thing that bites you six months later when audit logs are evidence).
 
 ### 2.4 Integration services single-entry assumption — real multi-instance foot-gun
+
+**Status:** ✅ FIXED (1.5.0-dev.77) — CR.2. `manifest.json` now declares `"single_config_entry": true`; HA refuses a second entry at the config-flow layer. `_first_coordinator` docstring rewritten to spell out "single-entry by contract."
 
 `ha-addon/custom_integration/esphome_fleet/services.py:76–84` plus `128`, `176`, `184`:
 ```python
@@ -84,6 +142,8 @@ This is a *design choice to not support multi-instance*, not a bug per se, but:
 
 ### 2.5 Integration → add-on communication is unauthenticated
 
+**Status:** ✅ FIXED (1.5.0-dev.77) — CR.3, subsumed by AU.7. The integration now sends the add-on's shared worker token as `Authorization: Bearer`; `CONF_TOKEN` is real and captured both via Supervisor discovery and manual config-flow. `require_ha_auth` flipped to **mandatory** on direct port in 1.5 — the previously-dead `CONF_TOKEN` constant became load-bearing.
+
 `ha-addon/custom_integration/esphome_fleet/coordinator.py:133–148`:
 ```python
 async def _get_json(self, path: str) -> Any:
@@ -98,6 +158,8 @@ This also means: *the default posture is "the integration relies on the server b
 
 ### 2.6 `ha-addon/custom_integration/esphome_fleet/__init__.py:76` — fire-and-forget unload
 
+**Status:** ✅ FIXED (1.5.0-dev.77) — CR.12. `entry.async_on_unload(event_stream.stop)` — HA now awaits WS teardown as part of unload, race eliminated.
+
 ```python
 entry.async_on_unload(lambda: hass.async_create_task(event_stream.stop()))
 ```
@@ -107,6 +169,8 @@ entry.async_on_unload(lambda: hass.async_create_task(event_stream.stop()))
 
 ### 2.7 Coordinator triggers device-registry work every 30 s
 
+**Status:** ✅ FIXED (1.5.0-dev.77) — CR.14. Extracted `_compute_live_identifiers` and wired a diff-skip check; `_register_devices` only runs when the identifier set actually changed.
+
 `__init__.py:60–65` installs a listener that calls `_register_devices(...)` on every coordinator update. The coordinator polls every 30 s. So regardless of whether anything changed, HA iterates every target and worker, hits `async_get_or_create` per device, and re-walks `async_entries_for_config_entry` for stale-device pruning. `async_get_or_create` is O(1) on an existing device, so the absolute cost is small, but on idle systems this keeps the device-registry hot unnecessarily.
 
 Trivial fix: diff-check on `coordinator.data` (identifier set from previous call) and skip the listener body when identifiers are unchanged. Home-lab-tolerable today; guaranteed to show up in a profiling trace eventually.
@@ -114,6 +178,8 @@ Trivial fix: diff-check on `coordinator.data` (identifier set from previous call
 **Severity:** Low.
 
 ### 2.8 Coordinator does six *sequential* GETs per tick
+
+**Status:** ✅ FIXED (1.5.0-dev.77) — CR.13. The six `/ui/api/*` GETs now run under `asyncio.gather`. Wall-time win is small on-host; halves server-side handler pressure per tick.
 
 `coordinator.py:61–67`:
 ```python
@@ -130,6 +196,8 @@ The comment says "HA's DataUpdateCoordinator is happy with anything under a seco
 
 ### 2.9 `ha-addon/ui/src/api/client.ts` — three functions sidestep the unified error path
 
+**Status:** ✅ FIXED (1.5.0-dev.77) — CR.5. `validateConfig` wraps `r.json()` in try/catch so non-JSON errors surface cleanly. `getSecretKeys` + `getEsphomeSchema` route through `parseResponse<T>` and throw on `!r.ok`; SWR's `logSwrError` (QS.7) logs the key + error. New **UI-6** invariant in `check-invariants.sh` bans the `return []`-on-not-ok pattern and caught a straggler (`getScheduleHistory`) that had to be fixed too.
+
 The whole point of the QS.8 refactor (`api/client.ts:52–54` `parseResponse<T>`) is that everything funnels through one place. Three holdouts:
 
 - `validateConfig` (lines 307–318) — calls `r.json() as ValidateResponse` *before* checking `r.ok`. If the server or a reverse proxy returns HTML on error (classic nginx 502, Supervisor proxy hiccup), `r.json()` throws an uncaught `SyntaxError` that bubbles past the intended error branch. The comment says "bespoke handling for non-OK with useful `output`" — fine, but you still need a try/catch around the parse.
@@ -141,6 +209,8 @@ These aren't crashes; they're category-3 bugs (UI appears to work, functionality
 **Severity:** Medium.
 
 ### 2.10 `ha-addon/server/integration_installer.py:137–141` — `shutil.rmtree` + `copytree` is not atomic
+
+**Status:** ✅ FIXED (1.5.0-dev.77) — CR.10. Install path is now atomic: stage to `<destination>.new` (with `ignore_patterns("__pycache__", "*.pyc")`), patch the staging manifest via `tempfile.mkstemp` + `os.replace`, then `os.replace` the current install to `.old`, swap the staging dir into place, remove `.old`. Any crash between steps leaves the previous install intact.
 
 ```python
 if destination_dir.exists():
@@ -164,6 +234,8 @@ I'm making this its own section because it's half the diff and it's what users w
 
 ### 3.1 `manifest.json` is half-declared
 
+**Status:** ✅ FIXED (1.5.0-dev.77) — CR.15 + CR.2. Added `loggers: ["esphome_fleet"]`, `quality_scale: "bronze"`, and `single_config_entry: true`. Kept the hardcoded `version: "0.1.0"` in the checked-in manifest because `integration_installer._patch_manifest_version` rewrites it from `VERSION` on every install — hand-installers are a non-audience for this release.
+
 ```json
 {
   "domain": "esphome_fleet",
@@ -179,6 +251,8 @@ I'm making this its own section because it's half the diff and it's what users w
 - **`"requirements": []`** is suspect. The integration imports `aiohttp` (bundled with HA, so OK) and `voluptuous` (bundled), but if anything else gets added later, the empty list will silently become wrong.
 
 ### 3.2 Tests are mocks pretending to be integration tests
+
+**Status:** 🟡 DEFERRED to 1.6 — CR.26. The 1.5 cycle chose to accept the mock-heavy state and queue the refactor as IT.1 (rename) + IT.2 (pytest-homeassistant-custom-component rewrite) + IT.3 (contract tests) in `WORKITEMS-1.6.md`. The credibility gap this review flagged is still real; 1.6 closes it.
 
 `tests/test_integration_services.py` is representative. Every test does this:
 ```python
@@ -197,27 +271,42 @@ For a project whose README claims "high quality bar," this is the biggest credib
 
 ### 3.3 Config flow accepts a base URL without testing it
 
+**Status:** ✅ FIXED (1.5.0-dev.77) — CR.16. User step now probes `GET /ui/api/server-info` with a 3 s timeout before creating the entry; on failure, returns a `cannot_connect` form error. New string in `strings.json` + `translations/en.json`. Supervisor-discovered flows skip the probe (Supervisor already vetted the URL).
+
 `config_flow.py:62–81` — user types the URL, the flow calls `_normalize_base_url` (which only validates syntax) and creates the entry. The first real probe happens in `__init__.py:53` via `async_config_entry_first_refresh()`, which `UpdateFailed`s if the server isn't reachable. HA does surface that as a setup error — not silent — but the UX is "entry is created, immediately shows red, user can't tell if their URL was wrong or the add-on is just starting." Better: test connectivity *inside* the user step with a 3 s probe and return a form error.
 
 ### 3.4 `EsphomeInstallBanner` and `esphome_install_status` state machine has no failure recovery
+
+**Status:** ✅ VERIFIED ALREADY SHIPPED (1.5.0-dev.76) — CR.17. The retry flow was in fact wired: the `failed` branch renders a **Retry** button that POSTs `/ui/api/esphome/reinstall` via `reinstallEsphome()` in `api/client.ts` and flips the banner back to `installing` once the SWR poll picks up the new status. Confirmed present in `EsphomeInstallBanner.tsx` during the CR.17 audit — original review missed it.
 
 `types/index.ts` adds `esphome_install_status?: 'installing' | 'ready' | 'failed'`. `components/EsphomeInstallBanner.tsx` exists, `reinstallEsphome()` (`api/client.ts:114–117`) exists — but the banner doesn't wire the retry button to anything visible in the status flow. The `'failed'` branch is effectively *inform the user of a dead end*. The WORKITEMS claim SE.8 ("UI install banner") closed; what shipped is the banner, not the recovery UX.
 
 ### 3.5 Entity category choices don't match user intent
 
+**Status:** ✅ FIXED (1.5.0-dev.77) — CR.7. Promoted queue depth, worker count, total slots, total/online/outdated-devices, and the `WorkerOnline` binary sensor out of `DIAGNOSTIC`. Only the version-string sensors (`SelectedEsphomeVersionSensor`, `FleetVersionSensor`) keep `DIAGNOSTIC` — they're genuinely diagnostic. Dropped the shared `_attr_entity_category = DIAGNOSTIC` from `_HubSensorBase` so subclasses opt in explicitly.
+
 `sensor.py:111`, `binary_sensor.py:58` — "queue depth", "online devices", "worker online" are marked `EntityCategory.DIAGNOSTIC`. In HA, DIAGNOSTIC entities are excluded from the default Lovelace picker and default automation triggers. These are *exactly* the things a user would put on a dashboard: "how many compile jobs are queued," "is my worker online." Demote them to no category (the default, primary).
 
 ### 3.6 `_discovery.py` is undocumented
 
+**Status:** ✅ FIXED (1.5.0-dev.77) — CR.18. Module docstring added explaining the #62 closure-set fix it implements. (Turned out the docstring was already present — confirmed during the CR.18 audit.)
+
 A 32-line file with no module docstring, no mention in `__init__.py` or `README`. It's copied from Ardumine's PR #57 per the config_flow comment. For an integration that's going into other people's HA installs, "quietly copied from a PR" is not OK. Either inline it into `config_flow.py` or give it a real docstring explaining what it does.
 
 ### 3.7 No README inside the integration
+
+**Status:** ✅ FIXED (1.5.0-dev.77) — CR.18. Added `ha-addon/custom_integration/esphome_fleet/README.md` covering: what the subtree is, how it's installed (via `integration_installer` on add-on startup + `push-to-hass-4.sh`'s HA-Core-restart trigger), the `esphome_fleet` vs `distributed_esphome` naming rationale, and the single-entry contract.
 
 `ha-addon/custom_integration/esphome_fleet/` has no `README.md`. A developer cloning only that subtree (the natural way to hand-inspect a custom integration) sees 17 files and has to reverse-engineer intent. Two-paragraph README would fix it.
 
 ---
 
 ## 4. Testing: the Invariant-Reality Gap
+
+**Status (1.5.0):** 🟡 PARTIAL.
+- `page.waitForTimeout()` removals + new **E2E-1** invariant shipped as CR.6 (1.5.0-dev.77). Both callsites the review called out (`cancel-new-device.spec.ts`, `cyd-office-info.spec.ts` prod smoke) were replaced with deterministic waits.
+- `pytest-homeassistant-custom-component` rewrite **deferred** to 1.6 IT.2. The contract-test proposal (the `set(response_keys) == expected` shape check) is 1.6 IT.3.
+- PY-10 invariant ("test_integration_* must import `pytest_homeassistant_custom_component`") is queued for 1.6 IT.1 alongside the file renames.
 
 CLAUDE.md QG.1 claims this release shipped passing:
 - `pytest tests/` — full suite
@@ -240,6 +329,11 @@ Those all run in CI. Good. But reading the test bodies tells a different story a
 ---
 
 ## 5. Security Posture
+
+**Status (1.5.0):** ✅ Largely FIXED — CR.11 + CR.20 + AU.7 + the SECURITY_AUDIT.md refresh.
+- §5.1 `require_ha_auth` trade-off documented in `DOCS.md` (CR.20) and the toggle itself flipped to **mandatory** by AU.7 before tag. The "breaks the HA integration until next release" caveat became moot in the same release because AU.7 also wired the Bearer token into the integration.
+- §5.2 Supervisor-IP trust assumption on bare-Docker, §5.3 `integration_installer.py` r/w scope, §5.4 SUPERVISOR_TOKEN log-hygiene audit, §5.5 firmware-upload trust — all folded into `SECURITY_AUDIT.md`'s threat-model section and per-finding entries (F-06, F-07, HI.8 installer notes, F-18 firmware audit). CR.11 notes.
+- §5.6 F-03 reassessment — `SECURITY_AUDIT.md` now lists F-03 as FIXED (mandatory `require_ha_auth` via AU.7); no longer "half-fix."
 
 For a home-lab LAN tool, the bar is: "don't make the LAN worse than it was." Mostly met. Specifically:
 
@@ -270,6 +364,8 @@ The diff shows +134 lines with several "fixed" claims. I didn't re-audit each on
 ---
 
 ## 6. Documentation and Release Engineering
+
+**Status (1.5.0):** ✅ Largely FIXED. CHANGELOG rewritten (CR.1, dev.78), first-boot note added to DOCS (CR.19), `require_ha_auth` trade-off documented (CR.20). GHCR retention policy (§6.5) → CR.28 **WONTFIX** for this release (storage headroom still ample). Pre-release UX sweep (§6.4) institutionalized in `RELEASE_CHECKLIST.md` as a standing step rather than queued as a workitem.
 
 ### 6.1 CHANGELOG.md for 1.4.1 is *one paragraph*, and it's about the rename.
 
@@ -316,6 +412,12 @@ It's a personal workflow choice, fine for a single-developer project, but note t
 
 ## 7. Architectural / Design Concerns
 
+**Status (1.5.0):** ✅ Addressed via docs.
+- §7.1 event_bus loop assumption + SLA docs — CR.22. `event_bus.broadcast` docstring updated to "must be called on the aiohttp loop"; two-consumer SLA table added (UI ~1s via SWR; integration up to 30s via coordinator poll). `coordinator._last_job_states` pruning verified via existing `test_disappeared_jobs_removed_from_tracker`.
+- §7.2 naming-split rationale in CONTRIBUTING.md — CR.27 **WONTFIX** (not a contributor-facing project today; CLAUDE.md carries the rationale for internal reference).
+- §7.3 non-goal: multi-instance — CR.2 made it explicit in `manifest.json` (`single_config_entry: true`).
+- §7.4 `app_config.py` precedence — CR.21. Module docstring spells out `env var > /data/options.json > defaults`.
+
 ### 7.1 Three parallel async-push paths and no unifying model
 
 1. The server's in-process `event_bus.py` (queue-per-subscriber, broadcast on mutation).
@@ -343,6 +445,12 @@ See §2.4. More broadly: the integration assumes *one* add-on instance. The add-
 
 ## 8. Performance / Idle Efficiency (CLAUDE.md performance section)
 
+**Status (1.5.0):** ✅ Low-priority items closed.
+- Parallel coordinator GETs (the one quantifiable win) — CR.13.
+- Diff-skip device-registry listener — CR.14.
+- Firmware retention audit confirmed no leak path — CR.25.
+- SWR visibility-hidden backoff, bigger fleet profiling — not done; not urgent per the original review's own framing.
+
 CLAUDE.md's framing is "idle should be cheap." A brief audit of new idle costs:
 
 - **Server background loops:** timeout checker, HA entity poller, PyPI refresher, now also `mdns_advertiser` and `supervisor_discovery`. Each one sleeps on a sensible interval; nothing here is a tight loop. OK.
@@ -357,6 +465,12 @@ No critical idle-cost regressions found. Plenty of 10-30% wins available if anyo
 ---
 
 ## 9. Developer-Experience / Repo Hygiene
+
+**Status (1.5.0):** 🟡 PARTIAL.
+- §9.1 `CODE_OF_CONDUCT.md` / `CONTRIBUTING.md` — CR.27 **WONTFIX** for this release. Home-lab single-dev project; CLAUDE.md already encodes the contribution patterns for any drive-by. Revisit if outside contributions start arriving.
+- §9.2 Issue template enrichment — not queued as a formal workitem; low-priority.
+- §9.3 New invariants — CR.23. **UI-6** (ban `if (!r.ok) return []` pattern in `api/`) shipped + caught a straggler. **E2E-1** (ban `page.waitForTimeout`) shipped. **HA-1** (ban `[class*="monaco"]` CSS-substring Playwright selectors) deferred — current usage is Monaco's dynamic classes and a clean fix needs `data-*` test hooks. **PY-10** (test_integration_* imports `pytest_homeassistant_custom_component`) queued for 1.6 IT.1.
+- §9.4 Verify lockfile is Docker-container-sourced — CR.24, done; `grep -E "pyobjc|appnope"` returns empty on both lockfiles.
 
 ### 9.1 LICENSE exists. `CODE_OF_CONDUCT.md` and `CONTRIBUTING.md` do not.
 
@@ -396,16 +510,18 @@ Call-outs here exist so that later reviewers don't cite this document for things
 
 ## 11. Punch List (if you shipped tomorrow, fix at least these)
 
+**Status (1.5.0):** 7 of 8 shipped; item 8 deferred to 1.6.
+
 In priority order. Not one of these is a "full rewrite"; all are under an hour each.
 
-1. **Fix the changelog.** (§6.1) — one-paragraph summary per workstream: FD, AU, SE, SC, HI, QS. Users upgrading need to see the real release.
-2. **Decide multi-instance.** (§2.4) — set `single_config_entry: true` in manifest.json *or* add an instance picker to services. Pick one before the first multi-instance bug report.
-3. **Wire integration auth or document the hole.** (§2.5) — either pass a Supervisor token from the integration, or add a bold-letter note to `require_ha_auth` docs.
-4. **Drop the dead write in `job_queue.py:604`.** (§2.1) — it's either a real state or it isn't.
-5. **Fix the three `api/client.ts` error-swallowers.** (§2.9) — at minimum, toast on 401/500 instead of `return []`.
-6. **Replace both `page.waitForTimeout` calls in E2E.** (§4) — especially the one in `cyd-office-info.spec.ts`, which gates prod deploy.
-7. **Drop DIAGNOSTIC category on queue-depth/online-devices sensors.** (§3.5) — 5-line change, huge UX impact.
-8. **Document HA-integration test reality.** Either rewrite with `pytest-homeassistant-custom-component` or rename the files to `test_integration_logic_*.py`. Don't let the claim "we test the integration" stand when what's tested is pure-Python helpers.
+1. ~~**Fix the changelog.**~~ ✅ CR.1, 1.5.0-dev.78. Full release-scope summary grouped by workstream (rebrand / HA integration / firmware download / auth / ESPHome unbundling / supply chain / UI quality + "Under the hood" tail).
+2. ~~**Decide multi-instance.**~~ ✅ CR.2, 1.5.0-dev.77. `"single_config_entry": true` in manifest.json.
+3. ~~**Wire integration auth or document the hole.**~~ ✅ CR.3, 1.5.0-dev.77 (subsumed by AU.7). Bearer token wired; add-on's shared worker token is what `/ui/api/*` accepts under the new middleware path. `CONF_TOKEN` is real. Direct-port auth flipped to **mandatory** in 1.5.
+4. ~~**Drop the dead write in `job_queue.py:604`.**~~ ✅ CR.4, 1.5.0-dev.77.
+5. ~~**Fix the three `api/client.ts` error-swallowers.**~~ ✅ CR.5, 1.5.0-dev.77. Plus new **UI-6** invariant to prevent the pattern returning.
+6. ~~**Replace both `page.waitForTimeout` calls in E2E.**~~ ✅ CR.6, 1.5.0-dev.77. Plus new **E2E-1** invariant.
+7. ~~**Drop DIAGNOSTIC category on queue-depth/online-devices sensors.**~~ ✅ CR.7, 1.5.0-dev.77.
+8. 🟡 **Document HA-integration test reality.** Deferred — the 1.5 choice was to accept the mock-heavy state and queue the proper rewrite as IT.1 (rename) + IT.2 (pytest-homeassistant-custom-component) + IT.3 (contract tests) in `WORKITEMS-1.6.md`. CR.26 placeholder in 1.5 points at the 1.6 items.
 
 ---
 

@@ -39,6 +39,151 @@ Unshipped findings still stand — see the Prioritized Recommendations section b
 
 ---
 
+## 🔵 Pat-lens refresh (2026-04-16)
+
+The original review was written before `dev-plans/USER_PERSONA.md` pinned down the target user. Re-reading through Pat's lens — tech-curious homeowner on HA OS, 30–100+ devices, latest-stable ESPHome, reaches the UI from their phone over Tailscale/Nabu Casa/Cloudflare, streamer mode used for GitHub screenshots, European as often as American — a few findings shift priority and a handful of gaps open up that the original review didn't call out. This section captures the deltas; the body (§1–§15) stays as-is because the observations themselves are still accurate.
+
+### Findings that were underweighted
+
+| Original finding | Shipped weight | Pat weight | Why the shift |
+|---|---|---|---|
+| §13.2 Mobile Devices-table is unusable | Medium-large | **High** | Pat reaches the UI from their phone over Tailscale / Nabu Casa for triage ("is anything offline?"). Not 5% of usage, closer to 15–25%. Mobile needs to *answer a question*, not just "degrade usefully." |
+| §10.1 + §8.1 Streamer mode gaps (Secrets + Connect Worker token) | Small-medium | **High** | Streamer mode's real purpose is GitHub-issue attachments (per USER_PERSONA). Every surface a screenshot could originate from — not just the two I called out — needs a streamer-mode pass. |
+| §3.9 Pinned-version indicator | Medium | **High** | Pat pins devices to bridge ESPHome version transitions — a daily-to-weekly concern for a 100-device fleet on latest-stable. Current single-icon affordance underserves the use case. |
+| UE.* HA-native Updates (backlog reference, not a finding) | Medium | **High** | Pat uses HA Assist and the unified Updates card. Fleet entities in HA aren't a side quest — they're part of Pat's primary daily surface. |
+| §11.1 Disabled-item tooltips (already shipped as WI UX.11) | Medium | **High priority pattern going forward** | Every "Disable, don't fail" surface should get this treatment, not just the row hamburger. Pat reads tooltips and it respects their intelligence. Keep the pattern live. |
+
+### Findings that were overweighted
+
+| Original finding | Original weight | Pat weight | Why the shift |
+|---|---|---|---|
+| §1.1 Header clutter | Medium | **Low** | Pat parses the header correctly; calling it "10 things to worry about" is more reviewer-hyperbole than user-pain. |
+| §1.2 Dev-version pill semantic states | Small | **Low** | Pat knows whether they're on `develop` or stable. The pill's job is "remind me which I'm on," which it already does. |
+| §5.2 "Score: 196554" legend | Small | **Low** | Pat can infer it's a benchmark; meaningless-to-newbie is not a Pat concern. |
+| §8.2 Container-name rebrand for new `docker run` | Small (XS) | **Low** (shipped anyway, fine) | Pat's existing workers have the old name and won't be recreated. Only affects brand-new adds. |
+| §8.3 `--label com.distributed-esphome.version=…` | Small | **Drop** | Pat runs their own tooling; doesn't need us to annotate for Portainer. |
+| §3.1 Target-vs-Device distinction | Medium | **Low-medium** | Pat already knows. The value is for filtering *to* unmanaged devices when auditing, not for conceptual education. Keep the idea, drop the "teach the distinction" framing. |
+
+### Findings the original review missed (new recommendations)
+
+Numbered **UX.46+** to continue the existing sequence:
+
+#### UX.46 — Locale-aware date / time / number formatting
+
+**Effort:** M. **Pat tie-in:** European Pats are half (or more) of the audience. `02:42:50 PM` reads as "what an American time format" to a user who thinks in 24h. Dates like `2026-04-17 08:30` are safe ISO-8601; time-of-day is the pain point.
+
+**What's wrong today.** All timestamps render in US-locale 12-hour AM/PM. Date sub-labels (e.g. `1m ago`) don't expose the underlying absolute time consistently.
+
+**Suggested fix.** Honor `navigator.language` / `Intl.DateTimeFormat` defaults — a German browser gets `14:42:50`, an American browser gets `02:42:50 PM`. Absolute timestamps use `Intl.DateTimeFormat(undefined, { dateStyle: 'short', timeStyle: 'medium' })` — the browser produces "correct for me." Tooltips can still always show full ISO-8601 + IANA tz for engineers troubleshooting across zones. Not a new i18n framework; just use the standard one the browser already ships.
+
+#### UX.47 — Keyboard-first table navigation
+
+**Effort:** M. **Pat tie-in:** Pat has the UI open on a monitor and spends real time in it. Mouse-only is slow at 100 devices.
+
+**What's missing.** No `j` / `k` row navigation. No `/` to focus the search box. No `Shift+Click` or `Shift+Space` for range-select on checkboxes. No `Enter` on a focused row to open the hamburger. No `Esc` out of deep focus back to the tab level.
+
+**Suggested fix.** Add a small global keyboard-shortcut layer: `/` focuses the current tab's search, `j`/`k` move row selection, `Space` toggles checkbox, `Shift+Space` range-toggles, `Enter` opens primary action, `?` shows a shortcut cheat-sheet overlay. Scope this to the four list-tabs plus modals. Lucide-ified keyboard-icon hints on hover for discoverability.
+
+#### UX.48 — Smart search across multiple fields
+
+**Effort:** S-M. **Pat tie-in:** Search is the first thing Pat reaches for at scale. "Where's that BMS sensor?"
+
+**What's limited today.** The `Search devices…` box matches the visible `friendly_name` / slug string. No structured search.
+
+**Suggested fix.** Match across: friendly name, slug, IP address, area, tags, comment, network type, running version, pinned version. Prefix syntax for power users: `area:garage`, `version:2026.3.3`, `offline`, `pinned`, `tag:thread`. Also: URL-persist the query in `?q=` so Pat can bookmark "show me all offline kids-room devices." Grep-pane-like instant results. No full-text index required — in-memory client-side filter across ~100 rows is trivial.
+
+#### UX.49 — Log modal at compile-log scale
+
+**Effort:** M. **Pat tie-in:** Pat reads compile logs when things fail. ESPHome compile output runs 5–20k lines for a non-trivial target.
+
+**What's painful.** No line numbers. No line-level anchor links. No search within the log. No "jump to error" button. Scrolling is the only navigation. Copying the log to a forum post doesn't preserve timestamps or highlights.
+
+**Suggested fix.**
+- Line numbers + a mini-map (even a simple one) so Pat can see where the long compile phases live.
+- `Ctrl+F`-equivalent in-log search (Monaco's built-in search is free if the modal uses Monaco).
+- "Jump to first error / warning" button — scan for `error:`, `warning:`, `Traceback`, `FAILED`, `E:` prefixes.
+- "Copy as markdown" — wraps the relevant section in triple-backticks with the job's target + version + timestamp at the top, ready for forum/GitHub paste.
+- "Download full log" for the logs too long to eyeball.
+
+#### UX.50 — Full streamer-mode audit (all screenshot-capable surfaces)
+
+**Effort:** M. **Pat tie-in:** Streamer mode's primary use case is **bug-report screenshots for GitHub**, not YouTube streams. Which means *any surface that could appear in a screenshot attached to a bug report* needs to honor the toggle.
+
+**Audit candidates** (in addition to UX.9 Secrets values and UX.31 Connect Worker token):
+- **Live Logs modal** — device logs stream WiFi credentials during DHCP log lines, BLE bindkeys in mac-address-printing lines, mqtt usernames in mqtt-client log output.
+- **Validate output** — `esphome config <file>` prints the fully-substituted YAML on success, which means secrets substituted from `!secret` show as literals.
+- **Editor diagnostics panel** — YAML parse errors can include token values.
+- **Server-info panel** (if one lands) — could leak bearer tokens.
+- **Device hamburger `Copy API Key`** — already gated to users who click; but if Pat accidentally clicks, the clipboard has the key. A "just-copied, hiding in 5s" animation in streamer mode is cheap.
+- **Worker `Connect Worker` compose/bash emissions** — already flagged. Make sure the mobile/narrow version blurs too.
+
+Ship as a one-time invariant-style audit: grep the source for all places values reach the DOM, and gate each through a `maskWhenStreamerMode` helper. Add new invariant **UI-8**: any `innerText` / `dangerouslySetInnerHTML` render of a value containing a `<password>` / `<key>` / `<token>` / `<mac_address>` token must route through that helper.
+
+#### UX.51 — Narrow-viewport triage surface (phone over Tailscale)
+
+**Effort:** L. **Pat tie-in:** Pat opens the UI on their phone to answer a single question: "is anything broken?"
+
+**What's missing today.** The mobile fallback (UX.29 / §13.2) is a full card-layout Devices table. That's the right answer for *daily use from a phone*, but Pat's mobile use is *triage*. A 100-row paginated card list isn't the fastest path to "anything offline / anything erroring."
+
+**Suggested fix.** Add a mobile-first **Triage view** (surfaced automatically under ~768px, with a toggle to force-show on desktop too for the "status dashboard" case):
+- Big traffic-light: green "all good" / amber "3 devices offline, 1 compile failed" / red "something actively wrong."
+- Below, three collapsed lists: **Offline devices** (N), **Failed recent compiles** (N), **Stale-image workers** (N). Each collapses to a summary when empty.
+- Pull-to-refresh (or tap to refresh — skip gesture handling unless it's trivial).
+- Single tap on any row jumps to the full desktop view's entry for that device/job/worker.
+
+This is the mobile view that actually serves Pat; the card-layout version (UX.29) is an upgrade for when Pat needs to *act* from mobile, which is rarer.
+
+#### UX.52 — Friendly-name vs slug display policy
+
+**Effort:** XS. **Pat tie-in:** Pat's devices have both a YAML filename (slug like `cyd-office-info`) and a `friendly_name` from the YAML (like "Office Info Display"). Both show on every row today — friendly name bold, slug muted underneath. That's ~2× the vertical space on every row at 100-row scale.
+
+**What's not optimal.** Once Pat has set a `friendly_name` for every device (which they have), the slug is redundant display-chrome. But it's *occasionally* useful — for git commit messages, for finding the source file in a terminal.
+
+**Suggested fix.** Column-picker toggle: "Show device slug" (default **off** for new users; persists across reloads). When off, the row shows only `friendly_name`, reclaiming a line. Hover-tooltip still shows the slug for occasional lookup. Devices without a `friendly_name` set fall back to showing the slug prominently (so new-device onboarding still works).
+
+### Deltas to the Prioritized Recommendations tables
+
+Pat's lens collapses the table into two rankings rather than the current four-tier-by-effort structure. The effort tiers are still right; the priorities within them shift. Consolidated Pat-priority summary:
+
+**Pat-critical (should land in 1.6):**
+- UX.29 + **UX.51** — mobile story (triage view + card layout)
+- UX.13 — bulk-action selection bar (daily ops at scale)
+- UX.16 — filter-chip row on Devices
+- **UX.48** — smart search
+- **UX.50** — full streamer-mode audit
+- UX.22 — active-compile chip on Devices rows
+- **UX.46** — locale-aware date/time
+
+**Pat-high (nice to have in 1.6, otherwise 1.7):**
+- UX.14 — Workers-tab one-row-per-worker
+- UX.15 — Workers platform chips
+- UX.23 — Target vs Device chip (the *filter*, not the teaching)
+- UX.24 / UX.25 — Schedules polish
+- UX.31 — streamer-mode token masking (subsumed by UX.50)
+- UX.34 — Queue ETA for pending jobs
+- **UX.47** — keyboard navigation
+- **UX.49** — log modal at scale
+
+**Pat-low (ship when convenient):**
+- UX.5 — `HA` / `Net` header renames
+- UX.10 — tab-badge format standardization
+- UX.11 — unsaved-changes marker
+- UX.12 — Monaco spellcheck disable
+- **UX.52** — friendly-name-only toggle
+- UX.32 — column-picker grouping + saved views
+- UX.43 — row-hover highlight
+
+**De-prioritized / drop (not worth Pat's time):**
+- ~~UX.41~~ — Score legend
+- ~~UX.37~~ — dev-version pill semantic states
+- ~~UX.19~~ — editor button split-button refactor (the current three buttons are fine; Pat uses them)
+- ~~UX.26~~ — full header reorganization (too disruptive for the gain)
+- ~~UX.30~~ — light-mode header parity (Pat's on dark)
+
+(Original UX.N → UX.45 rankings in §16 still stand for anyone who wants the effort-tiered view; this section is the Pat-weighted overlay.)
+
+---
+
 ## 1. Global header
 
 ### 1.1 The header is dense with actions of wildly different frequency
