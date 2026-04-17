@@ -6,8 +6,6 @@ Manage a fleet of ESPHome devices from one place, inside Home Assistant — bulk
 
 Start the add-on, then open the web UI via the **ESPHome Fleet** entry in the HA sidebar.
 
-> **On first boot the UI comes up right away.** ESPHome is installed in the background the first time the add-on runs — the add-on doesn't ship with a pre-baked copy, so your install always picks up whatever version the HA ESPHome add-on reports. The install finishes in seconds on a fast host, or 1–3 minutes on a Raspberry Pi. While it runs a small "Installing ESPHome…" banner appears at the top of the UI; everything except the parts that actually shell out to ESPHome (validation, autocomplete, compiles) still works. Subsequent restarts skip all of this — the venv is cached under `/data/`.
-
 ### First steps
 
 1. Your existing ESPHome configs in `/config/esphome/` are picked up automatically — you should see them on the **Devices** tab.
@@ -28,38 +26,6 @@ Add-on configuration options (token, job / OTA timeouts, polling intervals, auth
 **Schedules.** Every scheduled upgrade in one view. Recurring (daily/weekly/monthly or full cron) and one-time future schedules. Schedules live in the device YAML itself so they travel with your config and respect each device's pinned ESPHome version.
 
 **Header** has a dark/light theme toggle, a "streamer mode" that blurs tokens and secrets (for screen-sharing demos), the currently-selected ESPHome version (changes for all new compiles unless overridden per-device via pinning), a shortcut to edit `secrets.yaml`, and a link to [ESPHome Web](https://web.esphome.io/) for browser-based initial flashing.
-
-## Troubleshooting
-
-**A worker shows offline.** The worker's `SERVER_URL` / `SERVER_TOKEN` don't match the add-on. Re-copy the command from Workers → **+ Connect Worker** and redeploy the container on the worker host.
-
-**Jobs stay in PENDING.** No worker slot is available to pick them up. Confirm at least one worker is online in the Workers tab, and that the built-in local worker has a slot count above zero.
-
-**OTA fails after a clean compile.** The worker compiled fine but can't reach the ESP device on port 3232. The worker needs direct network access to every device it's expected to flash — check VLANs / firewalls / Docker network isolation on the worker host.
-
-**Wrong firmware version shown on a device.** The device must share a network segment with HA (or mDNS reflection must be configured). Version reporting comes in through mDNS + the ESPHome native API; unreachable devices silently stick at their last-seen version.
-
-**A pinned ESPHome version won't install.** Check the build log on the Queue tab. The worker does a `pip install esphome==<version>` the first time it sees a new version, which can fail for old / yanked / broken releases. Pick a different version or pre-install a known-good one with the `ESPHOME_SEED_VERSION` env var on the worker.
-
-## Running the API directly (for scripts and CI)
-
-The web UI lives behind Home Assistant Ingress and is authenticated by HA itself — opening it from the sidebar "just works" and doesn't need any token. **Talking to `/ui/api/*` from outside HA** (a shell prompt, a cron job, CI) needs a Bearer token.
-
-Two kinds are accepted:
-
-- **The add-on's shared token** (from the **Configuration** tab — it's the same token build workers use on port 8765). Convenient for scripts running on a machine that already has it.
-- **A Home Assistant Long-Lived Access Token** (Profile → Security → Long-Lived Access Tokens → Create Token). Worth using for anything where you want per-user audit attribution — every compile, cancel, pin, schedule, edit, or delete gets the HA username in the add-on log.
-
-Either way:
-
-```bash
-curl -H "Authorization: Bearer $TOKEN" \
-     http://homeassistant.local:8765/ui/api/targets
-```
-
-Requests without a valid token get **401 Unauthorized** plus `WWW-Authenticate: Bearer realm="ESPHome Fleet"`. Ingress-tunneled access is unaffected.
-
-If you need the pre-1.5.0 "no auth on port 8765" behavior — e.g. a test harness where juggling tokens is overkill — set `require_ha_auth: false` in the add-on configuration. This is a deliberate opt-out of a security default.
 
 ## Verifying what you're running
 

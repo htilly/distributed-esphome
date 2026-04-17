@@ -84,14 +84,7 @@ To test pre-release builds, use `:develop` instead of `:latest` — that tag adv
 
 Dark/light theme toggle + a "streamer mode" that blurs tokens and secrets for screen-sharing are in the header.
 
-## When something goes wrong
-
-- **First boot** — ESPHome is installed in the background on first launch, not baked into the image, so your compiles always match the version the HA ESPHome add-on reports. The UI comes up immediately; features that shell out to ESPHome (validation, autocomplete, compiles) stay disabled for 1–3 minutes on a Pi (seconds on a fast host) with a visible "Installing ESPHome…" banner. Subsequent restarts are instant.
-- **A compile failed** — click **Log** on the row in the Queue tab. The full ESPHome output is there. Common causes: a bad YAML edit, a wrong pinned ESPHome version, or the worker can't reach PyPI.
-- **OTA fails after a clean compile** — the worker can see PyPI but not your ESP device. Usually a VLAN / firewall rule. The worker needs direct network access to the device's IP on port 3232.
-- **A worker shows offline** — the worker's `SERVER_URL` or `SERVER_TOKEN` doesn't match the add-on. Re-generate the command from **Workers → + Connect Worker**.
-
-More in [DOCS.md](ha-addon/DOCS.md) — configuration options, the direct-port API for scripting, image signature verification, and the less-common operational workflows.
+More in [DOCS.md](ha-addon/DOCS.md) — configuration options, image signature verification, and the less-common operational workflows.
 
 ## License
 
