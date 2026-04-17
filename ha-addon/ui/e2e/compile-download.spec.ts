@@ -30,7 +30,7 @@ test('UpgradeModal exposes the three Action radios (UX.8)', async ({ page }) => 
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole('radio', { name: /Upgrade Now/ })).toBeVisible();
   await expect(dialog.getByRole('radio', { name: /Download Now/ })).toBeVisible();
-  await expect(dialog.getByRole('radio', { name: /Schedule Upgrade/ })).toBeVisible();
+  await expect(dialog.getByRole('radio', { name: /Schedule Recurring/ })).toBeVisible();
   // Default action is Upgrade Now, so the confirm button reads "Upgrade".
   await expect(dialog.getByRole('button', { name: /^Upgrade$/ })).toBeVisible();
 });
@@ -67,20 +67,20 @@ test('submitting Download Now POSTs download_only: true', async ({ page }) => {
   expect(Array.isArray(body!.targets) && body!.targets[0]).toBe('living-room.yaml');
 });
 
-test('Schedules-tab Edit pre-selects Schedule Upgrade (UX.8)', async ({ page }) => {
-  // Open from Schedules tab → Edit. All three Action radios are available
-  // (per UX.8 design — user can flip to Upgrade Now if they want to run it
-  // once instead of editing the schedule), but "Schedule Upgrade" is the
-  // pre-selected default and the schedule sub-form is visible.
+test('Schedules-tab Edit pre-selects Schedule Recurring (UX.8 + #79)', async ({ page }) => {
+  // #79: Garage Door fixture has a recurring cron, so the modal opens
+  // with "Schedule Recurring" pre-checked and the heading reflects it.
+  // All four Action radios are available so the user can flip to Once
+  // or Upgrade Now without closing the modal.
   await page.getByRole('button', { name: /Schedules/ }).click();
   const row = page.locator('#tab-schedules tbody tr').filter({ hasText: 'Garage Door' });
   await row.getByRole('button', { name: 'Edit' }).click();
 
   const dialog = page.getByRole('dialog');
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByRole('heading', { name: /^Schedule Upgrade —/ })).toBeVisible();
-  // Schedule Upgrade radio is pre-checked; the other two are present but not checked.
-  await expect(dialog.getByRole('radio', { name: /Schedule Upgrade/ })).toBeChecked();
+  await expect(dialog.getByRole('heading', { name: /^Schedule Recurring Upgrade —/ })).toBeVisible();
+  await expect(dialog.getByRole('radio', { name: /Schedule Recurring/ })).toBeChecked();
+  await expect(dialog.getByRole('radio', { name: /Schedule Once/ })).not.toBeChecked();
   await expect(dialog.getByRole('radio', { name: /Upgrade Now/ })).not.toBeChecked();
   await expect(dialog.getByRole('radio', { name: /Download Now/ })).not.toBeChecked();
 });

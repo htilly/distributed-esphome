@@ -49,10 +49,10 @@ jobs:
       - name: Run server + client tests
         # Excludes integration tests — those need HA, which conflicts
         # with esphome in the same env.
-        run: pytest tests/ -n auto -v --cov=ha-addon/server --cov=ha-addon/client --cov-report=term-missing --cov-report=html --ignore=tests/test_integration_config_flow.py --ignore=tests/test_integration_device_info.py --ignore=tests/test_integration_coordinator_events.py --ignore=tests/test_integration_services.py
+        run: pytest tests/ -n auto -v --cov=ha-addon/server --cov=ha-addon/client --cov-report=term-missing --cov-report=html --ignore=tests/test_integration_config_flow.py --ignore=tests/test_integration_device_info.py --ignore=tests/test_integration_coordinator_events.py --ignore=tests/test_integration_services.py --ignore=tests/test_integration_coordinator_auth.py
 
       - name: Run HA integration tests (isolated venv)
-        run: ./.ha-testenv/bin/pytest tests/test_integration_config_flow.py tests/test_integration_device_info.py tests/test_integration_coordinator_events.py tests/test_integration_services.py -v
+        run: ./.ha-testenv/bin/pytest tests/test_integration_config_flow.py tests/test_integration_device_info.py tests/test_integration_coordinator_events.py tests/test_integration_services.py tests/test_integration_coordinator_auth.py -v
 
       - name: Upload coverage report
         if: always()

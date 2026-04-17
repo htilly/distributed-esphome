@@ -1,87 +1,92 @@
 # ESPHome Fleet
 
-Manage fleets of ESPHome devices from one place — bulk operations, scheduled OTA upgrades, per-device version pinning, distributed compilation, and a fast modern UI.
-
-If Home Assistant runs on a Raspberry Pi or other low-power hardware, ESPHome compilation is painfully slow. ESPHome Fleet lets you point the heavy lifting at any faster machine on your network (x86, ARM, Apple Silicon) while keeping HA as the single source of truth for your device configs. Even without remote workers, the built-in local worker and the modern UI make this a powerful replacement for the stock ESPHome dashboard.
+Manage a fleet of ESPHome devices from one place, inside Home Assistant — bulk compiles, scheduled OTA upgrades, per-device version pinning, an inline YAML editor, a job queue you can actually see, and optional distributed compilation so a slow HA host doesn't become a bottleneck.
 
 ## Getting Started
 
 Start the add-on, then open the web UI via the **ESPHome Fleet** entry in the HA sidebar.
 
-> **First boot takes 1–3 minutes.** The add-on lazy-installs ESPHome into `/data/esphome-versions/` on first launch rather than shipping a pre-baked copy, so your install always picks up the version the HA ESPHome add-on reports. While the install runs, the UI shows an "Installing ESPHome…" banner and features that depend on the ESPHome binary (config validation, autocomplete, compiles) stay disabled. Subsequent restarts are instant because the venv is cached.
+> **On first boot the UI comes up right away.** ESPHome is installed in the background the first time the add-on runs — the add-on doesn't ship with a pre-baked copy, so your install always picks up whatever version the HA ESPHome add-on reports. The install finishes in seconds on a fast host, or 1–3 minutes on a Raspberry Pi. While it runs a small "Installing ESPHome…" banner appears at the top of the UI; everything except the parts that actually shell out to ESPHome (validation, autocomplete, compiles) still works. Subsequent restarts skip all of this — the venv is cached under `/data/`.
 
-The add-on includes a built-in local worker (starts paused with 0 slots). Increase the slot count in the **Workers** tab to start compiling immediately. To offload builds to faster machines, click **+ Connect Worker** for a ready-to-run `docker run` command (or a `docker-compose.yml` snippet).
+### First steps
 
-Configuration options (token, timeouts, polling intervals) are available in the add-on's **Configuration** tab in Home Assistant.
+1. Your existing ESPHome configs in `/config/esphome/` are picked up automatically — you should see them on the **Devices** tab.
+2. The add-on includes a **built-in local worker** that runs inside the HA host. It starts paused. Go to **Workers**, find the `local-worker` row, and use the `+`/`-` slot buttons to set its parallel-build capacity (1 or 2 is a reasonable default on a Pi; 4+ on a fast host). The moment slot count is above zero, the worker starts claiming jobs.
+3. To offload compilation to a faster machine, click **+ Connect Worker** in the Workers tab. Pick **Bash**, **PowerShell**, or **Docker Compose**, copy the generated snippet, and run it on whatever machine you want to compile on. The snippet includes your actual server URL and token, so there's nothing to edit.
+4. Home Assistant will pop an "ESPHome Fleet discovered" notification a few seconds after the add-on is running. Accept it to get all the devices, workers, and the add-on itself as real HA devices with entities.
 
-## Web UI
+Add-on configuration options (token, job / OTA timeouts, polling intervals, auth knob) live in the add-on's **Configuration** tab in Home Assistant.
 
-**Devices** — every ESPHome config in one place, with online status, current firmware version, and a one-click link to its Home Assistant page. Compile individual devices, everything that's outdated, or your whole fleet. Create new devices or duplicate existing ones, edit YAML inline with autocomplete and validation, pin individual devices to a specific ESPHome version, and view live device logs.
+## What's on the Web UI
 
-**Queue** — live job status and build logs. Retry, cancel, or clear jobs individually or in bulk.
+**Devices.** Every ESPHome config in one place. Columns for online status, current firmware version, HA entity link, IP address, WiFi vs Ethernet, network details, schedule, and ESPHome version. Click Upgrade on any row to compile + OTA that device. The row menu (⋮) exposes live logs, restart, rename, duplicate, pin, delete, and copy-api-key (for devices with a native-API encryption key).
 
-**Workers** — connected build workers with their slot count, cache size, and system info. Includes a built-in local worker and a one-click setup command for adding remote workers. Workers running an outdated image are flagged with an "image stale" badge.
+**Queue.** Every compile job — pending, running, succeeded, failed. Live build logs. Retry or cancel a job, clear finished jobs in bulk, or download the compiled `.bin` file (for jobs run in "download only" mode).
 
-**Schedules** — every scheduled upgrade in one view. Set recurring schedules (daily, weekly, monthly, custom cron) or one-time future upgrades from the device hamburger menu. Schedules are stored alongside the YAML so they travel with your config, and respect each device's pinned ESPHome version.
+**Workers.** Every connected worker — local and remote — with platform info, slot count, cache size, current job, and uptime. Workers running an outdated Docker image are flagged with an "image stale" badge so you know to `docker pull && docker restart` them.
+
+**Schedules.** Every scheduled upgrade in one view. Recurring (daily/weekly/monthly or full cron) and one-time future schedules. Schedules live in the device YAML itself so they travel with your config and respect each device's pinned ESPHome version.
+
+**Header** has a dark/light theme toggle, a "streamer mode" that blurs tokens and secrets (for screen-sharing demos), the currently-selected ESPHome version (changes for all new compiles unless overridden per-device via pinning), a shortcut to edit `secrets.yaml`, and a link to [ESPHome Web](https://web.esphome.io/) for browser-based initial flashing.
 
 ## Troubleshooting
 
-**Worker shows as offline** — verify `SERVER_URL` and `SERVER_TOKEN` match the add-on configuration. Check that the worker host can reach port 8765.
+**A worker shows offline.** The worker's `SERVER_URL` / `SERVER_TOKEN` don't match the add-on. Re-copy the command from Workers → **+ Connect Worker** and redeploy the container on the worker host.
 
-**Jobs stay in PENDING** — no worker is picking them up. Confirm at least one worker is online in the Workers tab.
+**Jobs stay in PENDING.** No worker slot is available to pick them up. Confirm at least one worker is online in the Workers tab, and that the built-in local worker has a slot count above zero.
 
-**OTA fails but compile succeeds** — the worker cannot reach the ESP device on port 3232. Check network/VLAN/firewall rules.
+**OTA fails after a clean compile.** The worker compiled fine but can't reach the ESP device on port 3232. The worker needs direct network access to every device it's expected to flash — check VLANs / firewalls / Docker network isolation on the worker host.
 
-**Wrong firmware version shown** — the device must be on the same network segment as HA (or mDNS must be forwarded). Version updates appear within one poll cycle.
+**Wrong firmware version shown on a device.** The device must share a network segment with HA (or mDNS reflection must be configured). Version reporting comes in through mDNS + the ESPHome native API; unreachable devices silently stick at their last-seen version.
 
-**ESPHome version errors** — check the build log. Pre-install a known-good version with `ESPHOME_SEED_VERSION` on the worker.
+**A pinned ESPHome version won't install.** Check the build log on the Queue tab. The worker does a `pip install esphome==<version>` the first time it sees a new version, which can fail for old / yanked / broken releases. Pick a different version or pre-install a known-good one with the `ESPHOME_SEED_VERSION` env var on the worker.
 
-## Direct-Port API Access
+## Running the API directly (for scripts and CI)
 
-The add-on's web UI lives behind Home Assistant Ingress and is authenticated by HA itself — no extra step needed to open it from the HA sidebar. Workers connect over the direct port (`:8765`) with a shared `token` from the add-on options.
+The web UI lives behind Home Assistant Ingress and is authenticated by HA itself — opening it from the sidebar "just works" and doesn't need any token. **Talking to `/ui/api/*` from outside HA** (a shell prompt, a cron job, CI) needs a Bearer token.
 
-**Direct-port `/ui/api/*` access requires a Bearer token by default** (add-on option `require_ha_auth`, default `true` since 1.5.0). Two kinds of tokens are accepted:
+Two kinds are accepted:
 
-- **The add-on's shared token** (from the add-on's Configuration tab — also what build workers use on port 8765). Handy for scripts running on machines that already have the token, and the native ESPHome Fleet HA integration uses it automatically.
-- **A Home Assistant Long-Lived Access Token** for anything that wants real per-user attribution. Mutations (compile, cancel, pin, schedule, rename, delete, save) log the authenticated user's HA username.
+- **The add-on's shared token** (from the **Configuration** tab — it's the same token build workers use on port 8765). Convenient for scripts running on a machine that already has it.
+- **A Home Assistant Long-Lived Access Token** (Profile → Security → Long-Lived Access Tokens → Create Token). Worth using for anything where you want per-user audit attribution — every compile, cancel, pin, schedule, edit, or delete gets the HA username in the add-on log.
 
-Example:
+Either way:
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
      http://homeassistant.local:8765/ui/api/targets
 ```
 
-Requests without a valid token receive **401 Unauthorized** plus `WWW-Authenticate: Bearer realm="ESPHome Fleet"`. Ingress-tunneled access is unaffected — HA already authenticated the user before forwarding.
+Requests without a valid token get **401 Unauthorized** plus `WWW-Authenticate: Bearer realm="ESPHome Fleet"`. Ingress-tunneled access is unaffected.
 
-If you specifically need the pre-1.4.1 "no auth on port 8765" behavior (for a test harness, say), flip `require_ha_auth` to `false` in the add-on options.
+If you need the pre-1.5.0 "no auth on port 8765" behavior — e.g. a test harness where juggling tokens is overkill — set `require_ha_auth: false` in the add-on configuration. This is a deliberate opt-out of a security default.
 
-## Verifying Image Signatures
+## Verifying what you're running
 
-Both the server and client Docker images on GHCR are signed with [cosign](https://docs.sigstore.dev/) using GitHub OIDC keyless signing — no long-lived keys are involved, the signature is anchored to the GitHub Actions workflow's identity. You can verify what you pull matches a build from this repo:
+Every server and client image on GHCR is signed with [cosign](https://docs.sigstore.dev/) using GitHub's keyless OIDC flow (no long-lived keys anywhere). You can verify that the image you pulled is the one this repo built:
 
 ```bash
-# Verify the client image
-cosign verify \
-  --certificate-identity-regexp 'https://github.com/weirded/distributed-esphome/.github/workflows/publish-client\.yml@.*' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/weirded/esphome-dist-client:latest
-
-# Verify the server image
+# Server image
 cosign verify \
   --certificate-identity-regexp 'https://github.com/weirded/distributed-esphome/.github/workflows/publish-server\.yml@.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   ghcr.io/weirded/esphome-dist-server:latest
+
+# Worker image
+cosign verify \
+  --certificate-identity-regexp 'https://github.com/weirded/distributed-esphome/.github/workflows/publish-client\.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/weirded/esphome-dist-client:latest
 ```
 
-A successful verification prints the signature payload + the OIDC claims (workflow ref, run ID, commit SHA) — confirming the image was built by the official workflow on this repo and hasn't been tampered with in transit. Run this after `docker pull` and before any production deployment.
+A successful verification prints the OIDC claims (workflow ref, run ID, commit SHA). Run this once before you trust an image in production, or wire it into your container-pull automation.
 
-### Verifying the SBOM
+### Checking the software bill of materials
 
-Every image published from 1.5.0 onward also carries a CycloneDX-format SBOM as a cosign attestation. You can fetch and verify it with:
+Every 1.5.0+ image also carries a CycloneDX SBOM as a cosign attestation — the full list of Python packages, OS libraries, and their pinned versions that went into the image. Handy for CVE audits.
 
 ```bash
-# Server image — print the attached CycloneDX SBOM
+# Server image — download + print the SBOM
 cosign verify-attestation \
   --certificate-identity-regexp 'https://github.com/weirded/distributed-esphome/.github/workflows/publish-server\.yml@.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -90,7 +95,7 @@ cosign verify-attestation \
   | jq -r '.payload | @base64d | fromjson | .predicate' \
   > esphome-dist-server.sbom.json
 
-# Client image
+# Worker image
 cosign verify-attestation \
   --certificate-identity-regexp 'https://github.com/weirded/distributed-esphome/.github/workflows/publish-client\.yml@.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -99,8 +104,6 @@ cosign verify-attestation \
   | jq -r '.payload | @base64d | fromjson | .predicate' \
   > esphome-dist-client.sbom.json
 ```
-
-The JSON file lists every Python package, OS library, and pinned version baked into the image — handy for CVE auditing, compliance, and supply-chain review.
 
 ## Support
 

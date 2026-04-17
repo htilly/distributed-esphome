@@ -26,30 +26,38 @@ test('per-row Upgrade button opens modal in Now mode', async ({ page }) => {
   await expect(dialog.getByRole('button', { name: /^Upgrade$/ })).toBeVisible();
 });
 
-test('Schedules-tab Edit opens modal in Scheduled mode', async ({ page }) => {
+test('Schedules-tab Edit opens modal in Scheduled mode (#79)', async ({ page }) => {
   await page.getByRole('button', { name: /Schedules/ }).click();
   await page.locator('#tab-schedules tbody tr').filter({ hasText: 'Garage Door' })
     .getByRole('button', { name: 'Edit' }).click();
 
   const dialog = page.getByRole('dialog');
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByRole('heading', { name: /^Schedule Upgrade —/ })).toBeVisible();
+  // #79: Garage Door fixture has a recurring cron → modal opens with
+  // "Schedule Recurring" selected and the heading reflects that.
+  await expect(dialog.getByRole('heading', { name: /^Schedule Recurring Upgrade —/ })).toBeVisible();
   await expect(dialog.getByRole('button', { name: /Save Schedule/ })).toBeVisible();
 });
 
-test('switching mode changes title and confirm-button label', async ({ page }) => {
+test('switching action changes title and confirm-button label (#79)', async ({ page }) => {
   const row = page.locator('#tab-devices tbody tr').filter({ hasText: 'Living Room Sensor' });
   await row.getByRole('button', { name: 'Upgrade' }).click();
 
   const dialog = page.getByRole('dialog');
   await expect(dialog.getByRole('heading', { name: /^Upgrade —/ })).toBeVisible();
 
-  // Toggle to Scheduled
-  await dialog.getByRole('radio', { name: /Schedule Upgrade/ }).check();
+  // Flip to Schedule Recurring.
+  await dialog.getByRole('radio', { name: /Schedule Recurring/ }).check();
+  await expect(dialog.getByRole('heading', { name: /^Schedule Recurring Upgrade —/ })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: /Save Schedule/ })).toBeVisible();
+
+  // Flip to Schedule Once — the heading is "Schedule Upgrade — …"
+  // (deliberately dropping "Recurring"), the button stays "Save Schedule".
+  await dialog.getByRole('radio', { name: /Schedule Once/ }).check();
   await expect(dialog.getByRole('heading', { name: /^Schedule Upgrade —/ })).toBeVisible();
   await expect(dialog.getByRole('button', { name: /Save Schedule/ })).toBeVisible();
 
-  // Toggle back to the default "Upgrade Now" action (UX.8).
+  // Back to Upgrade Now — default label restored.
   await dialog.getByRole('radio', { name: /Upgrade Now/ }).check();
   await expect(dialog.getByRole('heading', { name: /^Upgrade —/ })).toBeVisible();
   await expect(dialog.getByRole('button', { name: /^Upgrade$/ })).toBeVisible();
@@ -72,7 +80,7 @@ test('saving a recurring schedule fires POST /schedule with cron + tz', async ({
   const row = page.locator('#tab-devices tbody tr').filter({ hasText: 'Living Room Sensor' });
   await row.getByRole('button', { name: 'Upgrade' }).click();
   const dialog = page.getByRole('dialog');
-  await dialog.getByRole('radio', { name: /Schedule Upgrade/ }).check();
+  await dialog.getByRole('radio', { name: /Schedule Recurring/ }).check();
   // Default cadence in friendly mode is "Every 1 day(s) at 02:00" → cron 0 2 * * *
   await dialog.getByRole('button', { name: /Save Schedule/ }).click();
 
@@ -81,7 +89,7 @@ test('saving a recurring schedule fires POST /schedule with cron + tz', async ({
   expect(payload.tz).toBeTruthy();
 });
 
-test('saving a one-time schedule fires POST /schedule/once', async ({ page }) => {
+test('saving a one-time schedule fires POST /schedule/once (#79)', async ({ page }) => {
   let payload: { datetime?: string; target?: string } = {};
   await page.route('**/ui/api/targets/*/schedule/once', route => {
     if (route.request().method() === 'POST') {
@@ -98,8 +106,9 @@ test('saving a one-time schedule fires POST /schedule/once', async ({ page }) =>
   const row = page.locator('#tab-devices tbody tr').filter({ hasText: 'Living Room Sensor' });
   await row.getByRole('button', { name: 'Upgrade' }).click();
   const dialog = page.getByRole('dialog');
-  await dialog.getByRole('radio', { name: /Schedule Upgrade/ }).check();
-  await dialog.getByLabel('One-time', { exact: true }).check();
+  // #79: "Schedule Once" is now a top-level Action radio — no more
+  // nested Recurring/Once sub-toggle inside the schedule form.
+  await dialog.getByRole('radio', { name: /Schedule Once/ }).check();
   // Default onceDate seeds to "now" → already valid; just confirm.
   await dialog.getByRole('button', { name: /Save Schedule/ }).click();
 
