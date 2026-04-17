@@ -21,9 +21,16 @@ install any wheel whose SHA-256 doesn't match what we committed here.
 file at `ha-addon/client/esphome-constraints/<version>.txt`:
 
 - **File present** — the install runs as
-  ``pip install --require-hashes -c <version>.txt esphome==<version>``.
-  Anything not in the constraints file fails the install. This is
-  the preferred path.
+  ``pip install --require-hashes --no-cache-dir -r <version>.txt``.
+  Every wheel (ESPHome itself + every transitive) must match one of
+  the committed SHA-256 hashes or pip refuses the install. Note that
+  we pass it as `-r` (requirements), not `-c` (constraints): the
+  file is the output of `pip-compile` — a fully-resolved hash-pinned
+  requirements lockfile, not a pure constraints file. `--require-hashes`
+  mode rejects any requirement that doesn't carry its own hash, so
+  using `-c <file> esphome==<version>` fails on the unpinned command-
+  line `esphome==<version>` arg. `-r <file>` (with the file itself
+  pinning `esphome`) avoids that trap.
 - **File missing** — the install runs unpinned (the pre-SC.3
   behavior) and logs a WARNING so operators know hash-pinning wasn't
   enforced for that version. Keeps older ESPHome versions from being

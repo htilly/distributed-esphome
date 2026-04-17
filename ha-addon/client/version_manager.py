@@ -140,11 +140,21 @@ class VersionManager:
 
         SC.3: when ``esphome-constraints/<version>.txt`` is present next
         to this module, the install runs with
-        ``pip install --require-hashes -c <file> esphome==<version>`` —
-        any wheel whose SHA-256 doesn't match a hash in the file is
-        refused. Missing constraints file → install proceeds unpinned
-        with a WARNING logged; operators can see the gap in logs and
-        ship a constraints file for that version in a follow-up image.
+        ``pip install --require-hashes --no-cache-dir -r <file>`` —
+        every wheel (esphome + every transitive) must match one of the
+        SHA-256 hashes in the file or pip refuses. Note `-r` (not `-c`):
+        the generated file is a full hash-pinned **requirements** file
+        (pip-compile output), not a constraints file — constraints
+        files don't install anything on their own, and pip's
+        `--require-hashes` mode fails if any requirement on the command
+        line is unpinned (the original bug this replaces: `-c <file>
+        esphome==<version>` gave 'Hashes are required in
+        --require-hashes mode, but they are missing' for the
+        command-line `esphome==<version>` arg).
+
+        Missing constraints file → install proceeds unpinned with a
+        WARNING logged; operators can see the gap in logs and ship a
+        constraints file for that version in a follow-up image.
 
         Must NOT be called with self._lock held (long-running subprocess).
         """
@@ -164,13 +174,17 @@ class VersionManager:
         install_cmd: list[str] = [str(pip), "install", "--no-cache-dir"]
         if constraints_path is not None:
             logger.info(
-                "Using hash-pinned constraints for esphome==%s (SC.3): %s",
+                "Using hash-pinned requirements for esphome==%s (SC.3): %s",
                 version, constraints_path,
             )
             install_cmd.extend([
                 "--require-hashes",
-                "-c", str(constraints_path),
+                "-r", str(constraints_path),
             ])
+            # Note: no explicit `esphome==<version>` arg — the
+            # requirements file already pins it (pip-compile output).
+            # Adding it would reintroduce the "Hashes are required in
+            # --require-hashes mode" error this branch exists to fix.
         else:
             logger.warning(
                 "No hash-pinned constraints shipped for esphome==%s — "
@@ -179,7 +193,7 @@ class VersionManager:
                 "IMAGE_VERSION in a follow-up image. (SC.3)",
                 version,
             )
-        install_cmd.append(f"esphome=={version}")
+            install_cmd.append(f"esphome=={version}")
 
         logger.info("Running: %s", " ".join(install_cmd))
         result = subprocess.run(
