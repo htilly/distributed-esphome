@@ -100,6 +100,8 @@ interface Props {
   onNewDevice: () => void;
   /** CD.6: open the NewDeviceModal in "duplicate" mode, pre-filling the source. */
   onDuplicate: (sourceTarget: string) => void;
+  /** AV.6: open the per-file History panel from the row hamburger menu. */
+  onOpenHistory: (target: string) => void;
   /** Trigger an immediate SWR revalidation of the devices/targets data. */
   onRefresh: () => void;
 }
@@ -137,7 +139,7 @@ function formatAddressSource(source: AddressSource | null | undefined): string |
 // RenameModal is re-exported so App.tsx's existing import path still works.
 export { RenameModal };
 
-export function DevicesTab({ targets, devices, workers, streamerMode, activeJobsByTarget, onCompile, onUpgradeOne, onEdit, onLogs, onToast, onDelete, onRename, onSchedule, onNewDevice, onDuplicate, onRefresh }: Props) {
+export function DevicesTab({ targets, devices, workers, streamerMode, activeJobsByTarget, onCompile, onUpgradeOne, onEdit, onLogs, onToast, onDelete, onRename, onSchedule, onNewDevice, onDuplicate, onOpenHistory, onRefresh }: Props) {
   const [filter, setFilter] = useState('');
   // QS.27: persist sort across reloads via localStorage.
   const [sorting, setSorting] = usePersistedState<SortingState>('devices-sort', []);
@@ -262,6 +264,7 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
     onRequestDelete: setDeleteTarget,
     onPin: handlePin,
     onUnpin: handleUnpin,
+    onOpenHistory,
     menuOpenTarget,
     setMenuOpenTarget,
   });

@@ -40,6 +40,8 @@ interface Options {
   onRequestDelete: (target: string) => void;
   onPin: (target: string) => void;
   onUnpin: (target: string) => void;
+  /** AV.6: open the per-file History panel from the row hamburger menu. */
+  onOpenHistory: (target: string) => void;
   /**
    * #2 followup to QS.16: per-row hamburger open state is owned by
    * DevicesTab (not Radix's internal state) so it survives row re-mounts
@@ -98,6 +100,7 @@ export function useDeviceColumns(options: Options) {
     onRequestDelete,
     onPin,
     onUnpin,
+    onOpenHistory,
     menuOpenTarget,
     setMenuOpenTarget,
   } = options;
@@ -434,6 +437,7 @@ export function useDeviceColumns(options: Options) {
           onRequestDelete={onRequestDelete}
           onPin={onPin}
           onUnpin={onUnpin}
+          onOpenHistory={onOpenHistory}
           onMenuOpenChange={(o) => setMenuOpenTarget(o ? t.target : null)}
         />
       ),
@@ -451,6 +455,7 @@ export function useDeviceColumns(options: Options) {
     onRequestDelete,
     onPin,
     onUnpin,
+    onOpenHistory,
     menuOpenTarget,
     setMenuOpenTarget,
   ]);

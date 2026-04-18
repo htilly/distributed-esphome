@@ -346,6 +346,71 @@ export async function mockApi(page: Page) {
   // the real server during a spec: a PATCH returns the updated blob,
   // and a subsequent GET reflects the change. Reset on each test by
   // virtue of mockApi running once per beforeEach.
+  // AV.6 mock state — history + status + diff + rollback + manual commit.
+  // Trailing `*` catches any `?limit=...&offset=...` query string.
+  await page.route('**/ui/api/files/*/history*', route => {
+    route.fulfill({
+      json: [
+        {
+          hash: 'fedcba9876543210fedcba9876543210fedcba98',
+          short_hash: 'fedcba9',
+          date: Math.floor(Date.now() / 1000) - 60,
+          author_name: 'HA User',
+          author_email: 'ha@distributed-esphome.local',
+          message: 'save: living-room.yaml',
+          lines_added: 3,
+          lines_removed: 1,
+        },
+        {
+          hash: '0123456789abcdef0123456789abcdef01234567',
+          short_hash: '0123456',
+          date: Math.floor(Date.now() / 1000) - 3600,
+          author_name: 'HA User',
+          author_email: 'ha@distributed-esphome.local',
+          message: 'pin: living-room.yaml',
+          lines_added: 1,
+          lines_removed: 0,
+        },
+      ],
+    });
+  });
+  await page.route('**/ui/api/files/*/status', route => {
+    route.fulfill({
+      json: {
+        has_uncommitted_changes: false,
+        head_hash: 'fedcba9876543210fedcba9876543210fedcba98',
+        head_short_hash: 'fedcba9',
+      },
+    });
+  });
+  await page.route('**/ui/api/files/*/diff*', route => {
+    route.fulfill({
+      json: {
+        diff: '--- a/living-room.yaml\n+++ b/living-room.yaml\n@@ -1,3 +1,3 @@\n-# old line\n+# new line\n',
+      },
+    });
+  });
+  await page.route('**/ui/api/files/*/rollback', route => {
+    route.fulfill({
+      json: {
+        content: '# restored\n',
+        committed: true,
+        hash: 'cafeba5ecafeba5ecafeba5ecafeba5ecafeba5e',
+        short_hash: 'cafeba5',
+      },
+    });
+  });
+  await page.route('**/ui/api/files/*/commit', route => {
+    route.fulfill({
+      json: {
+        committed: true,
+        hash: '1111111111111111111111111111111111111111',
+        short_hash: '1111111',
+        message: 'save: living-room.yaml (manual)',
+      },
+    });
+  });
+
   const settingsState: Record<string, unknown> = {
     auto_commit_on_save: true,
     git_author_name: 'HA User',

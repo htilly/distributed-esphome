@@ -45,6 +45,8 @@ interface Props {
   onLogs: (target: string) => void;
   onPin: (target: string) => void;
   onUnpin: (target: string) => void;
+  /** AV.6: open the per-file History panel. */
+  onOpenHistory: (target: string) => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
@@ -58,6 +60,7 @@ function DeviceContextMenuImpl({
   onLogs,
   onPin,
   onUnpin,
+  onOpenHistory,
   open,
   onOpenChange,
 }: Props) {
@@ -139,6 +142,10 @@ function DeviceContextMenuImpl({
           <DropdownMenuItem onClick={() => onRename(t.target)}>Rename</DropdownMenuItem>
           {/* CD.6: duplicate this device into a new file */}
           <DropdownMenuItem onClick={() => onDuplicate(t)}>Duplicate…</DropdownMenuItem>
+          {/* AV.6: per-file version history + diff + rollback. */}
+          <DropdownMenuItem onClick={() => onOpenHistory(t.target)}>
+            View history…
+          </DropdownMenuItem>
           <DropdownMenuItem
             variant="destructive"
             onClick={() => onDelete(t.target)}

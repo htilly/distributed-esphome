@@ -27,6 +27,9 @@ interface Props {
   onToast: (msg: string, type?: ToastType) => void;
   onValidate?: (target: string) => Promise<{ success: boolean; output: string } | null>;
   onCompile?: (target: string) => void;
+  /** AV.6: callback when the user clicks the "History" toolbar button.
+   *  Parent opens the per-file HistoryPanel drawer. */
+  onOpenHistory?: (target: string) => void;
   monacoTheme?: string;
   esphomeVersion?: string | null;
 }
@@ -34,7 +37,7 @@ interface Props {
 // Track dirty-line decorations (module-level so the callback closure can access it)
 let _dirtyDecorationIds: string[] = [];
 
-export function EditorModal({ target, onClose, onSaved, onToast, onValidate, onCompile, monacoTheme = 'vs-dark', esphomeVersion }: Props) {
+export function EditorModal({ target, onClose, onSaved, onToast, onValidate, onCompile, onOpenHistory, monacoTheme = 'vs-dark', esphomeVersion }: Props) {
   const isOpen = target !== null;
   const [content, setContent] = useState('');
   const [, setLoading] = useState(false);
@@ -213,6 +216,16 @@ export function EditorModal({ target, onClose, onSaved, onToast, onValidate, onC
               title="Save and trigger firmware compile + OTA"
             >
               Save &amp; Upgrade
+            </Button>
+          )}
+          {onOpenHistory && target && !target.startsWith('.pending.') && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => onOpenHistory(target)}
+              title="View version history + diff for this file"
+            >
+              History
             </Button>
           )}
           {onValidate && target && target !== 'secrets.yaml' && (

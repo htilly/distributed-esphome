@@ -44,6 +44,7 @@ import { EsphomeVersionDropdown } from './components/EsphomeVersionDropdown';
 import { LogModal } from './components/LogModal';
 import { QueueTab } from './components/QueueTab';
 import { SettingsDrawer } from './components/SettingsDrawer';
+import { HistoryPanel } from './components/HistoryPanel';
 import { toast } from 'sonner';
 import { Toaster } from './components/ui/sonner';
 import { WorkersTab } from './components/WorkersTab';
@@ -138,6 +139,8 @@ export default function App() {
   // surfaces can deep-link into Settings later (e.g. a tooltip's
   // "Configure auto-commit →").
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // AV.6: per-file history panel. `null` = closed; otherwise the filename.
+  const [historyTarget, setHistoryTarget] = useState<string | null>(null);
   // QS.6: SWR's default compare (stable-hash) already prevents re-renders
   // when polled data is structurally unchanged. The custom JSON.stringify
   // compare we used to have was strictly worse — O(n) serialization of the
@@ -705,6 +708,7 @@ export default function App() {
             onSchedule={(t) => handleOpenUpgradeModal(t, 'schedule')}
             onNewDevice={() => setNewDeviceModal({ mode: 'new' })}
             onDuplicate={(sourceTarget) => setNewDeviceModal({ mode: 'duplicate', sourceTarget })}
+            onOpenHistory={(target) => setHistoryTarget(target)}
             onRefresh={() => mutateDevices()}
           />
         )}
@@ -825,6 +829,7 @@ export default function App() {
           // saves first (in handleSaveAndUpgrade) — this just changes what
           // happens AFTER the save.
           onCompile={(target) => handleOpenUpgradeModal(target)}
+          onOpenHistory={(target) => setHistoryTarget(target)}
           monacoTheme={theme === 'light' ? 'vs' : 'vs-dark'}
           esphomeVersion={esphomeVersions.selected ?? esphomeVersions.detected ?? undefined}
         />
@@ -843,6 +848,13 @@ export default function App() {
           can animate its own open/close; internal SWR fetch is gated
           on the `open` prop so closed state is zero network traffic. */}
       <SettingsDrawer open={settingsOpen} onOpenChange={setSettingsOpen} />
+
+      {/* AV.6: per-file History + diff panel. Same Sheet pattern —
+          mounted once, internal SWR gates on `filename !== null`. */}
+      <HistoryPanel
+        filename={historyTarget}
+        onOpenChange={(open) => { if (!open) setHistoryTarget(null); }}
+      />
 
       {/* #22: Unified Upgrade modal — handles both immediate upgrades and scheduling */}
       {upgradeModalTarget && (() => {

@@ -156,6 +156,91 @@ export async function getServerInfo(): Promise<ServerInfo> {
   return parseResponse<ServerInfo>(await apiFetch('./ui/api/server-info'), 'fetching server info');
 }
 
+// AV.3 / AV.4 / AV.5 / AV.6 / AV.11 — per-file history + diff + rollback + manual commit.
+export interface FileHistoryEntry {
+  hash: string;
+  short_hash: string;
+  date: number;
+  author_name: string;
+  author_email: string;
+  message: string;
+  lines_added: number;
+  lines_removed: number;
+}
+
+export interface FileStatus {
+  has_uncommitted_changes: boolean;
+  head_hash: string | null;
+  head_short_hash: string | null;
+}
+
+export interface CommitResult {
+  committed: boolean;
+  hash: string | null;
+  short_hash: string | null;
+  message: string | null;
+}
+
+export interface RollbackResult {
+  content: string;
+  committed: boolean;
+  hash: string | null;
+  short_hash: string | null;
+}
+
+export async function getFileHistory(filename: string, limit = 50, offset = 0): Promise<FileHistoryEntry[]> {
+  const qs = `?limit=${limit}&offset=${offset}`;
+  return parseResponse<FileHistoryEntry[]>(
+    await apiFetch(`./ui/api/files/${encodeURIComponent(filename)}/history${qs}`),
+    'fetching file history',
+  );
+}
+
+export async function getFileStatus(filename: string): Promise<FileStatus> {
+  return parseResponse<FileStatus>(
+    await apiFetch(`./ui/api/files/${encodeURIComponent(filename)}/status`),
+    'fetching file status',
+  );
+}
+
+export async function getFileDiff(
+  filename: string,
+  from?: string | null,
+  to?: string | null,
+): Promise<string> {
+  const params = new URLSearchParams();
+  if (from) params.set('from', from);
+  if (to) params.set('to', to);
+  const qs = params.toString() ? `?${params.toString()}` : '';
+  const body = await parseResponse<{ diff: string }>(
+    await apiFetch(`./ui/api/files/${encodeURIComponent(filename)}/diff${qs}`),
+    'fetching file diff',
+  );
+  return body.diff;
+}
+
+export async function rollbackFile(filename: string, hash: string): Promise<RollbackResult> {
+  return parseResponse<RollbackResult>(
+    await apiFetch(`./ui/api/files/${encodeURIComponent(filename)}/rollback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hash }),
+    }),
+    'rolling back file',
+  );
+}
+
+export async function commitFile(filename: string, message?: string): Promise<CommitResult> {
+  return parseResponse<CommitResult>(
+    await apiFetch(`./ui/api/files/${encodeURIComponent(filename)}/commit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(message ? { message } : {}),
+    }),
+    'committing file',
+  );
+}
+
 // SP.3 — in-app Settings (separate from Supervisor's options.json).
 // Keep the shape alphabetical-ish and mirrored from AppSettings in
 // ha-addon/server/settings.py. Any rename there is a UI contract change

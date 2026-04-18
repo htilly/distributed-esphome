@@ -191,6 +191,112 @@ async def get_file_history(request: web.Request) -> web.Response:
     return web.json_response(entries)
 
 
+@routes.get("/ui/api/files/{filename}/status")
+async def get_file_status(request: web.Request) -> web.Response:
+    """AV.6: per-file dirtiness + HEAD info for the history-panel banner.
+
+    Returns ``{has_uncommitted_changes, head_hash, head_short_hash}``.
+    Used by the panel to show the "You have uncommitted changes" banner
+    without chaining a separate status call.
+    """
+    filename = request.match_info["filename"]
+    cfg = _cfg(request)
+    path = safe_resolve(Path(cfg.config_dir), filename)
+    if path is None:
+        return json_error("Invalid filename", 400)
+
+    from git_versioning import file_status  # noqa: PLC0415
+    return web.json_response(file_status(Path(cfg.config_dir), filename))
+
+
+@routes.post("/ui/api/files/{filename}/rollback")
+async def post_file_rollback(request: web.Request) -> web.Response:
+    """AV.5: restore a file to a historical commit's content.
+
+    Body: ``{hash: "<sha>"}``. Returns ``{content, committed, hash,
+    short_hash}`` — ``content`` is the restored file text, ``committed``
+    tells the UI whether a new revert commit was created (happens when
+    ``settings.auto_commit_on_save`` is on).
+    """
+    filename = request.match_info["filename"]
+    cfg = _cfg(request)
+    path = safe_resolve(Path(cfg.config_dir), filename)
+    if path is None:
+        return json_error("Invalid filename", 400)
+    if not path.exists():
+        return json_error("Target not found", 404)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return json_error("Request body must be JSON", 400)
+
+    target_hash = (body.get("hash") or "").strip() if isinstance(body, dict) else ""
+    if not target_hash:
+        return json_error("hash is required", 400)
+
+    from git_versioning import rollback_file  # noqa: PLC0415
+    result = rollback_file(Path(cfg.config_dir), filename, target_hash)
+    if not result.get("content"):
+        return json_error("Rollback failed (invalid hash or git error)", 400)
+
+    # Invalidate the scanner config cache so a subsequent /content read
+    # sees the rolled-back file.
+    from scanner import _config_cache  # noqa: PLC0415
+    _config_cache.pop(filename, None)
+
+    logger.info(
+        "Rolled back %s to %s%s%s",
+        filename,
+        target_hash[:7],
+        " (committed)" if result.get("committed") else " (working tree only)",
+        _who(request),
+    )
+    _broadcast_ws("targets_changed")
+    return web.json_response(result)
+
+
+@routes.post("/ui/api/files/{filename}/commit")
+async def post_file_commit(request: web.Request) -> web.Response:
+    """AV.11: explicitly commit any pending changes to a single file.
+
+    Body: ``{message?: str}``. Returns ``{committed, hash, short_hash,
+    message}``. ``committed: false`` with ``null`` hash means there was
+    nothing to commit — not an error.
+
+    Always runs regardless of ``settings.auto_commit_on_save`` — this
+    is the manual-commit escape valve.
+    """
+    filename = request.match_info["filename"]
+    cfg = _cfg(request)
+    path = safe_resolve(Path(cfg.config_dir), filename)
+    if path is None:
+        return json_error("Invalid filename", 400)
+
+    body: dict = {}
+    if request.can_read_body:
+        try:
+            raw = await request.json()
+            if isinstance(raw, dict):
+                body = raw
+        except Exception:
+            return json_error("Request body must be JSON", 400)
+
+    message = body.get("message")
+    if message is not None and not isinstance(message, str):
+        return json_error("message must be a string", 400)
+
+    from git_versioning import commit_file_now  # noqa: PLC0415
+    result = commit_file_now(Path(cfg.config_dir), filename, message=message)
+    logger.info(
+        "Manual commit for %s: %s%s",
+        filename,
+        result.get("short_hash") or "(no-op)",
+        _who(request),
+    )
+    return web.json_response(result)
+
+
 @routes.get("/ui/api/files/{filename}/diff")
 async def get_file_diff(request: web.Request) -> web.Response:
     """AV.4: unified diff for a file between two commits (or against HEAD).

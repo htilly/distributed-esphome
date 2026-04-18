@@ -582,6 +582,180 @@ def _parse_log_with_numstat(raw: str, marker: str, field_sep: str) -> list[dict[
 # ---------------------------------------------------------------------------
 
 
+def rollback_file(config_dir: Path, relpath: str, hash: str) -> dict[str, object]:
+    """AV.5: restore *relpath* to its content at *hash*.
+
+    ``git checkout <hash> -- <relpath>`` overwrites the working-tree file
+    with the historical version. If ``settings.auto_commit_on_save`` is
+    true, we also ``git add + git commit`` so the rollback is itself a
+    recorded entry in history (``revert: <file> to <short_hash>``). If
+    auto-commit is off the working tree is left dirty — the user is
+    expected to review and commit via :func:`commit_file_now` (AV.11).
+
+    Returns a dict with:
+      - ``content``: the restored file text (empty string on failure)
+      - ``committed``: whether a revert commit was created
+      - ``hash``: the new revert commit's full SHA (None if ``committed``
+        is False)
+      - ``short_hash``: 7-char form (None if not committed)
+
+    Raises nothing — callers render the returned ``content`` and status.
+    """
+    config_dir = Path(config_dir)
+    if not _is_git_repo(config_dir):
+        logger.warning("rollback_file called on non-repo %s", config_dir)
+        return {"content": "", "committed": False, "hash": None, "short_hash": None}
+
+    # Validate hash up-front so we don't pass a shell metachar to git.
+    if not (4 <= len(hash) <= 40 and all(c in "0123456789abcdef" for c in hash.lower())):
+        logger.warning("Rejected rollback request with malformed hash: %r", hash)
+        return {"content": "", "committed": False, "hash": None, "short_hash": None}
+
+    try:
+        checkout = _run(["git", "checkout", hash, "--", relpath], cwd=config_dir, check=False)
+    except Exception:
+        logger.exception("git checkout failed for %s @ %s", relpath, hash)
+        return {"content": "", "committed": False, "hash": None, "short_hash": None}
+    if checkout.returncode != 0:
+        logger.warning("git checkout refused %s @ %s: %s", relpath, hash, (checkout.stderr or checkout.stdout).strip())
+        return {"content": "", "committed": False, "hash": None, "short_hash": None}
+
+    # Read the restored content so the UI can refresh without a separate
+    # read — the editor already rendered the old buffer by the time we
+    # got here, so handing back the new content saves a round trip.
+    content = ""
+    try:
+        content = (config_dir / relpath).read_text(encoding="utf-8")
+    except OSError:
+        logger.exception("Failed to read rolled-back file %s", relpath)
+
+    from settings import get_settings  # noqa: PLC0415
+    if not get_settings().auto_commit_on_save:
+        return {"content": content, "committed": False, "hash": None, "short_hash": None}
+
+    short = hash[:7]
+    msg = f"revert: {relpath} to {short}"
+    try:
+        add = _run(["git", "add", "--all", "--", relpath], cwd=config_dir, check=False)
+        if add.returncode != 0:
+            logger.warning("git add failed during rollback of %s", relpath)
+            return {"content": content, "committed": False, "hash": None, "short_hash": None}
+        override = _identity_override_args(config_dir)
+        commit = _run(
+            ["git", *override, "commit", "-m", msg, "--", relpath],
+            cwd=config_dir,
+            check=False,
+        )
+        if commit.returncode != 0:
+            # Nothing to commit is possible if the user rolled back to
+            # the exact current HEAD — not an error, just not a new
+            # commit. Return current HEAD as the effective hash.
+            if "nothing to commit" in (commit.stderr + commit.stdout).lower():
+                head = get_head(config_dir)
+                return {
+                    "content": content,
+                    "committed": False,
+                    "hash": head,
+                    "short_hash": head[:7] if head else None,
+                }
+            logger.warning("git commit failed during rollback: %s", (commit.stderr or commit.stdout).strip())
+            return {"content": content, "committed": False, "hash": None, "short_hash": None}
+        new_head = get_head(config_dir)
+        logger.info("Rolled back %s to %s and committed %s", relpath, short, new_head[:7] if new_head else "?")
+        return {
+            "content": content,
+            "committed": True,
+            "hash": new_head,
+            "short_hash": new_head[:7] if new_head else None,
+        }
+    except Exception:
+        logger.exception("rollback commit pipeline failed for %s", relpath)
+        return {"content": content, "committed": False, "hash": None, "short_hash": None}
+
+
+def commit_file_now(
+    config_dir: Path,
+    relpath: str,
+    message: str | None = None,
+) -> dict[str, object]:
+    """AV.11: immediate (non-debounced) commit for *relpath*.
+
+    Differs from :func:`commit_file` (auto-commit debounced path) in
+    two ways:
+
+    1. Runs inline — the caller gets the commit result back, which is
+       needed for the manual-commit UI to render the new hash.
+    2. Always runs regardless of ``settings.auto_commit_on_save``.
+       This is the "user explicitly asked to commit" action; it's the
+       escape valve for when auto-commit is off.
+
+    Returns ``{committed, hash, short_hash, message}``. ``committed`` is
+    False when there was nothing to commit (file matched HEAD) — not an
+    error, just informational.
+    """
+    config_dir = Path(config_dir)
+    if not _is_git_repo(config_dir):
+        return {"committed": False, "hash": None, "short_hash": None, "message": None}
+
+    effective_msg = message.strip() if message and message.strip() else f"save: {relpath} (manual)"
+    try:
+        add = _run(["git", "add", "--all", "--", relpath], cwd=config_dir, check=False)
+        if add.returncode != 0:
+            logger.warning("git add failed for %s: %s", relpath, (add.stderr or add.stdout).strip())
+            return {"committed": False, "hash": None, "short_hash": None, "message": None}
+
+        override = _identity_override_args(config_dir)
+        commit = _run(
+            ["git", *override, "commit", "-m", effective_msg, "--", relpath],
+            cwd=config_dir,
+            check=False,
+        )
+        if commit.returncode != 0:
+            # "nothing to commit" is the happy no-op path.
+            if "nothing to commit" in (commit.stderr + commit.stdout).lower():
+                return {"committed": False, "hash": None, "short_hash": None, "message": None}
+            logger.warning("manual commit failed for %s: %s", relpath, (commit.stderr or commit.stdout).strip())
+            return {"committed": False, "hash": None, "short_hash": None, "message": None}
+        new_head = get_head(config_dir)
+        logger.info("Manual commit for %s: %s (%s)", relpath, new_head[:7] if new_head else "?", effective_msg)
+        return {
+            "committed": True,
+            "hash": new_head,
+            "short_hash": new_head[:7] if new_head else None,
+            "message": effective_msg,
+        }
+    except Exception:
+        logger.exception("manual commit pipeline failed for %s", relpath)
+        return {"committed": False, "hash": None, "short_hash": None, "message": None}
+
+
+def file_status(config_dir: Path, relpath: str) -> dict[str, object]:
+    """AV.6 support: return per-file dirtiness + HEAD hash for the panel banner.
+
+    Returns ``{has_uncommitted_changes, head_hash, head_short_hash}``.
+    All false / None on non-repo directories.
+    """
+    config_dir = Path(config_dir)
+    if not _is_git_repo(config_dir):
+        return {"has_uncommitted_changes": False, "head_hash": None, "head_short_hash": None}
+
+    try:
+        # `--porcelain` gives a stable, parser-friendly output.
+        # Two lines possible: staged + unstaged. Either means dirty.
+        status = _run(["git", "status", "--porcelain", "--", relpath], cwd=config_dir, check=False)
+    except Exception:
+        logger.exception("git status failed for %s in %s", relpath, config_dir)
+        return {"has_uncommitted_changes": False, "head_hash": None, "head_short_hash": None}
+
+    dirty = bool(status.stdout.strip()) if status.returncode == 0 else False
+    head = get_head(config_dir)
+    return {
+        "has_uncommitted_changes": dirty,
+        "head_hash": head,
+        "head_short_hash": head[:7] if head else None,
+    }
+
+
 def file_diff(
     config_dir: Path,
     relpath: str,

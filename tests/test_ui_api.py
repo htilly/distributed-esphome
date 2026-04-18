@@ -1197,6 +1197,145 @@ async def test_file_history_endpoint_rejects_invalid_pagination(tmp_path, _setti
         await ta.close()
 
 
+async def test_file_status_endpoint(tmp_path, _settings_init):
+    """AV.6: GET /files/{f}/status reports dirty state + HEAD hash."""
+    import git_versioning as gv
+    gv._reset_for_tests()
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "bedroom.yaml", "bedroom")
+        gv.init_repo(ta.config_dir)
+
+        # Clean tree first.
+        resp = await ta.get("/ui/api/files/bedroom.yaml/status")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["has_uncommitted_changes"] is False
+        assert data["head_hash"]
+
+        # Dirty the tree without going through a committing endpoint.
+        (ta.config_dir / "bedroom.yaml").write_text("esphome:\n  name: bedroom\n# external-edit\n")
+        resp = await ta.get("/ui/api/files/bedroom.yaml/status")
+        data = await resp.json()
+        assert data["has_uncommitted_changes"] is True
+    finally:
+        gv._reset_for_tests()
+        await ta.close()
+
+
+async def test_file_rollback_endpoint_restores_and_commits(tmp_path, _settings_init):
+    """AV.5: rollback endpoint restores file content and records a revert."""
+    import git_versioning as gv
+    gv._reset_for_tests()
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "bedroom.yaml", "bedroom")
+        gv.init_repo(ta.config_dir)
+
+        # Create two more versions via editor saves.
+        old = gv.DEBOUNCE_SECONDS
+        gv.DEBOUNCE_SECONDS = 0.05
+        try:
+            await ta.post(
+                "/ui/api/targets/bedroom.yaml/content",
+                json={"content": "esphome:\n  name: bedroom\n# v2\n"},
+            )
+            await gv.drain_pending_commits()
+            await ta.post(
+                "/ui/api/targets/bedroom.yaml/content",
+                json={"content": "esphome:\n  name: bedroom\n# v3\n"},
+            )
+            await gv.drain_pending_commits()
+        finally:
+            gv.DEBOUNCE_SECONDS = old
+
+        hist = await (await ta.get("/ui/api/files/bedroom.yaml/history")).json()
+        target_hash = hist[1]["hash"]  # the v2 commit
+
+        resp = await ta.post(
+            "/ui/api/files/bedroom.yaml/rollback",
+            json={"hash": target_hash},
+        )
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["committed"] is True
+        assert "# v2" in data["content"]
+        assert "# v3" not in data["content"]
+
+        # File on disk was updated.
+        assert (ta.config_dir / "bedroom.yaml").read_text() == "esphome:\n  name: bedroom\n# v2\n"
+    finally:
+        gv._reset_for_tests()
+        await ta.close()
+
+
+async def test_file_rollback_endpoint_rejects_missing_hash(tmp_path, _settings_init):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "bedroom.yaml", "bedroom")
+        resp = await ta.post("/ui/api/files/bedroom.yaml/rollback", json={})
+        assert resp.status == 400
+    finally:
+        await ta.close()
+
+
+async def test_file_commit_endpoint_creates_commit(tmp_path, _settings_init):
+    """AV.11: manual commit endpoint works even with auto-commit off."""
+    import git_versioning as gv
+    gv._reset_for_tests()
+    # Flip auto-commit off to mimic the Pat-with-git scenario.
+    from settings import update_settings
+    await update_settings({"auto_commit_on_save": False})
+
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "bedroom.yaml", "bedroom")
+        gv.init_repo(ta.config_dir)
+
+        # Save via editor — no commit happens because auto-off.
+        await ta.post(
+            "/ui/api/targets/bedroom.yaml/content",
+            json={"content": "esphome:\n  name: bedroom\n# manually-committed\n"},
+        )
+
+        # Manual commit: no message → default marker.
+        resp = await ta.post("/ui/api/files/bedroom.yaml/commit", json={})
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["committed"] is True
+        assert data["hash"]
+        assert data["message"] == "save: bedroom.yaml (manual)"
+
+        # Re-committing without changes is a no-op.
+        resp = await ta.post("/ui/api/files/bedroom.yaml/commit", json={})
+        data = await resp.json()
+        assert data["committed"] is False
+    finally:
+        gv._reset_for_tests()
+        await ta.close()
+
+
+async def test_file_commit_endpoint_respects_custom_message(tmp_path, _settings_init):
+    import git_versioning as gv
+    gv._reset_for_tests()
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "bedroom.yaml", "bedroom")
+        gv.init_repo(ta.config_dir)
+        (ta.config_dir / "bedroom.yaml").write_text("external edit\n")
+
+        resp = await ta.post(
+            "/ui/api/files/bedroom.yaml/commit",
+            json={"message": "captured external edit"},
+        )
+        data = await resp.json()
+        assert data["committed"] is True
+        assert data["message"] == "captured external edit"
+    finally:
+        gv._reset_for_tests()
+        await ta.close()
+
+
 async def test_file_diff_endpoint_returns_unified_diff(tmp_path, _settings_init):
     """AV.4: GET /ui/api/files/{f}/diff returns a unified diff between two commits."""
     import git_versioning as gv

@@ -37,6 +37,8 @@ interface Props {
   onRequestDelete: (target: string) => void;
   onPin: (target: string) => void;
   onUnpin: (target: string) => void;
+  /** AV.6: open the per-file History panel. */
+  onOpenHistory: (target: string) => void;
   onMenuOpenChange: (open: boolean) => void;
 }
 
@@ -53,6 +55,7 @@ function ActionsCellImpl({
   onRequestDelete,
   onPin,
   onUnpin,
+  onOpenHistory,
   onMenuOpenChange,
 }: Props) {
   const upgradeVariant = t.needs_update ? 'success' : 'secondary';
@@ -80,6 +83,7 @@ function ActionsCellImpl({
         onLogs={onLogs}
         onPin={onPin}
         onUnpin={onUnpin}
+        onOpenHistory={onOpenHistory}
         open={menuOpen}
         onOpenChange={onMenuOpenChange}
       />

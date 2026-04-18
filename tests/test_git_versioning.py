@@ -609,3 +609,146 @@ def test_file_diff_rejects_malformed_hash(tmp_path: Path):
     # Shell-metachar injection attempt — must be silently rejected.
     assert gv.file_diff(d, "living-room.yaml", from_hash="abc; rm -rf /") == ""
     assert gv.file_diff(d, "living-room.yaml", to_hash="not-hex-at-all") == ""
+
+
+# ---------------------------------------------------------------------------
+# AV.5 — rollback_file
+# ---------------------------------------------------------------------------
+
+async def test_rollback_restores_file_and_creates_revert_commit(tmp_path: Path):
+    d = _make_config_dir(tmp_path)
+    gv.init_repo(d)
+    await _edit_and_commit(d, "living-room.yaml", "v2\n", "save")
+    await _edit_and_commit(d, "living-room.yaml", "v3\n", "save")
+
+    entries = gv.file_history(d, "living-room.yaml")
+    # Rollback to the pre-v3 commit.
+    target_hash = str(entries[1]["hash"])  # "v2" commit
+
+    result = gv.rollback_file(d, "living-room.yaml", target_hash)
+
+    assert result["committed"] is True
+    assert result["hash"] is not None
+    assert result["content"] == "v2\n"
+    # File on disk matches.
+    assert (d / "living-room.yaml").read_text() == "v2\n"
+    # New commit message is a revert marker.
+    latest = gv.file_history(d, "living-room.yaml")
+    assert latest[0]["message"] == f"revert: living-room.yaml to {target_hash[:7]}"
+
+
+async def test_rollback_leaves_tree_dirty_when_auto_commit_off(tmp_path: Path):
+    d = _make_config_dir(tmp_path)
+    gv.init_repo(d)
+    await _edit_and_commit(d, "living-room.yaml", "v2\n", "save")
+
+    entries = gv.file_history(d, "living-room.yaml")
+    target_hash = str(entries[-1]["hash"])  # back to initial commit content
+
+    # Disable auto-commit.
+    await settings_mod.update_settings({"auto_commit_on_save": False})
+
+    result = gv.rollback_file(d, "living-room.yaml", target_hash)
+
+    # Checkout ran and restored the content...
+    assert result["content"] == "esphome:\n  name: living-room\n"
+    # ...but no revert commit was made.
+    assert result["committed"] is False
+    assert result["hash"] is None
+    # History unchanged — only the pre-existing 2 commits remain.
+    assert len(gv.file_history(d, "living-room.yaml")) == 2
+
+
+def test_rollback_rejects_malformed_hash(tmp_path: Path):
+    d = _make_config_dir(tmp_path)
+    gv.init_repo(d)
+    result = gv.rollback_file(d, "living-room.yaml", "abc; rm -rf /")
+    assert result["content"] == ""
+    assert result["committed"] is False
+
+
+def test_rollback_on_non_repo_is_safe(tmp_path: Path):
+    d = _make_config_dir(tmp_path)
+    result = gv.rollback_file(d, "living-room.yaml", "deadbeef")
+    assert result == {"content": "", "committed": False, "hash": None, "short_hash": None}
+
+
+# ---------------------------------------------------------------------------
+# AV.11 — commit_file_now
+# ---------------------------------------------------------------------------
+
+def test_commit_file_now_creates_a_commit(tmp_path: Path):
+    d = _make_config_dir(tmp_path)
+    gv.init_repo(d)
+    (d / "living-room.yaml").write_text("manually-staged\n")
+
+    result = gv.commit_file_now(d, "living-room.yaml", message=None)
+
+    assert result["committed"] is True
+    assert result["hash"]
+    assert result["message"] == "save: living-room.yaml (manual)"
+
+
+def test_commit_file_now_respects_custom_message(tmp_path: Path):
+    d = _make_config_dir(tmp_path)
+    gv.init_repo(d)
+    (d / "living-room.yaml").write_text("hand-edited\n")
+
+    result = gv.commit_file_now(d, "living-room.yaml", message="tidy up formatting")
+
+    assert result["committed"] is True
+    assert result["message"] == "tidy up formatting"
+
+
+def test_commit_file_now_returns_false_when_nothing_to_commit(tmp_path: Path):
+    """File matches HEAD → no commit. Not an error."""
+    d = _make_config_dir(tmp_path)
+    gv.init_repo(d)
+
+    result = gv.commit_file_now(d, "living-room.yaml", message=None)
+
+    # Initial commit already captured the file — nothing further to commit.
+    assert result["committed"] is False
+    assert result["hash"] is None
+
+
+async def test_commit_file_now_ignores_auto_commit_setting(tmp_path: Path):
+    """The whole point of manual commit: works even when auto-commit is off."""
+    d = _make_config_dir(tmp_path)
+    gv.init_repo(d)
+    await settings_mod.update_settings({"auto_commit_on_save": False})
+
+    (d / "living-room.yaml").write_text("edit while auto-off\n")
+    result = gv.commit_file_now(d, "living-room.yaml", message=None)
+
+    assert result["committed"] is True
+
+
+# ---------------------------------------------------------------------------
+# AV.6 — file_status
+# ---------------------------------------------------------------------------
+
+def test_file_status_reports_clean_tree(tmp_path: Path):
+    d = _make_config_dir(tmp_path)
+    gv.init_repo(d)
+
+    status = gv.file_status(d, "living-room.yaml")
+
+    assert status["has_uncommitted_changes"] is False
+    assert status["head_hash"] is not None
+    assert status["head_short_hash"] == status["head_hash"][:7]  # type: ignore[index]
+
+
+def test_file_status_detects_uncommitted_modification(tmp_path: Path):
+    d = _make_config_dir(tmp_path)
+    gv.init_repo(d)
+    (d / "living-room.yaml").write_text("edited without commit\n")
+
+    status = gv.file_status(d, "living-room.yaml")
+    assert status["has_uncommitted_changes"] is True
+
+
+def test_file_status_on_non_repo_is_clean(tmp_path: Path):
+    d = _make_config_dir(tmp_path)
+    status = gv.file_status(d, "living-room.yaml")
+    assert status == {"has_uncommitted_changes": False, "head_hash": None, "head_short_hash": None}
