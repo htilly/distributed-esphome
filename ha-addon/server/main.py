@@ -963,6 +963,20 @@ async def _fetch_pypi_versions(session: aiohttp.ClientSession) -> list[str]:
     return []
 
 
+# Bug #30: used by the standalone-Docker fallback to pick "latest stable"
+# from a PyPI version list. Stable ESPHome versions are pure digit-and-dot
+# strings ("2024.3.0"); pre-releases carry letters ("2024.3.0b1", "…rc1").
+_STABLE_VERSION_RE = re.compile(r"^\d+(\.\d+)*$")
+
+
+def _pick_latest_stable_version(versions: list[str]) -> Optional[str]:
+    """Return the first stable entry from a newest-first list, or None."""
+    for v in versions:
+        if _STABLE_VERSION_RE.match(v):
+            return v
+    return None
+
+
 async def pypi_version_refresher(app: web.Application) -> None:
     """Background task: refresh PyPI versions hourly and re-check HA ESPHome add-on every 30s.
 
@@ -1204,22 +1218,68 @@ def create_app() -> web.Application:
             ensure_esphome_installed,
         )
 
+        # `_get_installed_esphome_version()` returns the string "installing"
+        # or "unknown" as diagnostic sentinels when no ESPHome is bundled.
+        # Those aren't real versions — don't cache them as the selected
+        # version (would pollute UI payloads and compile-job stamps).
+        # Leave `_selected_esphome_version` unset; the install flow below
+        # will set it once it resolves a real version.
         selected = _get_installed_esphome_version()
-        set_esphome_version(selected)
-        logger.info("Active ESPHome version: %s (background task will refine from HA Supervisor)", selected)
+        if selected not in ("installing", "unknown"):
+            set_esphome_version(selected)
+            logger.info(
+                "Active ESPHome version: %s (background task will refine from HA Supervisor)",
+                selected,
+            )
+        else:
+            logger.info(
+                "No bundled ESPHome; version will be resolved from HA Supervisor "
+                "or PyPI fallback (bug #30)"
+            )
 
-        # SE.2: kick off the lazy-install of ESPHome into the server's
-        # venv cache. While SE.1 hasn't shipped yet (ESPHome is still
-        # bundled in requirements.txt), this is effectively a no-op on
-        # the hot path — VersionManager.ensure_version is a fast cache
-        # hit if the version is already installed. Once SE.1 lands and
-        # the bundled package is gone, this becomes the primary install
-        # path. Runs in an executor so it never blocks aiohttp startup.
+        # SE.2 + bug #30: lazy-install ESPHome into the server's venv
+        # cache. Three paths to a version:
+        #   1. Bundled package (test harness / pre-SE.1): `selected` is
+        #      already a real version.
+        #   2. HA add-on: the `pypi_version_refresher` loop picks up the
+        #      Supervisor-reported version within 30s and triggers its
+        #      own `ensure_esphome_installed`. We defer to that path and
+        #      don't pre-install a PyPI default.
+        #   3. Standalone Docker (no `SUPERVISOR_TOKEN`, no bundled
+        #      package): fall back to the latest stable from PyPI so the
+        #      user isn't stuck on the "Installing ESPHome…" banner
+        #      forever (GitHub #63).
+        # Runs in an executor so it never blocks aiohttp startup.
         async def _install_esphome_background() -> None:
             target = _get_installed_esphome_version()
             if target in ("unknown", "installing"):
-                # No point trying to install a phantom version.
-                return
+                if os.environ.get("SUPERVISOR_TOKEN"):
+                    # Path 2 — the refresher loop will resolve + install
+                    # from the HA ESPHome add-on's version. Nothing to do.
+                    return
+                # Path 3 — fetch latest stable from PyPI.
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        versions = await _fetch_pypi_versions(session)
+                except Exception:
+                    logger.exception("Bug #30: PyPI version fetch raised")
+                    versions = []
+                picked = _pick_latest_stable_version(versions)
+                if picked is None:
+                    logger.warning(
+                        "Bug #30: no bundled ESPHome, no HA Supervisor, "
+                        "and PyPI lookup returned no stable versions. "
+                        "UI will keep showing 'Installing ESPHome…'; "
+                        "user must pick a version manually once network "
+                        "access or Supervisor comes back."
+                    )
+                    return
+                target = picked
+                logger.info(
+                    "Bug #30: no Supervisor and no bundled ESPHome — "
+                    "installing latest stable from PyPI: %s", target,
+                )
+                set_esphome_version(target)
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, ensure_esphome_installed, target)
         app["esphome_install_task"] = asyncio.create_task(_install_esphome_background())
