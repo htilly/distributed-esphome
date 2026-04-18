@@ -89,41 +89,55 @@ def test_init_repo_creates_git_and_initial_commit(tmp_path: Path):
     assert "Initial commit by distributed-esphome" in messages[0]
 
 
-def test_init_repo_is_idempotent_on_existing_repo(tmp_path: Path):
+def test_init_repo_leaves_preexisting_repo_alone(tmp_path: Path):
+    """Pre-existing user repo: no new commit, no .gitignore touch."""
     d = _make_config_dir(tmp_path)
-    # Pre-seed as a user's own git repo with a manual commit.
+    # Pre-seed as a user's own git repo with their own curated gitignore.
     subprocess.run(["git", "init", "-b", "main"], cwd=str(d), check=True, capture_output=True)
     subprocess.run(["git", "config", "user.name", "User"], cwd=str(d), check=True)
     subprocess.run(["git", "config", "user.email", "u@x.com"], cwd=str(d), check=True)
-    # Leave .gitignore missing on purpose — we should append to it.
+    (d / ".gitignore").write_text("/.esphome/\n**/.pioenvs/\n")  # user's curated set
+    original_gitignore = (d / ".gitignore").read_text()
     subprocess.run(["git", "add", "-A"], cwd=str(d), check=True)
     subprocess.run(["git", "commit", "-m", "user's own initial"], cwd=str(d), check=True, capture_output=True)
 
     gv.init_repo(d)
 
-    # Still only the user's commit — we didn't add our own.
+    # Only the user's commit — we didn't add our own.
     messages = _log_messages(d)
     assert messages == ["user's own initial"]
-    # But .gitignore now has our entries.
+    # .gitignore is byte-identical — we never touch a pre-existing
+    # user's curated gitignore, even if our safety-net entries are
+    # missing. Respects Pat-with-git's autonomy.
+    assert (d / ".gitignore").read_text() == original_gitignore
+
+
+def test_init_repo_writes_gitignore_on_fresh_init_only(tmp_path: Path):
+    """Fresh Fleet-init: .gitignore is created with safety-net entries.
+
+    Pre-existing repos (see the separate test) get left alone.
+    """
+    d = _make_config_dir(tmp_path)
+
+    gv.init_repo(d)
+
     gi = (d / ".gitignore").read_text()
     assert "secrets.yaml" in gi
     assert ".esphome/" in gi
 
 
-def test_init_repo_appends_only_missing_gitignore_entries(tmp_path: Path):
+def test_init_repo_uses_smart_gitignore_on_fresh_init(tmp_path: Path):
+    """Fresh init: if there's somehow a pre-existing .gitignore (not a repo
+    yet), we still recognise equivalent forms and don't duplicate lines."""
     d = _make_config_dir(tmp_path)
-    (d / ".gitignore").write_text("secrets.yaml\n# my own comment\nmy-ignored-dir/\n")
+    # Not a git repo yet — but somebody dropped a .gitignore in the dir.
+    (d / ".gitignore").write_text("/.esphome/\n/secrets.yaml\n")
+    original = (d / ".gitignore").read_text()
 
     gv.init_repo(d)
 
-    gi = (d / ".gitignore").read_text()
-    # Existing lines preserved verbatim.
-    assert "# my own comment" in gi
-    assert "my-ignored-dir/" in gi
-    # secrets.yaml already present — not duplicated.
-    assert gi.count("secrets.yaml") == 1
-    # Missing entry appended.
-    assert ".esphome/" in gi
+    # Leading-slash forms cover our safety-net entries; no append.
+    assert (d / ".gitignore").read_text() == original
 
 
 def test_init_repo_tolerates_missing_config_dir(tmp_path: Path, caplog):
@@ -181,6 +195,129 @@ async def test_commit_file_produces_a_commit(tmp_path: Path):
     messages = _log_messages(d)
     assert len(messages) == baseline + 1
     assert messages[0] == "save: living-room.yaml"
+
+
+async def test_commit_file_respects_preexisting_user_identity(tmp_path: Path):
+    """Hass-4 regression: a pre-existing repo's user.name/email must survive.
+
+    Before the fix, ``_do_commit`` passed ``-c user.name=HA User`` on
+    every commit, which stomped the user's own identity on any
+    pre-existing repo. Now commits pick up whatever the repo / user
+    / system config resolves to.
+    """
+    d = _make_config_dir(tmp_path)
+    subprocess.run(["git", "init", "-b", "main"], cwd=str(d), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Stefan Zier"], cwd=str(d), check=True)
+    subprocess.run(["git", "config", "user.email", "stefan@zier.com"], cwd=str(d), check=True)
+    subprocess.run(["git", "add", "-A"], cwd=str(d), check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial checkin"],
+        cwd=str(d),
+        check=True,
+        capture_output=True,
+    )
+
+    gv.init_repo(d)  # pre-existing path — must not touch identity.
+
+    old = gv.DEBOUNCE_SECONDS
+    gv.DEBOUNCE_SECONDS = 0.05
+    try:
+        (d / "living-room.yaml").write_text("edited\n")
+        await gv.commit_file(d, "living-room.yaml", "save")
+        await gv.drain_pending_commits()
+    finally:
+        gv.DEBOUNCE_SECONDS = old
+
+    # Grab the author of the top commit.
+    result = subprocess.run(
+        ["git", "log", "--format=%an <%ae>", "-1"],
+        cwd=str(d),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "Stefan Zier <stefan@zier.com>"
+
+
+async def test_commit_file_uses_fleet_identity_on_fresh_init(tmp_path: Path):
+    """Fresh Fleet-init repo still shows 'HA User' as the commit author."""
+    d = _make_config_dir(tmp_path)
+    gv.init_repo(d)
+
+    old = gv.DEBOUNCE_SECONDS
+    gv.DEBOUNCE_SECONDS = 0.05
+    try:
+        (d / "living-room.yaml").write_text("edited\n")
+        await gv.commit_file(d, "living-room.yaml", "save")
+        await gv.drain_pending_commits()
+    finally:
+        gv.DEBOUNCE_SECONDS = old
+
+    result = subprocess.run(
+        ["git", "log", "--format=%an <%ae>", "-1"],
+        cwd=str(d),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "HA User <ha@distributed-esphome.local>"
+
+
+def test_init_repo_installs_identity_fallback_on_bare_preexisting(tmp_path: Path, monkeypatch):
+    """Pre-existing repo with NO user identity configured anywhere.
+
+    Without a fallback, every subsequent auto-commit would fail with
+    *'Please tell me who you are'*. We install the Fleet identity as a
+    per-repo fallback only when no identity can be resolved.
+    """
+    # Scrub any host-level git identity so `git var GIT_AUTHOR_IDENT`
+    # genuinely fails inside the test.
+    for var in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "fake-home"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "fake-home" / ".gitconfig-nonexistent"))
+
+    d = _make_config_dir(tmp_path)
+    subprocess.run(["git", "init", "-b", "main"], cwd=str(d), check=True, capture_output=True)
+    # Deliberately do NOT set user.name / user.email.
+
+    gv.init_repo(d)
+
+    # After init, the repo should have Fleet identity set locally as
+    # the fallback — so commits won't error.
+    name = subprocess.run(
+        ["git", "config", "user.name"],
+        cwd=str(d),
+        capture_output=True,
+        text=True,
+    )
+    email = subprocess.run(
+        ["git", "config", "user.email"],
+        cwd=str(d),
+        capture_output=True,
+        text=True,
+    )
+    assert name.stdout.strip() == gv.GIT_AUTHOR_NAME
+    assert email.stdout.strip() == gv.GIT_AUTHOR_EMAIL
+
+
+def test_init_repo_does_not_override_existing_identity(tmp_path: Path):
+    d = _make_config_dir(tmp_path)
+    subprocess.run(["git", "init", "-b", "main"], cwd=str(d), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Stefan Zier"], cwd=str(d), check=True)
+    subprocess.run(["git", "config", "user.email", "stefan@zier.com"], cwd=str(d), check=True)
+
+    gv.init_repo(d)
+
+    name = subprocess.run(
+        ["git", "config", "user.name"],
+        cwd=str(d),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert name.stdout.strip() == "Stefan Zier"
 
 
 async def test_commit_file_debounces_coalesces_rapid_calls(tmp_path: Path):

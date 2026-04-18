@@ -10,7 +10,7 @@ Start the add-on, then open the web UI via the **ESPHome Fleet** entry in the HA
 
 1. Your existing ESPHome configs in `/config/esphome/` are picked up automatically — you should see them on the **Devices** tab.
 2. The add-on includes a **built-in local worker** that runs inside the HA host. It starts paused. Go to **Workers**, find the `local-worker` row, and use the `+`/`-` slot buttons to set its parallel-build capacity (1 or 2 is a reasonable default on a Pi; 4+ on a fast host). The moment slot count is above zero, the worker starts claiming jobs.
-3. To offload compilation to a faster machine, click **+ Connect Worker** in the Workers tab. Pick **Bash**, **PowerShell**, or **Docker Compose**, copy the generated snippet, and run it on whatever machine you want to compile on. The snippet includes your actual server URL and token, so there's nothing to edit.
+3. To offload compilation to a faster machine, click **+ Connect Worker** in the Workers tab. Pick **Bash**, **PowerShell**, or **Docker Compose**, copy the generated snippet, and run it on whatever machine you want to compile on. The snippet includes your actual server URL and token, so there's nothing to edit. Workers poll the add-on over HTTP for jobs (bearer token auth) and push firmware directly to ESP devices; no inbound ports need to be open on the worker machine, but it does need network reach to the ESP devices it'll flash.
 4. Home Assistant will pop an "ESPHome Fleet discovered" notification a few seconds after the add-on is running. Accept it to get all the devices, workers, and the add-on itself as real HA devices with entities.
 
 Add-on configuration options (token, job / OTA timeouts, polling intervals, auth knob) live in the add-on's **Configuration** tab in Home Assistant.
@@ -34,6 +34,18 @@ On first boot after upgrading to 1.6.0, any of these fields that previously live
 **Schedules.** Every scheduled upgrade in one view. Recurring (daily/weekly/monthly or full cron) and one-time future schedules. Schedules live in the device YAML itself so they travel with your config and respect each device's pinned ESPHome version.
 
 **Header** has a dark/light theme toggle, a "streamer mode" that blurs tokens and secrets (for screen-sharing demos), the currently-selected ESPHome version (changes for all new compiles unless overridden per-device via pinning), a shortcut to edit `secrets.yaml`, and a link to [ESPHome Web](https://web.esphome.io/) for browser-based initial flashing.
+
+### Running different ESPHome versions across your fleet
+
+The header dropdown sets the **global** ESPHome version — every new compile uses it unless a device is pinned. To pin a device, open the row menu (⋮) on the **Devices** tab and choose **Pin ESPHome version**. Pinned devices stick to their version regardless of what the global selector says; scheduled upgrades on a pinned device respect its pin.
+
+Typical uses:
+
+- **Beta-test a release** on one low-stakes device (a garage sensor, an outdoor thermometer) while leaving the rest of the fleet on the stable version.
+- **Hold a picky device back** on a known-good version indefinitely when a newer ESPHome release breaks a component you depend on.
+- **Stage an upgrade** — flip the global version, compile one device, verify, then bulk-upgrade everything outdated.
+
+Workers install whatever ESPHome version each job asks for, on demand, into a local per-version venv and keep a small LRU cache so subsequent jobs using that version start instantly. `MAX_ESPHOME_VERSIONS` on the worker (default 3) controls the cache size.
 
 ## Verifying what you're running
 

@@ -77,9 +77,10 @@ def _is_git_repo(path: Path) -> bool:
 def init_repo(config_dir: Path) -> None:
     """Initialize *config_dir* as a git repo if it isn't one already.
 
-    Idempotent. If the directory already has a ``.git/`` we only ensure
-    :data:`GITIGNORE_ENTRIES` are present; we never stomp the user's
-    existing config. Failures are logged and swallowed.
+    Idempotent. On a pre-existing repo we only append missing
+    :data:`GITIGNORE_ENTRIES` and set a fallback user identity (so
+    commits don't fail on a bare repo with no author configured) —
+    the user's own config is never overridden.
     """
     config_dir = Path(config_dir)
     if not config_dir.is_dir():
@@ -89,7 +90,11 @@ def init_repo(config_dir: Path) -> None:
     try:
         if _is_git_repo(config_dir):
             logger.info("%s is already a git repo; skipping auto-init", config_dir)
-            _ensure_gitignore(config_dir)
+            # Do NOT touch the user's curated .gitignore on a pre-existing
+            # repo — Pat-with-git owns that file. We only ensure there's
+            # a usable commit identity so auto-commits don't throw the
+            # "please tell me who you are" warning on every write.
+            _ensure_identity_fallback(config_dir)
             return
 
         # Fresh init. `-b main` sets the default branch deterministically
@@ -123,11 +128,66 @@ def init_repo(config_dir: Path) -> None:
         logger.exception("Unexpected failure during git auto-init of %s", config_dir)
 
 
-def _ensure_gitignore(config_dir: Path) -> None:
-    """Ensure :data:`GITIGNORE_ENTRIES` appear in ``.gitignore``.
+def _ensure_identity_fallback(config_dir: Path) -> None:
+    """Set a Fleet identity only if the repo has nothing explicitly configured.
 
-    Appends missing entries; never rewrites or reorders existing content.
-    Safe on a user-managed repo with their own gitignore.
+    Respects the user's own ``user.name``/``user.email`` — whether set
+    per-repo, per-user, or system-wide. Only installs the Fleet default
+    when both are genuinely unset anywhere. Modern git (2.30+) happily
+    synthesizes an identity from the OS ``/etc/passwd`` gecos + hostname
+    but prints a noisy *"configured automatically"* warning on every
+    commit — that's the case we want to short-circuit on pre-existing
+    repos where nobody's told git who to be.
+    """
+    try:
+        name = _run(["git", "config", "--get", "user.name"], cwd=config_dir, check=False)
+        email = _run(["git", "config", "--get", "user.email"], cwd=config_dir, check=False)
+    except Exception:
+        logger.exception("git config probe failed in %s", config_dir)
+        return
+
+    if name.stdout.strip() and email.stdout.strip():
+        return
+
+    logger.info(
+        "%s has no git identity configured; setting Fleet fallback so auto-commits work",
+        config_dir,
+    )
+    try:
+        _run(["git", "config", "user.name", GIT_AUTHOR_NAME], cwd=config_dir)
+        _run(["git", "config", "user.email", GIT_AUTHOR_EMAIL], cwd=config_dir)
+    except Exception:
+        logger.exception("Failed to set fallback git identity in %s", config_dir)
+
+
+def _gitignore_equivalents(entry: str) -> set[str]:
+    """Return the set of gitignore patterns equivalent to *entry* at repo root.
+
+    A user may ignore ``.esphome/`` by writing any of
+    ``.esphome/`` / ``.esphome`` / ``/.esphome/`` / ``/.esphome`` —
+    from git's perspective they all hide the repo-root directory.
+    Treating these as equivalent keeps us from sprinkling redundant
+    lines into a user's curated gitignore on boot (see hass-4 incident
+    where ``/.esphome/`` was already present and we added ``.esphome/``).
+    """
+    stripped = entry.strip().strip("/")
+    if not stripped:
+        return set()
+    # Build every leading-slash / trailing-slash permutation.
+    cores = {stripped}
+    return {
+        form
+        for core in cores
+        for form in (core, f"/{core}", f"{core}/", f"/{core}/")
+    }
+
+
+def _ensure_gitignore(config_dir: Path) -> None:
+    """Ensure :data:`GITIGNORE_ENTRIES` are covered in ``.gitignore``.
+
+    Appends only entries that aren't already covered by an equivalent
+    pattern. Never rewrites or reorders existing content. Safe on a
+    user-managed repo with their own curated gitignore.
     """
     gi = config_dir / ".gitignore"
     existing = ""
@@ -138,8 +198,18 @@ def _ensure_gitignore(config_dir: Path) -> None:
             logger.exception("Failed to read %s", gi)
             return
 
-    existing_lines = {line.strip() for line in existing.splitlines()}
-    missing = [entry for entry in GITIGNORE_ENTRIES if entry not in existing_lines]
+    # Collect normalized covered patterns (ignoring comments and blank
+    # lines, and trailing-slash/leading-slash variants).
+    covered: set[str] = set()
+    for raw_line in existing.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # A more permissive covers-check: any of the equivalents of this
+        # line counts as covering that equivalent of our entry.
+        covered |= _gitignore_equivalents(line)
+
+    missing = [entry for entry in GITIGNORE_ENTRIES if entry not in covered]
     if not missing:
         return
 
@@ -268,11 +338,14 @@ def _do_commit(config_dir: Path, relpath: str, action: str) -> None:
             logger.warning("git add failed for %s: %s", relpath, (add.stderr or add.stdout).strip())
             return
 
+        # Don't override ``user.name``/``user.email`` on the commit —
+        # we respect whatever the repo (or user, or system) has
+        # configured. On a fresh Fleet-init repo we set ``HA User`` at
+        # init time, so that's the default for new installs. On a
+        # pre-existing user repo, the user's own identity is preserved.
         result = _run(
             [
                 "git",
-                "-c", f"user.name={GIT_AUTHOR_NAME}",
-                "-c", f"user.email={GIT_AUTHOR_EMAIL}",
                 "commit",
                 "-m", f"{action}: {relpath}",
                 "--", relpath,
