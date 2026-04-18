@@ -22,14 +22,36 @@ def _reset_auto_versioning_state():
     pytest-asyncio creates a fresh loop per test function, so any task
     left in ``_pending`` from a prior test is bound to a now-closed
     loop. Resetting between tests keeps locks/tasks loop-local.
+
+    Also clears the bug-#7 auth-failure rate-limit state in main.py
+    so tests that assert on WARNING lines don't see suppressed output
+    from a prior test with the same (peer_ip, reason) key.
     """
     try:
         import git_versioning as _gv
     except ImportError:
-        yield
-        return
-    _gv._reset_for_tests()
+        _gv = None
+    try:
+        import main as _main
+    except ImportError:
+        _main = None
+
+    if _gv is not None:
+        _gv._reset_for_tests()
+    if _main is not None:
+        if hasattr(_main, "_auth_fail_last_logged"):
+            _main._auth_fail_last_logged.clear()
+        if hasattr(_main, "_auth_fail_suppressed"):
+            _main._auth_fail_suppressed.clear()
+
     yield
-    _gv._reset_for_tests()
+
+    if _gv is not None:
+        _gv._reset_for_tests()
+    if _main is not None:
+        if hasattr(_main, "_auth_fail_last_logged"):
+            _main._auth_fail_last_logged.clear()
+        if hasattr(_main, "_auth_fail_suppressed"):
+            _main._auth_fail_suppressed.clear()
 
 

@@ -6,7 +6,7 @@ import { History, RotateCcw, AlertTriangle } from 'lucide-react';
 
 import {
   commitFile,
-  getFileDiff,
+  getFileContentAt,
   getFileHistory,
   getFileStatus,
   rollbackFile,
@@ -88,35 +88,23 @@ export function HistoryPanel({ filename, onOpenChange, onFileChanged }: HistoryP
     setToHash(prev => (prev === WORKING_TREE || entries.some(e => e.hash === prev)) ? prev : WORKING_TREE);
   }, [entries]);
 
-  // Diff is also SWR-backed so we don't re-fetch on every keystroke in
-  // the banner's commit-message field.
-  const diffKey = open && filename && (fromHash || toHash)
-    ? ['fileDiff', filename, fromHash || null, toHash === WORKING_TREE ? null : toHash]
-    : null;
+  // Bug #10: side-by-side diff. Fetch the file's content at both
+  // hashes separately (or the working tree for WORKING_TREE / unset)
+  // and feed them to Monaco's DiffEditor with renderSideBySide on.
+  const fromKey = open && filename ? ['fileContentAt', filename, fromHash || null] : null;
+  const toKey = open && filename ? ['fileContentAt', filename, toHash === WORKING_TREE ? null : toHash] : null;
 
-  const { data: diffText = '', isLoading: diffLoading } = useSWR<string>(
-    diffKey,
-    () => getFileDiff(
-      filename!,
-      fromHash || undefined,
-      toHash === WORKING_TREE ? undefined : toHash,
-    ),
+  const { data: fromContent = '', isLoading: fromLoading } = useSWR<string>(
+    fromKey,
+    () => getFileContentAt(filename!, fromHash || null),
     { revalidateOnFocus: false },
   );
-
-  // Restored-text payloads for the DiffEditor. We fetch the file at a
-  // specific commit lazily via `git show <hash>:<path>` — but that's
-  // not exposed yet. For the MVP, we render the unified-diff text as a
-  // text file in the left pane and the same text in the right; this
-  // looks mediocre. Better: compute the before/after snippets by
-  // applying the diff. Simplest path: show diffText in a read-only
-  // mono editor instead of the DiffEditor side-by-side view.
-  //
-  // Actually cleaner: we DO have enough info — just render the diff
-  // itself in a single Monaco editor with `language="diff"` so the
-  // viewer gets red/green syntax highlighting. Two-pane view is nice
-  // but requires server-side "give me file content at <hash>" — a
-  // future enhancement once we add that endpoint.
+  const { data: toContent = '', isLoading: toLoading } = useSWR<string>(
+    toKey,
+    () => getFileContentAt(filename!, toHash === WORKING_TREE ? null : toHash),
+    { revalidateOnFocus: false },
+  );
+  const diffLoading = fromLoading || toLoading;
 
   // --- Actions ---
 
@@ -224,53 +212,52 @@ export function HistoryPanel({ filename, onOpenChange, onFileChanged }: HistoryP
             </div>
           )}
 
-          {/* Compare pills — From ↔ To */}
-          <div className="flex items-center gap-2 mb-3 text-xs">
-            <span className="text-[var(--text-muted)]">Compare:</span>
+          {/* Compare pills — side by side, each aligned above its DiffEditor pane (bug #10). */}
+          <div className="grid grid-cols-2 gap-2 mb-2 text-xs">
             <HashPicker
-              label="From"
+              label="From (left pane)"
               value={fromHash}
               entries={entries ?? []}
               onChange={setFromHash}
               allowWorkingTree
             />
-            <span className="text-[var(--text-muted)]">↔</span>
             <HashPicker
-              label="To"
+              label="To (right pane)"
               value={toHash}
               entries={entries ?? []}
               onChange={setToHash}
               allowWorkingTree
             />
-            <span className="ml-auto text-[var(--text-muted)]">
-              {fromLabel} → {toLabel}
-            </span>
+          </div>
+          <div className="text-xs text-[var(--text-muted)] mb-2">
+            Comparing <code className="font-mono">{fromLabel}</code> → <code className="font-mono">{toLabel}</code>
           </div>
 
-          {/* Diff viewer — Monaco with language=diff for red/green highlighting. */}
-          <div className="h-[280px] border border-[var(--border)] rounded-md overflow-hidden mb-4">
+          {/* Diff viewer — Monaco DiffEditor in side-by-side mode (bug #10). */}
+          <div className="h-[360px] border border-[var(--border)] rounded-md overflow-hidden mb-4">
             {diffLoading ? (
               <div className="p-3 text-xs text-[var(--text-muted)]">Loading diff…</div>
-            ) : diffText ? (
+            ) : fromContent === toContent ? (
+              <div className="p-3 text-xs text-[var(--text-muted)]">
+                No differences between {fromLabel} and {toLabel}.
+              </div>
+            ) : (
               <DiffEditor
-                original={''}
-                modified={diffText}
-                language="diff"
+                original={fromContent}
+                modified={toContent}
+                language="yaml"
                 theme="vs-dark"
                 options={{
                   readOnly: true,
-                  renderSideBySide: false,
+                  renderSideBySide: true,
                   renderOverviewRuler: false,
                   minimap: { enabled: false },
                   scrollBeyondLastLine: false,
                   fontSize: 12,
-                  lineNumbers: 'off',
+                  lineNumbers: 'on',
+                  originalEditable: false,
                 }}
               />
-            ) : (
-              <div className="p-3 text-xs text-[var(--text-muted)]">
-                No differences between {fromLabel} and {toLabel}.
-              </div>
             )}
           </div>
 
@@ -335,10 +322,10 @@ function HashPicker({
   allowWorkingTree: boolean;
 }) {
   return (
-    <label className="inline-flex items-center gap-1 text-xs">
-      <span className="text-[var(--text-muted)]">{label}:</span>
+    <label className="flex flex-col gap-1 text-xs">
+      <span className="text-[var(--text-muted)]">{label}</span>
       <select
-        className="rounded border border-[var(--border)] bg-[var(--surface2)] px-1.5 py-0.5 font-mono text-xs text-[var(--text)] outline-none"
+        className="w-full rounded border border-[var(--border)] bg-[var(--surface2)] px-2 py-1 font-mono text-xs text-[var(--text)] outline-none"
         value={value}
         onChange={e => onChange(e.target.value)}
       >

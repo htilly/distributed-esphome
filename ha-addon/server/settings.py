@@ -64,6 +64,12 @@ IMPORT_FROM_OPTIONS: tuple[str, ...] = (
 # installs don't suddenly issue a fresh token on upgrade.
 LEGACY_TOKEN_FILE = Path("/data/auth_token")
 
+# Bug #9: marker file that records we've already cleared Supervisor's
+# stale options cache. When this file is present, we don't call the
+# Supervisor API again on subsequent boots. Persisted under /data so it
+# survives add-on restarts but is discarded if the user wipes /data.
+SUPERVISOR_OPTIONS_CLEARED_MARKER = Path("/data/.supervisor_options_cleared")
+
 # Supervisor HTTP endpoint that returns this add-on's user-stored
 # options. Critical for the SP.8 migration path: when config.yaml
 # drops its ``options:``/``schema:`` blocks, Supervisor stops
@@ -284,6 +290,58 @@ def _read_json(path: Path) -> dict[str, Any]:
     except Exception:
         logger.exception("Failed to read %s; treating as empty", path)
     return {}
+
+
+def clear_supervisor_options_if_needed() -> None:
+    """Bug #9: silence Supervisor's "Option X does not exist in the schema"
+    WARNINGs that fire once per option-read after SP.8 stripped the
+    schema from config.yaml.
+
+    Supervisor keeps an in-memory copy of the add-on's last-known
+    user-configured options (``token``, ``job_timeout``, etc.). After
+    SP.8, the schema is empty, so every option read logs a warning for
+    each now-unknown key. The fix is to POST an empty options payload
+    to ``/addons/self/options`` once after a successful settings
+    migration — Supervisor rewrites its cache, the warnings stop.
+
+    Guarded by a marker file so it runs at most once per install. On
+    failure (no SUPERVISOR_TOKEN, network error) we log DEBUG and move
+    on — the warnings are cosmetic, not load-bearing.
+    """
+    if SUPERVISOR_OPTIONS_CLEARED_MARKER.exists():
+        return
+
+    token = os.environ.get("SUPERVISOR_TOKEN", "")
+    if not token:
+        # Not running under Supervisor — nothing to clear.
+        return
+
+    import urllib.error  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    try:
+        req = urllib.request.Request(
+            "http://supervisor/addons/self/options",
+            data=json.dumps({"options": {}}).encode(),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:  # noqa: S310 (Supervisor-local URL is trusted)
+            if 200 <= resp.status < 300:
+                logger.info(
+                    "Cleared Supervisor's stale options cache (SP.8 schema strip) — warnings should stop"
+                )
+                try:
+                    SUPERVISOR_OPTIONS_CLEARED_MARKER.write_text("1")
+                except OSError:
+                    logger.exception("Failed to write %s", SUPERVISOR_OPTIONS_CLEARED_MARKER)
+            else:
+                logger.debug("Supervisor options-clear returned %d", resp.status)
+    except Exception:
+        logger.debug("Supervisor options-clear failed; will retry next boot", exc_info=True)
 
 
 def _read_supervisor_options() -> dict[str, Any]:

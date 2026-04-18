@@ -203,6 +203,15 @@ export async function getFileStatus(filename: string): Promise<FileStatus> {
   );
 }
 
+export async function getFileContentAt(filename: string, hash?: string | null): Promise<string> {
+  const qs = hash ? `?hash=${encodeURIComponent(hash)}` : '';
+  const body = await parseResponse<{ content: string }>(
+    await apiFetch(`./ui/api/files/${encodeURIComponent(filename)}/content-at${qs}`),
+    'fetching file content at commit',
+  );
+  return body.content;
+}
+
 export async function getFileDiff(
   filename: string,
   from?: string | null,

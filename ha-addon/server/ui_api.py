@@ -191,6 +191,26 @@ async def get_file_history(request: web.Request) -> web.Response:
     return web.json_response(entries)
 
 
+@routes.get("/ui/api/files/{filename}/content-at")
+async def get_file_content_at(request: web.Request) -> web.Response:
+    """Bug #10: return the content of a file at a specific commit (or
+    working tree if no hash given). Feeds the side-by-side diff view.
+    """
+    filename = request.match_info["filename"]
+    cfg = _cfg(request)
+    path = safe_resolve(Path(cfg.config_dir), filename)
+    if path is None:
+        return json_error("Invalid filename", 400)
+
+    hash_arg = request.rel_url.query.get("hash", "").strip() or None
+
+    from git_versioning import file_content_at  # noqa: PLC0415
+    content = file_content_at(Path(cfg.config_dir), filename, hash_arg)
+    if content is None:
+        return json_error("Could not read file at that version", 400)
+    return web.json_response({"content": content})
+
+
 @routes.get("/ui/api/files/{filename}/status")
 async def get_file_status(request: web.Request) -> web.Response:
     """AV.6: per-file dirtiness + HEAD info for the history-panel banner.

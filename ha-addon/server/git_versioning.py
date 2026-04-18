@@ -729,6 +729,48 @@ def commit_file_now(
         return {"committed": False, "hash": None, "short_hash": None, "message": None}
 
 
+def file_content_at(config_dir: Path, relpath: str, hash: str | None) -> str | None:
+    """Return the content of *relpath* at commit *hash*, or ``None`` on error.
+
+    When ``hash`` is ``None``, returns the current working-tree content
+    (what's on disk right now). Used by the History panel's side-by-side
+    diff viewer (bug #10) to render both sides in Monaco's ``DiffEditor``.
+
+    Hash values are validated as 4-40 hex chars to keep shell metachars
+    out of ``git show``.
+    """
+    config_dir = Path(config_dir)
+
+    # Working-tree read doesn't need a git repo.
+    if hash is None:
+        try:
+            return (config_dir / relpath).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return ""
+        except Exception:
+            logger.exception("Failed to read %s for content-at(None)", relpath)
+            return None
+
+    if not _is_git_repo(config_dir):
+        return None
+    if not (4 <= len(hash) <= 40 and all(c in "0123456789abcdef" for c in hash.lower())):
+        logger.warning("Rejected content-at request with malformed hash: %r", hash)
+        return None
+
+    try:
+        # `git show <hash>:<path>` prints the file's contents at that commit.
+        result = _run(["git", "show", f"{hash}:{relpath}"], cwd=config_dir, check=False)
+    except Exception:
+        logger.exception("git show failed for %s @ %s", relpath, hash)
+        return None
+
+    if result.returncode != 0:
+        # File didn't exist at that commit → return "" so the diff
+        # viewer renders it as "added" / "deleted" cleanly.
+        return ""
+    return result.stdout
+
+
 def file_status(config_dir: Path, relpath: str) -> dict[str, object]:
     """AV.6 support: return per-file dirtiness + HEAD hash for the panel banner.
 

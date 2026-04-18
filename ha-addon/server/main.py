@@ -179,6 +179,35 @@ def _normalize_peer_ip(raw: str) -> str:
         return raw
 
 
+# Bug #7: rate-limiting state for the auth-failure WARNING emitter.
+# Log once per (peer_ip, reason) pair per AUTH_FAIL_LOG_WINDOW_SECONDS,
+# and then again with a summary count of suppressed lines when the
+# next real log fires — so operators still see the pattern without
+# the raw line-per-request torrent (hass-4 saw ~14k/hour).
+AUTH_FAIL_LOG_WINDOW_SECONDS = 60.0
+_auth_fail_last_logged: dict[tuple[str, str], float] = {}
+_auth_fail_suppressed: dict[tuple[str, str], int] = {}
+
+
+def _log_auth_failure(path: str, reason: str, peer_ip: str) -> None:
+    """Throttled WARNING emitter for /api/v1/* auth failures."""
+    from constants import HA_SUPERVISOR_IP  # noqa: PLC0415
+    now = time.monotonic()
+    key = (peer_ip or "<unknown>", reason)
+    last = _auth_fail_last_logged.get(key, 0.0)
+    elapsed = now - last
+    if elapsed < AUTH_FAIL_LOG_WINDOW_SECONDS:
+        _auth_fail_suppressed[key] = _auth_fail_suppressed.get(key, 0) + 1
+        return
+    suppressed = _auth_fail_suppressed.pop(key, 0)
+    tail = f" ({suppressed} similar suppressed in last {int(elapsed)}s)" if suppressed else ""
+    logger.warning(
+        "401 on %s: reason=%s peer_ip=%s (expected supervisor=%s)%s",
+        path, reason, peer_ip or "<unknown>", HA_SUPERVISOR_IP, tail,
+    )
+    _auth_fail_last_logged[key] = now
+
+
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
     path = request.path
@@ -222,16 +251,14 @@ async def auth_middleware(request: web.Request, handler):
             # Diagnose the refusal. Each branch logs a distinct structured
             # reason so operators can tell "wrong token" from "missing header"
             # from "non-supervisor peer IP" without enabling debug logging.
+            # Rate-limited per (peer_ip, reason) via _log_auth_failure (#7).
             if not auth_header:
                 reason = "missing_authorization_header"
             elif not auth_header.startswith("Bearer "):
                 reason = "authorization_not_bearer_scheme"
             else:
                 reason = "bearer_token_mismatch"
-            logger.warning(
-                "401 on %s: reason=%s peer_ip=%s (expected supervisor=%s)",
-                path, reason, peer_ip or "<unknown>", HA_SUPERVISOR_IP,
-            )
+            _log_auth_failure(path, reason, peer_ip or "")
         else:
             # No token configured — allow all (development mode)
             logger.warning("No auth token configured; allowing unauthenticated request to %s", path)
@@ -1043,8 +1070,14 @@ def create_app() -> web.Application:
     # SP.1/SP.2: load in-app settings (/data/settings.json) — created on
     # first boot after 1.6 upgrade and seeded from the current options.json
     # for any fields that have migrated. See ha-addon/server/settings.py.
-    from settings import init_settings  # noqa: PLC0415
+    from settings import clear_supervisor_options_if_needed, init_settings  # noqa: PLC0415
     init_settings()
+    # Bug #9: after the settings have been safely imported, tell
+    # Supervisor to drop its stale options cache so it stops spamming
+    # "Option X does not exist in the schema" warnings on every read.
+    # One-shot — a marker file under /data prevents re-POSTing on
+    # subsequent boots.
+    clear_supervisor_options_if_needed()
 
     queue = JobQueue()
     queue.load()

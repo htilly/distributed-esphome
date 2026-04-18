@@ -546,13 +546,22 @@ async def test_file_history_follows_renames(tmp_path: Path):
     await _edit_and_commit(d, "living-room.yaml", "v2\n", "save")
 
     # Rename via git mv (simulating what the rename endpoint does).
+    # Bug #6: CI runners have no global git identity, and post-SP.8
+    # init_repo no longer writes user.name/email into .git/config
+    # either (the production commit path uses `-c` overrides instead).
+    # So the raw subprocess commit below needs its own ``-c`` overrides
+    # — otherwise ``fatal: empty ident name (for <runner@...>)``.
     import subprocess
     subprocess.run(
         ["git", "mv", "living-room.yaml", "den.yaml"],
         cwd=str(d), check=True, capture_output=True,
     )
     subprocess.run(
-        ["git", "commit", "-m", "rename: living-room.yaml → den.yaml"],
+        [
+            "git",
+            "-c", "user.name=Test", "-c", "user.email=test@example.com",
+            "commit", "-m", "rename: living-room.yaml → den.yaml",
+        ],
         cwd=str(d), check=True, capture_output=True,
     )
     await _edit_and_commit(d, "den.yaml", "v3 after rename\n", "save")

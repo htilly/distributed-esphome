@@ -390,6 +390,18 @@ export async function mockApi(page: Page) {
       },
     });
   });
+  // Bug #10: content-at endpoint for side-by-side diff.
+  await page.route('**/ui/api/files/*/content-at*', route => {
+    const url = new URL(route.request().url());
+    const hash = url.searchParams.get('hash');
+    route.fulfill({
+      json: {
+        content: hash
+          ? `esphome:\n  name: living-room\n# content-at ${hash.slice(0, 7)}\n`
+          : 'esphome:\n  name: living-room\n# current working tree\n',
+      },
+    });
+  });
   await page.route('**/ui/api/files/*/rollback', route => {
     route.fulfill({
       json: {
