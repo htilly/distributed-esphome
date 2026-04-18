@@ -154,6 +154,68 @@ async def get_esphome_schema(request: web.Request) -> web.Response:
     return web.json_response({"components": _esphome_components_cache})
 
 
+# ---------------------------------------------------------------------------
+# AV.3 / AV.4 — file history + diff
+# ---------------------------------------------------------------------------
+
+@routes.get("/ui/api/files/{filename}/history")
+async def get_file_history(request: web.Request) -> web.Response:
+    """AV.3: per-file git history (newest first), paginated.
+
+    Query params:
+      - ``limit`` (default 50, max 500) — page size
+      - ``offset`` (default 0) — how many commits to skip
+
+    Returns ``[{hash, short_hash, date, author_name, author_email,
+    message, lines_added, lines_removed}]``. Empty list if the file has
+    no commit history yet (and 200 either way — callers render a
+    friendly "no history yet" rather than treating empty as an error).
+    """
+    filename = request.match_info["filename"]
+    cfg = _cfg(request)
+    path = safe_resolve(Path(cfg.config_dir), filename)
+    if path is None:
+        return json_error("Invalid filename", 400)
+
+    try:
+        limit = min(max(int(request.rel_url.query.get("limit", "50")), 1), 500)
+    except ValueError:
+        return json_error("limit must be an integer", 400)
+    try:
+        offset = max(int(request.rel_url.query.get("offset", "0")), 0)
+    except ValueError:
+        return json_error("offset must be an integer", 400)
+
+    from git_versioning import file_history  # noqa: PLC0415
+    entries = file_history(Path(cfg.config_dir), filename, limit=limit, offset=offset)
+    return web.json_response(entries)
+
+
+@routes.get("/ui/api/files/{filename}/diff")
+async def get_file_diff(request: web.Request) -> web.Response:
+    """AV.4: unified diff for a file between two commits (or against HEAD).
+
+    Query params:
+      - ``from`` — commit hash (optional; omit to diff working tree vs HEAD)
+      - ``to`` — commit hash (optional; omit to diff *from* against HEAD)
+
+    Returns ``{"diff": "<unified diff text>"}``. Empty string when the
+    two versions are identical or the file has no history.
+    """
+    filename = request.match_info["filename"]
+    cfg = _cfg(request)
+    path = safe_resolve(Path(cfg.config_dir), filename)
+    if path is None:
+        return json_error("Invalid filename", 400)
+
+    from_hash = request.rel_url.query.get("from", "").strip() or None
+    to_hash = request.rel_url.query.get("to", "").strip() or None
+
+    from git_versioning import file_diff  # noqa: PLC0415
+    diff = file_diff(Path(cfg.config_dir), filename, from_hash=from_hash, to_hash=to_hash)
+    return web.json_response({"diff": diff})
+
+
 @routes.get("/ui/api/settings")
 async def get_settings_handler(request: web.Request) -> web.Response:
     """SP.3: return the current in-app Settings blob.
@@ -1158,6 +1220,8 @@ async def pin_target_version(request: web.Request) -> web.Response:
     meta["pin_version"] = version
     write_device_meta(cfg.config_dir, filename, meta)
     logger.info("Pinned %s to version %s%s", filename, version, _who(request))
+    from git_versioning import commit_file  # noqa: PLC0415
+    await commit_file(Path(cfg.config_dir), filename, "pin")
     return web.json_response({"ok": True, "pinned_version": version})
 
 
@@ -1174,6 +1238,8 @@ async def unpin_target_version(request: web.Request) -> web.Response:
     meta.pop("pin_version", None)
     write_device_meta(cfg.config_dir, filename, meta)
     logger.info("Unpinned %s%s", filename, _who(request))
+    from git_versioning import commit_file  # noqa: PLC0415
+    await commit_file(Path(cfg.config_dir), filename, "unpin")
     return web.json_response({"ok": True})
 
 @routes.post("/ui/api/targets/{filename}/meta")
@@ -1204,6 +1270,8 @@ async def update_target_meta(request: web.Request) -> web.Response:
             meta[key] = value
     write_device_meta(cfg.config_dir, filename, meta)
     logger.info("Updated metadata for %s: %s%s", filename, list(body.keys()), _who(request))
+    from git_versioning import commit_file  # noqa: PLC0415
+    await commit_file(Path(cfg.config_dir), filename, "meta")
     return web.json_response({"ok": True})
 
 
@@ -1264,6 +1332,8 @@ async def set_target_schedule(request: web.Request) -> web.Response:
     import scheduler as _sched  # noqa: PLC0415
     _sched.sync_target(filename)
     logger.info("Schedule set for %s: %s (tz=%s)%s", filename, cron_expr, tz or "UTC", _who(request))
+    from git_versioning import commit_file  # noqa: PLC0415
+    await commit_file(Path(cfg.config_dir), filename, "schedule")
     return web.json_response({
         "ok": True,
         "schedule": cron_expr,
@@ -1298,6 +1368,8 @@ async def delete_target_schedule(request: web.Request) -> web.Response:
     import scheduler as _sched  # noqa: PLC0415
     _sched.sync_target(filename)
     logger.info("Schedule removed for %s%s", filename, _who(request))
+    from git_versioning import commit_file  # noqa: PLC0415
+    await commit_file(Path(cfg.config_dir), filename, "unschedule")
     return web.json_response({"ok": True})
 
 
@@ -1318,6 +1390,8 @@ async def toggle_target_schedule(request: web.Request) -> web.Response:
     import scheduler as _sched  # noqa: PLC0415
     _sched.sync_target(filename)
     logger.info("Schedule toggled for %s: enabled=%s%s", filename, meta["schedule_enabled"], _who(request))
+    from git_versioning import commit_file  # noqa: PLC0415
+    await commit_file(Path(cfg.config_dir), filename, "schedule toggle")
     return web.json_response({"ok": True, "schedule_enabled": meta["schedule_enabled"]})
 
 
@@ -1364,6 +1438,8 @@ async def set_target_schedule_once(request: web.Request) -> web.Response:
     import scheduler as _sched  # noqa: PLC0415
     _sched.sync_target(filename)
     logger.info("One-time schedule set for %s at %s%s", filename, dt_str, _who(request))
+    from git_versioning import commit_file  # noqa: PLC0415
+    await commit_file(Path(cfg.config_dir), filename, "schedule once")
     return web.json_response({"ok": True, "schedule_once": dt_str})
 
 
@@ -1668,6 +1744,8 @@ async def delete_target(request: web.Request) -> web.Response:
     _config_cache.pop(filename, None)
 
     logger.info("Deleted config %s (archive=%s)%s", filename, archive, _who(request))
+    from git_versioning import commit_file  # noqa: PLC0415
+    await commit_file(config_dir, filename, "delete")
     _broadcast_ws("targets_changed")
     return web.json_response({"ok": True})
 
@@ -1714,6 +1792,8 @@ async def restore_archive(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=500)
 
     logger.info("Restored config %s from archive", filename)
+    from git_versioning import commit_file  # noqa: PLC0415
+    await commit_file(config_dir, filename, "restore")
     return web.json_response({"ok": True})
 
 
@@ -1835,6 +1915,13 @@ async def rename_target(request: web.Request) -> web.Response:
     )
     logger.info("Enqueued compile+OTA for renamed device %s", new_filename)
 
+    # AV.2: commit both paths so the rename shows up as a
+    # delete-of-old + add-of-new. `git add --all -- <path>` picks up
+    # the missing-file state for the old path.
+    from git_versioning import commit_file  # noqa: PLC0415
+    if new_filename != filename:
+        await commit_file(config_dir, filename, "rename (old)")
+    await commit_file(config_dir, new_filename, "rename")
     return web.json_response({"ok": True, "new_filename": new_filename})
 
 

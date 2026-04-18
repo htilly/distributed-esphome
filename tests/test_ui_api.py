@@ -1149,6 +1149,96 @@ async def test_editor_save_triggers_auto_commit(tmp_path, _settings_init):
         await ta.close()
 
 
+async def test_file_history_endpoint_returns_entries(tmp_path, _settings_init):
+    """AV.3: GET /ui/api/files/{f}/history returns the file's commit log."""
+    import subprocess
+    import git_versioning as gv
+    gv._reset_for_tests()
+
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "bedroom.yaml", "bedroom")
+        gv.init_repo(ta.config_dir)
+
+        # Make an edit via the editor endpoint so we get a commit.
+        old = gv.DEBOUNCE_SECONDS
+        gv.DEBOUNCE_SECONDS = 0.05
+        try:
+            resp = await ta.post(
+                "/ui/api/targets/bedroom.yaml/content",
+                json={"content": "esphome:\n  name: bedroom\n# edit 1\n"},
+            )
+            assert resp.status == 200
+            await gv.drain_pending_commits()
+        finally:
+            gv.DEBOUNCE_SECONDS = old
+
+        resp = await ta.get("/ui/api/files/bedroom.yaml/history")
+        assert resp.status == 200
+        entries = await resp.json()
+        assert isinstance(entries, list)
+        assert len(entries) >= 1
+        # Newest entry should be our save.
+        assert entries[0]["message"].startswith("save: bedroom.yaml")
+        assert "hash" in entries[0]
+        assert "short_hash" in entries[0]
+        assert isinstance(entries[0]["date"], int)
+    finally:
+        gv._reset_for_tests()
+        await ta.close()
+
+
+async def test_file_history_endpoint_rejects_invalid_pagination(tmp_path, _settings_init):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        resp = await ta.get("/ui/api/files/bedroom.yaml/history?limit=nope")
+        assert resp.status == 400
+    finally:
+        await ta.close()
+
+
+async def test_file_diff_endpoint_returns_unified_diff(tmp_path, _settings_init):
+    """AV.4: GET /ui/api/files/{f}/diff returns a unified diff between two commits."""
+    import git_versioning as gv
+    gv._reset_for_tests()
+
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "bedroom.yaml", "bedroom")
+        gv.init_repo(ta.config_dir)
+
+        old = gv.DEBOUNCE_SECONDS
+        gv.DEBOUNCE_SECONDS = 0.05
+        try:
+            await ta.post(
+                "/ui/api/targets/bedroom.yaml/content",
+                json={"content": "esphome:\n  name: bedroom\n# v2\n"},
+            )
+            await gv.drain_pending_commits()
+            await ta.post(
+                "/ui/api/targets/bedroom.yaml/content",
+                json={"content": "esphome:\n  name: bedroom\n# v3\n"},
+            )
+            await gv.drain_pending_commits()
+        finally:
+            gv.DEBOUNCE_SECONDS = old
+
+        hist_resp = await ta.get("/ui/api/files/bedroom.yaml/history")
+        entries = await hist_resp.json()
+        newer = entries[0]["hash"]
+        older = entries[1]["hash"]
+
+        diff_resp = await ta.get(f"/ui/api/files/bedroom.yaml/diff?from={older}&to={newer}")
+        assert diff_resp.status == 200
+        body = await diff_resp.json()
+        assert "diff" in body
+        assert "-# v2" in body["diff"]
+        assert "+# v3" in body["diff"]
+    finally:
+        gv._reset_for_tests()
+        await ta.close()
+
+
 async def test_editor_save_skips_commit_when_toggle_off(tmp_path, _settings_init):
     """AV.2: turning off auto_commit_on_save disables the git interaction."""
     import subprocess

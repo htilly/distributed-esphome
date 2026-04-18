@@ -147,7 +147,7 @@ def test_init_repo_uses_smart_gitignore_on_fresh_init(tmp_path: Path):
     yet), we still recognise equivalent forms and don't duplicate lines."""
     d = _make_config_dir(tmp_path)
     # Not a git repo yet — but somebody dropped a .gitignore in the dir.
-    (d / ".gitignore").write_text("/.esphome/\n/secrets.yaml\n")
+    (d / ".gitignore").write_text("/.esphome/\n/secrets.yaml\n/.archive/\n")
     original = (d / ".gitignore").read_text()
 
     gv.init_repo(d)
@@ -468,3 +468,144 @@ def test_get_head_on_non_repo_returns_none(tmp_path: Path):
     d = tmp_path / "not-a-repo"
     d.mkdir()
     assert gv.get_head(d) is None
+
+
+# ---------------------------------------------------------------------------
+# AV.3 — file_history
+# ---------------------------------------------------------------------------
+
+async def _edit_and_commit(d: Path, filename: str, content: str, action: str) -> None:
+    """Shortcut: write a file, call commit_file, drain the debounce."""
+    (d / filename).write_text(content)
+    old = gv.DEBOUNCE_SECONDS
+    gv.DEBOUNCE_SECONDS = 0.02
+    try:
+        await gv.commit_file(d, filename, action)
+        await gv.drain_pending_commits()
+    finally:
+        gv.DEBOUNCE_SECONDS = old
+
+
+async def test_file_history_returns_entries_newest_first(tmp_path: Path):
+    d = _make_config_dir(tmp_path)
+    gv.init_repo(d)
+
+    await _edit_and_commit(d, "living-room.yaml", "v2\n", "save")
+    await _edit_and_commit(d, "living-room.yaml", "v3\n", "pin")
+
+    entries = gv.file_history(d, "living-room.yaml")
+
+    # Initial commit + two edits.
+    assert len(entries) >= 2
+    # Newest first.
+    assert entries[0]["message"] == "pin: living-room.yaml"
+    assert entries[1]["message"] == "save: living-room.yaml"
+    # Shape checks.
+    for e in entries:
+        assert isinstance(e["hash"], str) and len(e["hash"]) == 40
+        assert isinstance(e["short_hash"], str) and 4 <= len(e["short_hash"]) <= 40
+        assert isinstance(e["date"], int)
+        assert isinstance(e["author_name"], str)
+        assert isinstance(e["lines_added"], int)
+        assert isinstance(e["lines_removed"], int)
+
+
+async def test_file_history_paginates(tmp_path: Path):
+    d = _make_config_dir(tmp_path)
+    gv.init_repo(d)
+    for i in range(5):
+        await _edit_and_commit(d, "living-room.yaml", f"v{i}\n", f"edit-{i}")
+
+    first = gv.file_history(d, "living-room.yaml", limit=2, offset=0)
+    second = gv.file_history(d, "living-room.yaml", limit=2, offset=2)
+
+    assert len(first) == 2
+    assert len(second) == 2
+    assert first[0]["hash"] != second[0]["hash"]
+    # first[1] is immediately older than first[0]; second[0] should be
+    # two commits older than first[0].
+    all_hashes = [e["hash"] for e in first + second]
+    assert len(set(all_hashes)) == 4  # no duplicates across pages
+
+
+def test_file_history_empty_when_file_never_committed(tmp_path: Path):
+    d = _make_config_dir(tmp_path)
+    gv.init_repo(d)
+    (d / "new-untracked.yaml").write_text("esphome:\n  name: new\n")
+    assert gv.file_history(d, "new-untracked.yaml") == []
+
+
+def test_file_history_empty_on_non_repo(tmp_path: Path):
+    d = _make_config_dir(tmp_path)
+    assert gv.file_history(d, "living-room.yaml") == []
+
+
+async def test_file_history_follows_renames(tmp_path: Path):
+    d = _make_config_dir(tmp_path)
+    gv.init_repo(d)
+    await _edit_and_commit(d, "living-room.yaml", "v2\n", "save")
+
+    # Rename via git mv (simulating what the rename endpoint does).
+    import subprocess
+    subprocess.run(
+        ["git", "mv", "living-room.yaml", "den.yaml"],
+        cwd=str(d), check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "rename: living-room.yaml → den.yaml"],
+        cwd=str(d), check=True, capture_output=True,
+    )
+    await _edit_and_commit(d, "den.yaml", "v3 after rename\n", "save")
+
+    # Asking for den.yaml's history should include the pre-rename commits.
+    entries = gv.file_history(d, "den.yaml")
+    messages = [e["message"] for e in entries]
+    assert any("save: living-room.yaml" in m for m in messages)
+    assert any("save: den.yaml" in m for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# AV.4 — file_diff
+# ---------------------------------------------------------------------------
+
+async def test_file_diff_between_two_commits(tmp_path: Path):
+    d = _make_config_dir(tmp_path)
+    gv.init_repo(d)
+    await _edit_and_commit(d, "living-room.yaml", "v1\nline2\n", "save")
+    await _edit_and_commit(d, "living-room.yaml", "v2\nline2-changed\n", "save")
+
+    entries = gv.file_history(d, "living-room.yaml")
+    newer = str(entries[0]["hash"])
+    older = str(entries[1]["hash"])
+
+    diff = gv.file_diff(d, "living-room.yaml", from_hash=older, to_hash=newer)
+
+    assert "--- " in diff
+    assert "+++ " in diff
+    assert "-v1" in diff
+    assert "+v2" in diff
+
+
+async def test_file_diff_against_working_tree(tmp_path: Path):
+    d = _make_config_dir(tmp_path)
+    gv.init_repo(d)
+    await _edit_and_commit(d, "living-room.yaml", "committed\n", "save")
+
+    # Make a local edit without committing.
+    (d / "living-room.yaml").write_text("committed\nplus uncommitted line\n")
+
+    diff = gv.file_diff(d, "living-room.yaml")
+    assert "+plus uncommitted line" in diff
+
+
+def test_file_diff_empty_on_non_repo(tmp_path: Path):
+    d = _make_config_dir(tmp_path)
+    assert gv.file_diff(d, "living-room.yaml") == ""
+
+
+def test_file_diff_rejects_malformed_hash(tmp_path: Path):
+    d = _make_config_dir(tmp_path)
+    gv.init_repo(d)
+    # Shell-metachar injection attempt — must be silently rejected.
+    assert gv.file_diff(d, "living-room.yaml", from_hash="abc; rm -rf /") == ""
+    assert gv.file_diff(d, "living-room.yaml", to_hash="not-hex-at-all") == ""

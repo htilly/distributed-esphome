@@ -37,9 +37,11 @@ _FALLBACK_AUTHOR_NAME = "HA User"
 _FALLBACK_AUTHOR_EMAIL = "ha@distributed-esphome.local"
 
 # .gitignore entries that should always exist on an ESPHome config dir —
-# secrets shouldn't end up in commits, and the ESPHome build cache is
-# huge and machine-local.
-GITIGNORE_ENTRIES: tuple[str, ...] = ("secrets.yaml", ".esphome/")
+# secrets shouldn't end up in commits, the ESPHome build cache is huge
+# and machine-local, and `.archive/` is Fleet's soft-delete holding pen
+# (the canonical delete already shows up in git as a delete; we don't
+# need to also track the archive-dir copy).
+GITIGNORE_ENTRIES: tuple[str, ...] = ("secrets.yaml", ".esphome/", ".archive/")
 
 # 2-second debounce window for auto-commits (per path).
 DEBOUNCE_SECONDS = 2.0
@@ -453,3 +455,181 @@ def get_head(config_dir: Path) -> str | None:
     except Exception:
         logger.exception("git rev-parse HEAD failed in %s", config_dir)
     return None
+
+
+# ---------------------------------------------------------------------------
+# AV.3 — History
+# ---------------------------------------------------------------------------
+
+
+def file_history(
+    config_dir: Path,
+    relpath: str,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict[str, object]]:
+    """Return commit history for *relpath*, newest first.
+
+    Each entry: ``{hash, short_hash, message, date, author, lines_added,
+    lines_removed}``. ``--follow`` tracks renames, so asking for
+    ``bedroom.yaml``'s history still works after it was renamed from
+    ``upstairs-bedroom.yaml``.
+
+    Empty list on any of: not a git repo, file never committed, git
+    errors. Never raises — callers render "no history yet" when empty.
+    """
+    config_dir = Path(config_dir)
+    if not _is_git_repo(config_dir):
+        return []
+
+    # Per-commit header line starts with a distinct marker so we can
+    # parse line-by-line and correctly associate `--numstat` lines with
+    # the commit they follow. The output shape is:
+    #
+    #     C<sep>SHA<sep>SHORT<sep>EPOCH<sep>NAME<sep>EMAIL<sep>MESSAGE
+    #     <blank>
+    #     <added>\t<removed>\t<path>     (one or more numstat lines)
+    #     C<sep>...                       (next commit)
+    #
+    # NOTE: field separator is ``\x1f`` (Unit Separator), NOT ``\x1e``
+    # (Record Separator) — the latter is listed by Python's
+    # ``str.splitlines()`` as a line boundary, which shreds every
+    # header into one-field-per-line during parsing.
+    marker = "C"
+    sep = "\x1f"
+    fmt = sep.join([marker, "%H", "%h", "%at", "%an", "%ae", "%s"])
+
+    try:
+        result = _run(
+            [
+                "git", "log",
+                f"--skip={max(offset, 0)}",
+                f"--max-count={max(limit, 1)}",
+                "--follow",
+                "--numstat",
+                f"--format={fmt}",
+                "--",
+                relpath,
+            ],
+            cwd=config_dir,
+            check=False,
+        )
+    except Exception:
+        logger.exception("git log failed for %s in %s", relpath, config_dir)
+        return []
+
+    if result.returncode != 0:
+        logger.debug("git log for %s returned %d: %s", relpath, result.returncode, result.stderr.strip())
+        return []
+
+    return _parse_log_with_numstat(result.stdout, marker, sep)
+
+
+def _parse_log_with_numstat(raw: str, marker: str, field_sep: str) -> list[dict[str, object]]:
+    """Parse ``git log --numstat`` output with a per-commit header marker."""
+    entries: list[dict[str, object]] = []
+    current: dict[str, object] | None = None
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith(marker + field_sep):
+            if current is not None:
+                entries.append(current)
+            fields = line.split(field_sep)
+            if len(fields) < 7:
+                current = None
+                continue
+            _m, sha, short_sha, epoch, author_name, author_email, message = fields[:7]
+            try:
+                epoch_int = int(epoch)
+            except ValueError:
+                epoch_int = 0
+            current = {
+                "hash": sha,
+                "short_hash": short_sha,
+                "date": epoch_int,
+                "author_name": author_name,
+                "author_email": author_email,
+                "message": message,
+                "lines_added": 0,
+                "lines_removed": 0,
+            }
+            continue
+        # numstat lines: "<added>\t<removed>\t<path>". Binary files show "-".
+        if current is None:
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        added, removed = parts[0], parts[1]
+        if added != "-":
+            try:
+                current["lines_added"] = int(current["lines_added"]) + int(added)  # type: ignore[arg-type]
+            except ValueError:
+                pass
+        if removed != "-":
+            try:
+                current["lines_removed"] = int(current["lines_removed"]) + int(removed)  # type: ignore[arg-type]
+            except ValueError:
+                pass
+    if current is not None:
+        entries.append(current)
+    return entries
+
+
+# ---------------------------------------------------------------------------
+# AV.4 — Diff
+# ---------------------------------------------------------------------------
+
+
+def file_diff(
+    config_dir: Path,
+    relpath: str,
+    from_hash: str | None = None,
+    to_hash: str | None = None,
+) -> str:
+    """Return a unified diff string for *relpath* between two commits.
+
+    - Both hashes given → ``git diff <from> <to> -- <path>``
+    - Only *from_hash* given → diff against HEAD
+    - Only *to_hash* given → diff the working tree (uncommitted changes)
+      against *to_hash* (unusual; mostly for symmetry)
+    - Neither given → diff the working tree against HEAD (uncommitted
+      changes on the current branch)
+
+    Empty string on any of: not a git repo, file has no history, git
+    errors, or the two versions are identical. Rejects shell-metachar
+    input by validating hashes against ``[0-9a-f]{4,40}``.
+    """
+    config_dir = Path(config_dir)
+    if not _is_git_repo(config_dir):
+        return ""
+
+    def _valid_hash(h: str) -> bool:
+        return 4 <= len(h) <= 40 and all(c in "0123456789abcdef" for c in h.lower())
+
+    for h in (from_hash, to_hash):
+        if h and not _valid_hash(h):
+            logger.warning("Rejected diff request with malformed hash: %r", h)
+            return ""
+
+    args = ["git", "diff", "--no-color"]
+    if from_hash and to_hash:
+        args += [from_hash, to_hash]
+    elif from_hash:
+        args += [from_hash, "HEAD"]
+    elif to_hash:
+        args += [to_hash]
+    # else: default working-tree-vs-HEAD (no extra args).
+    args += ["--", relpath]
+
+    try:
+        result = _run(args, cwd=config_dir, check=False)
+    except Exception:
+        logger.exception("git diff failed for %s in %s", relpath, config_dir)
+        return ""
+
+    if result.returncode != 0:
+        logger.debug("git diff returned %d: %s", result.returncode, result.stderr.strip())
+        return ""
+    return result.stdout
