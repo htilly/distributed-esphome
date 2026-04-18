@@ -180,10 +180,10 @@ Surfaced by the 2026-04-16 archive sweep. Each item was deferred (or filed as a 
 
 ## Open Bugs & Tweaks
 
-- [ ] 1 Doc update. Add a note in the installation section about the Home Assistant integration. I believe it requires a restart of Home Assistant to become visible. 
+- [x] **1** *(1.6.0-dev.7)* Doc update. First-steps list in `DOCS.md` now includes an explicit "Restart Home Assistant" step so users know the bundled `esphome_fleet` custom integration only becomes active after HA Core restarts (it's auto-copied to `/config/custom_components/` on add-on boot, but Core loads integrations at startup). Also adds a note about restarting HA again after future add-on upgrades that change the integration.
 
-- [ ] 2 in docs.md, make sure we are documenting all the configuration parameters of the add-on that remain after we moved most of it to settings.
+- [x] **2** *(1.6.0-dev.7)* `DOCS.md` now has a full per-option table for the Supervisor Configuration tab (`token`, `job_timeout`, `ota_timeout`, `worker_offline_threshold`, `device_poll_interval`, `require_ha_auth`) — default + what it does for each. The Settings-drawer section picked up the new `git_author_name`/`git_author_email` row alongside the existing entries.
 
-- [ ] 3 is it possible to match the icon in the home assistant sidebar for the add-on to the one for ESPHome? 
+- [x] **3** *(1.6.0-dev.7)* `panel_icon` switched from `mdi:progress-wrench` to `mdi:chip` — same icon ESPHome Device Builder uses in the HA sidebar, so Fleet and Builder sit next to each other with matching visual vocabulary.
 
-- [ ] 4 Light mode now is really bad as far as the header is concerned since we changed the logo. Let's now make sure the header background also turns white and that the font color is updated accordingly so that we have the right contrast. 
+- [x] **4** *(1.6.0-dev.7)* Light-mode header now uses the themed `--surface`/`--text` variables (white bg, dark text) instead of the forced-dark override that existed to keep the old ESPHome wordmark readable. The new house-glyph logo (cyan/blue) reads fine on either background; chips/badges adapt via existing CSS vars. Verified visually via headless Playwright preview.

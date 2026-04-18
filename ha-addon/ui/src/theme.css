@@ -111,14 +111,14 @@ header {
      no scrollbar). */
   overflow-x: auto;
 }
-/* Keep header dark in light mode so the ESPHome logo (light gray text) stays readable */
-[data-theme="light"] header {
-  background: #1a1d27;
-  border-bottom-color: #2e3350;
-  color: #e2e8f0;
-}
-[data-theme="light"] header span { color: #8892a4; }
-[data-theme="light"] header .status-dot { background: #22c55e; }
+/* #85: old override kept the header dark in light mode because the
+   retired ESPHome wordmark was rendered in light gray text that was
+   unreadable against a white header. The new house-glyph logo has
+   its own colour (cyan/blue) so it reads fine on both backgrounds,
+   and keeping the header dark-on-light looked jarring. Drop the
+   override and let the header use the themed --surface / --text
+   variables like every other surface in the app. */
+[data-theme="light"] header .status-dot { background: var(--success); }
 
 
 header .spacer { flex: 1; }
