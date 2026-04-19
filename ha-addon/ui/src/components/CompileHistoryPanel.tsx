@@ -1,0 +1,280 @@
+import { useState } from 'react';
+import useSWR from 'swr';
+import { ChevronDown, ChevronRight, Clock, History as HistoryIcon } from 'lucide-react';
+
+import {
+  getJobHistory,
+  getJobHistoryStats,
+  type JobHistoryEntry,
+  type JobHistoryStats,
+} from '@/api/client';
+import {
+  Sheet,
+  SheetBody,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet';
+import { getJobBadge } from '@/utils/jobState';
+
+// JH.5: per-device "Compile history" panel.
+//
+// Opens from the Devices-row hamburger menu. Backed by the persistent
+// /ui/api/history table (JH.4) so the view survives queue coalescing +
+// clears. Read-only — no Retry / Cancel here; those live in the live
+// Queue tab where they apply to running state.
+//
+// Shape follows HistoryPanel's Sheet template so the two drawers feel
+// like siblings: narrow sticky header, body scrolls. Rows are a compact
+// table; click-to-expand reveals the stored log_excerpt (last ~2 KB,
+// see ha-addon/server/job_history.py::LOG_EXCERPT_BYTES).
+
+interface Props {
+  /** Fully-qualified filename (e.g. "bedroom.yaml"). ``null`` = closed. */
+  target: string | null;
+  onOpenChange: (open: boolean) => void;
+}
+
+const PAGE_SIZE = 50;
+
+
+function formatRelative(epoch: number | null): string {
+  if (epoch == null) return '—';
+  const diff = Math.floor(Date.now() / 1000) - epoch;
+  if (diff < 60) return `${diff}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
+
+function formatAbsolute(epoch: number | null): string {
+  if (epoch == null) return '';
+  const d = new Date(epoch * 1000);
+  return d.toLocaleString();
+}
+
+function formatDuration(seconds: number | null): string {
+  if (seconds == null) return '—';
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds - m * 60);
+  return `${m}m ${s}s`;
+}
+
+function triggeredLabel(row: JobHistoryEntry): string {
+  if (row.triggered_by === 'ha_action') return 'HA action';
+  if (row.triggered_by === 'schedule') {
+    return row.trigger_detail === 'once' ? 'Scheduled (once)' : 'Scheduled';
+  }
+  return 'User';
+}
+
+export function CompileHistoryPanel({ target, onOpenChange }: Props) {
+  const open = target !== null;
+  // Page offset for "Load more" — resets when the target changes.
+  const [offset, setOffset] = useState(0);
+
+  const historyKey = open ? ['jobHistory', target, offset] : null;
+  const { data: rows, error, isLoading } = useSWR<JobHistoryEntry[]>(
+    historyKey,
+    () => getJobHistory({ target: target!, limit: PAGE_SIZE, offset }),
+    { revalidateOnFocus: false },
+  );
+
+  // Separate stats fetch — cheap, single row, worth doing in parallel
+  // so the header badges render without waiting for the full list.
+  const statsKey = open ? ['jobHistoryStats', target] : null;
+  const { data: stats } = useSWR<JobHistoryStats>(
+    statsKey,
+    () => getJobHistoryStats({ target: target!, window_days: 30 }),
+    { revalidateOnFocus: false },
+  );
+
+  // Track which row's log excerpt is expanded (at most one at a time).
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  // Reset pagination + expanded state when the panel closes/reopens on
+  // a different target. onOpenChange of false triggers this flow via
+  // the parent setting `target` to null, remounting effectively.
+
+  return (
+    <Sheet
+      open={open}
+      onOpenChange={(o) => {
+        if (!o) {
+          setOffset(0);
+          setExpandedId(null);
+        }
+        onOpenChange(o);
+      }}
+    >
+      <SheetContent className="!w-[min(760px,100vw)]">
+        <SheetHeader>
+          <div className="flex items-center gap-2">
+            <HistoryIcon className="size-4 text-[var(--text-muted)]" />
+            <SheetTitle>{target ?? 'Compile history'}</SheetTitle>
+          </div>
+        </SheetHeader>
+        <SheetBody>
+          {/* Stats pills — quick "what's this target's story" summary. */}
+          {stats && stats.total > 0 && (
+            <div className="mb-3 flex flex-wrap gap-2 text-[11px]">
+              <StatPill label={`${stats.total} total`} />
+              <StatPill label={`${stats.success} ok`} tone="success" />
+              {stats.failed > 0 && <StatPill label={`${stats.failed} failed`} tone="error" />}
+              {stats.timed_out > 0 && <StatPill label={`${stats.timed_out} timed out`} tone="warn" />}
+              {stats.cancelled > 0 && <StatPill label={`${stats.cancelled} cancelled`} />}
+              {stats.avg_duration_seconds != null && (
+                <StatPill label={`avg ${formatDuration(stats.avg_duration_seconds)}`} />
+              )}
+              <StatPill label={`last ${stats.window_days}d`} muted />
+            </div>
+          )}
+
+          {error && (
+            <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-400 mb-3">
+              Failed to load history: {(error as Error).message}
+            </div>
+          )}
+
+          {isLoading && !rows && (
+            <div className="text-xs text-[var(--text-muted)]">Loading…</div>
+          )}
+
+          {rows && rows.length === 0 && offset === 0 && (
+            <div className="text-xs text-[var(--text-muted)] py-6 text-center">
+              No compile history yet — the first compile will appear here.
+            </div>
+          )}
+
+          {rows && rows.length > 0 && (
+            <div className="flex flex-col divide-y divide-[var(--border)] rounded-md border border-[var(--border)]">
+              {rows.map((row) => (
+                <HistoryRow
+                  key={row.id}
+                  row={row}
+                  expanded={expandedId === row.id}
+                  onToggle={() =>
+                    setExpandedId((prev) => (prev === row.id ? null : row.id))
+                  }
+                />
+              ))}
+            </div>
+          )}
+
+          {/* Paginate only when the last page was full. */}
+          {rows && rows.length === PAGE_SIZE && (
+            <div className="mt-3 text-center">
+              <button
+                type="button"
+                className="text-xs text-[var(--text-muted)] underline-offset-2 hover:underline cursor-pointer"
+                onClick={() => setOffset((o) => o + PAGE_SIZE)}
+              >
+                Load more
+              </button>
+            </div>
+          )}
+        </SheetBody>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+// --------------------------------------------------------------------- //
+
+function StatPill({
+  label,
+  tone,
+  muted,
+}: {
+  label: string;
+  tone?: 'success' | 'error' | 'warn';
+  muted?: boolean;
+}) {
+  const cls =
+    tone === 'success'
+      ? 'bg-[#14532d] text-[#4ade80]'
+      : tone === 'error'
+        ? 'bg-[#450a0a] text-[#f87171]'
+        : tone === 'warn'
+          ? 'bg-[#431407] text-[#fb923c]'
+          : muted
+            ? 'bg-[var(--surface2)] text-[var(--text-muted)]'
+            : 'bg-[var(--surface2)] text-[var(--text)]';
+  return (
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 ${cls}`}>
+      {label}
+    </span>
+  );
+}
+
+function HistoryRow({
+  row,
+  expanded,
+  onToggle,
+}: {
+  row: JobHistoryEntry;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const badge = getJobBadge({
+    state: row.state,
+    ota_result: row.ota_result ?? undefined,
+    validate_only: !!row.validate_only,
+    download_only: !!row.download_only,
+  });
+  const hasExcerpt = !!row.log_excerpt;
+  return (
+    <div className="flex flex-col">
+      <button
+        type="button"
+        className="flex items-center gap-2 px-3 py-2 text-left hover:bg-[var(--surface2)] cursor-pointer"
+        onClick={hasExcerpt ? onToggle : undefined}
+        disabled={!hasExcerpt}
+        title={hasExcerpt ? 'Click to see log excerpt' : 'No log excerpt stored'}
+      >
+        <span className="shrink-0">
+          {hasExcerpt ? (
+            expanded ? (
+              <ChevronDown className="size-3.5 text-[var(--text-muted)]" />
+            ) : (
+              <ChevronRight className="size-3.5 text-[var(--text-muted)]" />
+            )
+          ) : (
+            <span className="inline-block size-3.5" />
+          )}
+        </span>
+        <span className={`shrink-0 ${badge.cls}`}>{badge.label}</span>
+        <span
+          className="text-[12px] text-[var(--text-muted)] tabular-nums"
+          title={formatAbsolute(row.finished_at)}
+        >
+          <Clock className="inline-block size-3 mr-1 -mt-0.5" aria-hidden="true" />
+          {formatRelative(row.finished_at)}
+        </span>
+        <span className="text-[12px] text-[var(--text-muted)] tabular-nums">
+          {formatDuration(row.duration_seconds)}
+        </span>
+        <span className="text-[12px] text-[var(--text-muted)] truncate">
+          {triggeredLabel(row)}
+          {row.assigned_hostname && (
+            <span> · {row.assigned_hostname}</span>
+          )}
+        </span>
+        <span className="ml-auto text-[11px] text-[var(--text-muted)] font-mono">
+          {row.esphome_version || '—'}
+          {row.config_hash && (
+            <span title={row.config_hash}>
+              {' '}· {row.config_hash.slice(0, 7)}
+            </span>
+          )}
+        </span>
+      </button>
+      {expanded && hasExcerpt && (
+        <pre className="px-3 pb-3 pt-1 overflow-auto text-[11px] leading-snug font-mono bg-[var(--surface2)] border-t border-[var(--border)] text-[var(--text-muted)] max-h-[320px] whitespace-pre-wrap break-words">
+          {row.log_excerpt}
+        </pre>
+      )}
+    </div>
+  );
+}

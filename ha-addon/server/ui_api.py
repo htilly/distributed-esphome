@@ -601,6 +601,18 @@ async def get_targets(request: web.Request) -> web.Response:
             if h and h != head_hash:
                 drift_cache[h] = changed_paths_between(Path(cfg.config_dir), h, head_hash)
 
+    # JH.6: per-target "last compiled" rollup. One SQL query that groups
+    # by target so the Devices tab's optional "Last compiled" column can
+    # show the most recent outcome without an N+1 call to /ui/api/history.
+    # None when the DAO is unavailable or the target has no history.
+    last_compile_by_target: dict[str, dict[str, object]] = {}
+    history_dao = request.app.get("job_history")
+    if history_dao is not None:
+        try:
+            last_compile_by_target = history_dao.last_per_target()
+        except Exception:
+            logger.debug("job_history.last_per_target() raised; continuing")
+
     # Build device lookup by compile_target filename
     devices_by_target: dict[str, Device] = {}
     if device_poller:
@@ -716,6 +728,21 @@ async def get_targets(request: web.Request) -> web.Response:
                 None if not head_hash or target not in last_flashed_by_target
                 else False if last_flashed_by_target[target] == head_hash
                 else target in drift_cache.get(last_flashed_by_target[target], set())
+            ),
+            # JH.6: tuple of (finished_at, state) for the Devices tab's
+            # optional "Last compiled" column. Shape chosen so the UI
+            # can render relative time + a success/failure chip without
+            # a second API call.
+            "last_compile": (
+                {
+                    "at": last_compile_by_target[target]["finished_at"],
+                    "state": last_compile_by_target[target]["state"],
+                    "ota_result": last_compile_by_target[target].get("ota_result"),
+                    "validate_only": bool(last_compile_by_target[target].get("validate_only")),
+                    "download_only": bool(last_compile_by_target[target].get("download_only")),
+                }
+                if target in last_compile_by_target
+                else None
             ),
         }
         result.append(entry)

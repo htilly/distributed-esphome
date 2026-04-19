@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Calendar, Clock, Download, HomeIcon, Pin, User } from 'lucide-react';
+import { Calendar, Clock, Download, History as HistoryIcon, HomeIcon, Pin, User } from 'lucide-react';
 import {
   useReactTable,
   getCoreRowModel,
@@ -22,6 +22,7 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from './ui/dropdown-menu';
+import { QueueHistoryDialog } from './QueueHistoryDialog';
 
 interface Props {
   queue: Job[];
@@ -99,6 +100,8 @@ export function QueueTab({
   );
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [filter, setFilter] = useState('');
+  // JH.7: fleet-wide history modal open state.
+  const [historyOpen, setHistoryOpen] = useState(false);
   // #71: lift the Download dropdown's open state out of the row cell so
   // it survives the 1 Hz SWR poll. TanStack Table re-instantiates column
   // cells on data change, and any state kept inside the `<DropdownMenu>`
@@ -562,6 +565,20 @@ export function QueueTab({
             )}
           </div>
           <div className="actions">
+            {/* JH.7: fleet-wide compile history. Dialog (not tab) because
+                past history is a look-back action, not a live-state
+                navigation surface. Outlined button so it reads as
+                secondary to Retry / Clear which mutate state. */}
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setHistoryOpen(true)}
+              title="Browse persistent compile history for the whole fleet"
+            >
+              <HistoryIcon className="size-3.5" aria-hidden="true" />
+              History
+            </Button>
+
             {/* Retry dropdown — UX.4: rerun-class actions use the green
                 success colors (same as per-row Retry/Rerun buttons).
                 Orange/amber is reserved for genuine warn states. */}
@@ -643,6 +660,13 @@ export function QueueTab({
           </table>
         </div>
       </div>
+
+      {/* JH.7: fleet-wide history modal — mounted once; SWR gates on `open`. */}
+      <QueueHistoryDialog
+        open={historyOpen}
+        onOpenChange={setHistoryOpen}
+        targets={targets}
+      />
     </div>
   );
 }

@@ -30,7 +30,7 @@ import {
 } from './ui/dropdown-menu';
 
 /* ---- Column configuration ---- */
-type OptionalColumnId = 'status' | 'ha' | 'ip' | 'running' | 'area' | 'comment' | 'project' | 'net' | 'ipconfig' | 'ap' | 'schedule';
+type OptionalColumnId = 'status' | 'ha' | 'ip' | 'running' | 'area' | 'comment' | 'project' | 'net' | 'ipconfig' | 'ap' | 'schedule' | 'last_compiled';
 
 interface OptionalColumnDef {
   id: OptionalColumnId;
@@ -47,6 +47,9 @@ const OPTIONAL_COLUMNS: OptionalColumnDef[] = [
   { id: 'ipconfig', label: 'IP Config', defaultVisible: false },
   { id: 'ap', label: 'AP', defaultVisible: false },
   { id: 'schedule', label: 'Schedule', defaultVisible: true },
+  // JH.6: opt-in "Last compiled" column. Off by default so existing users
+  // see no layout churn; power users toggle it on to spot stale devices.
+  { id: 'last_compiled', label: 'Last compiled', defaultVisible: false },
   { id: 'area', label: 'Area', defaultVisible: false },
   { id: 'comment', label: 'Comment', defaultVisible: false },
   { id: 'project', label: 'Project', defaultVisible: false },
@@ -102,6 +105,8 @@ interface Props {
   onDuplicate: (sourceTarget: string) => void;
   /** AV.6: open the per-file History panel from the row hamburger menu. */
   onOpenHistory: (target: string) => void;
+  /** JH.5: open the per-device Compile History panel. */
+  onOpenCompileHistory: (target: string) => void;
   /** Bug #16: open the manual-commit dialog for a target. */
   onCommitChanges: (target: string) => void;
   /** Trigger an immediate SWR revalidation of the devices/targets data. */
@@ -141,7 +146,7 @@ function formatAddressSource(source: AddressSource | null | undefined): string |
 // RenameModal is re-exported so App.tsx's existing import path still works.
 export { RenameModal };
 
-export function DevicesTab({ targets, devices, workers, streamerMode, activeJobsByTarget, onCompile, onUpgradeOne, onEdit, onLogs, onToast, onDelete, onRename, onSchedule, onNewDevice, onDuplicate, onOpenHistory, onCommitChanges, onRefresh }: Props) {
+export function DevicesTab({ targets, devices, workers, streamerMode, activeJobsByTarget, onCompile, onUpgradeOne, onEdit, onLogs, onToast, onDelete, onRename, onSchedule, onNewDevice, onDuplicate, onOpenHistory, onOpenCompileHistory, onCommitChanges, onRefresh }: Props) {
   const [filter, setFilter] = useState('');
   // QS.27: persist sort across reloads via localStorage.
   const [sorting, setSorting] = usePersistedState<SortingState>('devices-sort', []);
@@ -267,6 +272,7 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
     onPin: handlePin,
     onUnpin: handleUnpin,
     onOpenHistory,
+    onOpenCompileHistory,
     onCommitChanges,
     menuOpenTarget,
     setMenuOpenTarget,

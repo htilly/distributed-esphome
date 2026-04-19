@@ -46,6 +46,7 @@ import { LogModal } from './components/LogModal';
 import { QueueTab } from './components/QueueTab';
 import { SettingsDrawer } from './components/SettingsDrawer';
 import { HistoryPanel } from './components/HistoryPanel';
+import { CompileHistoryPanel } from './components/CompileHistoryPanel';
 import { toast } from 'sonner';
 import { Toaster } from './components/ui/sonner';
 import { Button } from './components/ui/button';
@@ -152,6 +153,8 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   // AV.6: per-file history panel. `null` = closed; otherwise the filename.
   const [historyTarget, setHistoryTarget] = useState<string | null>(null);
+  // JH.5: which target's Compile History drawer is open (null = closed).
+  const [compileHistoryTarget, setCompileHistoryTarget] = useState<string | null>(null);
   // Bug #31: nonce bumped whenever the History panel reports an on-disk
   // change for the currently-edited file (rollback, manual commit, etc).
   // EditorModal depends on this in its fetch effect so the buffer
@@ -733,6 +736,7 @@ export default function App() {
             onNewDevice={() => setNewDeviceModal({ mode: 'new' })}
             onDuplicate={(sourceTarget) => setNewDeviceModal({ mode: 'duplicate', sourceTarget })}
             onOpenHistory={(target) => setHistoryTarget(target)}
+            onOpenCompileHistory={(target) => setCompileHistoryTarget(target)}
             onCommitChanges={(target) => { setCommitDialogMessage(''); setCommitDialogTarget(target); }}
             onRefresh={() => mutateDevices()}
           />
@@ -888,6 +892,13 @@ export default function App() {
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
         dirtyTargets={targets.filter(t => t.has_uncommitted_changes).map(t => t.target)}
+      />
+
+      {/* JH.5: per-device Compile History drawer. Mounted once;
+          internal SWR gates on the `target !== null` open state. */}
+      <CompileHistoryPanel
+        target={compileHistoryTarget}
+        onOpenChange={(open) => { if (!open) setCompileHistoryTarget(null); }}
       />
 
       {/* AV.6: per-file History + diff panel. Same Sheet pattern —

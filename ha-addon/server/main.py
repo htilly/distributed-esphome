@@ -1143,9 +1143,11 @@ def create_app() -> web.Application:
     # JH.1/JH.2: persistent job history DAO. One DAO per app; JobQueue
     # snapshots every terminal transition into it so the /ui/api/history
     # endpoint and per-device drawer survive queue coalescing + clears.
+    # Init is lazy — the first record/query creates the DB on demand.
+    # Deliberate: eager init on a test rig without /data writable would
+    # crash startup where the real path would "just work".
     from job_history import JobHistoryDAO  # noqa: PLC0415
     job_history = JobHistoryDAO()
-    job_history.init()
 
     queue = JobQueue(history=job_history)
     queue.load()

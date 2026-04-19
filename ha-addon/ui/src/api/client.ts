@@ -727,6 +727,76 @@ export interface ScheduleHistoryEntry {
   outcome: string;
 }
 
+// ---------------------------------------------------------------------------
+// JH.4 — Job history (persistent append-only)
+// ---------------------------------------------------------------------------
+
+/** One row from the persistent /ui/api/history table. Mirrors the SQL
+ *  shape in ha-addon/server/job_history.py — keep in sync. */
+export interface JobHistoryEntry {
+  id: string;
+  target: string;
+  state: 'success' | 'failed' | 'cancelled' | 'timed_out';
+  triggered_by: 'user' | 'schedule' | 'ha_action' | null;
+  trigger_detail: string | null;
+  download_only: 0 | 1;
+  validate_only: 0 | 1;
+  pinned_client_id: string | null;
+  esphome_version: string | null;
+  assigned_client_id: string | null;
+  assigned_hostname: string | null;
+  /** Epoch seconds (UTC). */
+  submitted_at: number | null;
+  started_at: number | null;
+  finished_at: number | null;
+  duration_seconds: number | null;
+  ota_result: string | null;
+  config_hash: string | null;
+  retry_count: number;
+  log_excerpt: string | null;
+}
+
+export interface JobHistoryStats {
+  total: number;
+  success: number;
+  failed: number;
+  cancelled: number;
+  timed_out: number;
+  avg_duration_seconds: number | null;
+  p95_duration_seconds: number | null;
+  last_success_at: number | null;
+  last_failure_at: number | null;
+  window_days: number;
+}
+
+export async function getJobHistory(params: {
+  target?: string;
+  state?: JobHistoryEntry['state'];
+  since?: number;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<JobHistoryEntry[]> {
+  const qs = new URLSearchParams();
+  if (params.target) qs.set('target', params.target);
+  if (params.state) qs.set('state', params.state);
+  if (params.since !== undefined) qs.set('since', String(params.since));
+  if (params.limit !== undefined) qs.set('limit', String(params.limit));
+  if (params.offset !== undefined) qs.set('offset', String(params.offset));
+  const url = qs.toString() ? `./ui/api/history?${qs}` : './ui/api/history';
+  return parseResponse<JobHistoryEntry[]>(await apiFetch(url), 'fetching job history');
+}
+
+export async function getJobHistoryStats(params: {
+  target?: string;
+  window_days?: number;
+} = {}): Promise<JobHistoryStats> {
+  const qs = new URLSearchParams();
+  if (params.target) qs.set('target', params.target);
+  if (params.window_days !== undefined) qs.set('window_days', String(params.window_days));
+  const url = qs.toString() ? `./ui/api/history/stats?${qs}` : './ui/api/history/stats';
+  return parseResponse<JobHistoryStats>(await apiFetch(url), 'fetching job-history stats');
+}
+
 export async function getScheduleHistory(): Promise<Record<string, ScheduleHistoryEntry[]>> {
   const r = await apiFetch('./ui/api/schedule-history');
   // CR.5/UI-6: route through parseResponse so SWR's onError path logs

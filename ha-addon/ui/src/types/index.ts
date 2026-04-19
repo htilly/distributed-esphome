@@ -130,6 +130,19 @@ export interface Target {
    */
   config_drifted_since_flash?: boolean | null;
   /**
+   * JH.6: per-target "last compiled" rollup from the persistent job
+   * history DAO. Powers the optional "Last compiled" column on the
+   * Devices tab. Null when there's no history for the target.
+   */
+  last_compile?: {
+    /** Epoch seconds (UTC). */
+    at: number;
+    state: 'success' | 'failed' | 'cancelled' | 'timed_out';
+    ota_result: string | null;
+    validate_only: boolean;
+    download_only: boolean;
+  } | null;
+  /**
    * Chip MAC address, lower-case colon-separated (e.g.
    * ``"aa:bb:cc:dd:ee:ff"``). Sourced from mDNS TXT or native API
    * polling. #27 — the HA custom integration attaches this as a

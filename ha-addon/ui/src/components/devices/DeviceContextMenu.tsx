@@ -47,6 +47,8 @@ interface Props {
   onUnpin: (target: string) => void;
   /** AV.6: open the per-file History panel. */
   onOpenHistory: (target: string) => void;
+  /** JH.5: open the per-device Compile History panel. */
+  onOpenCompileHistory: (target: string) => void;
   /** Bug #16: open the manual-commit dialog for this target. Only
    * offered when the target has uncommitted changes. */
   onCommitChanges: (target: string) => void;
@@ -64,6 +66,7 @@ function DeviceContextMenuImpl({
   onPin,
   onUnpin,
   onOpenHistory,
+  onOpenCompileHistory,
   onCommitChanges,
   open,
   onOpenChange,
@@ -109,6 +112,12 @@ function DeviceContextMenuImpl({
         <DropdownMenuGroup>
           <DropdownMenuLabel>Device</DropdownMenuLabel>
           <DropdownMenuItem onClick={() => onLogs(t.target)}>Live Logs</DropdownMenuItem>
+          {/* JH.5: per-device past-compiles drawer. Reads from the
+              persistent /ui/api/history table so the view survives
+              queue coalescing + clears. */}
+          <DropdownMenuItem onClick={() => onOpenCompileHistory(t.target)}>
+            Compile history…
+          </DropdownMenuItem>
           {/* #14: grayed out when the YAML doesn't expose a restart button. */}
           <DropdownMenuItem
             onClick={handleRestart}

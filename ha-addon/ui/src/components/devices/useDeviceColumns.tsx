@@ -42,6 +42,8 @@ interface Options {
   onUnpin: (target: string) => void;
   /** AV.6: open the per-file History panel from the row hamburger menu. */
   onOpenHistory: (target: string) => void;
+  /** JH.5: open the per-device Compile History panel. */
+  onOpenCompileHistory: (target: string) => void;
   /** Bug #16: open the manual-commit dialog for this target. */
   onCommitChanges: (target: string) => void;
   /**
@@ -103,6 +105,7 @@ export function useDeviceColumns(options: Options) {
     onPin,
     onUnpin,
     onOpenHistory,
+    onOpenCompileHistory,
     onCommitChanges,
     menuOpenTarget,
     setMenuOpenTarget,
@@ -384,6 +387,41 @@ export function useDeviceColumns(options: Options) {
       },
       sortingFn: 'alphanumeric',
     }),
+    // JH.6: optional "Last compiled" column. Sort key is the finished_at
+    // epoch, so DESC puts most recently compiled devices first (what
+    // power users want when scanning for stale hosts).
+    columnHelper.accessor(row => row.last_compile?.at ?? 0, {
+      id: 'last_compiled',
+      header: ({ column }) => <SortHeader label="Last compiled" column={column} />,
+      cell: ({ row: { original: t } }) => {
+        const lc = t.last_compile;
+        if (!lc) {
+          return <span className="text-[12px] text-[var(--text-muted)]">never</span>;
+        }
+        const ok = lc.state === 'success'
+          && (lc.validate_only || lc.download_only || lc.ota_result === 'success');
+        const failed = lc.state === 'failed' || lc.state === 'timed_out'
+          || (lc.state === 'success' && !lc.validate_only && !lc.download_only && lc.ota_result === 'failed');
+        const color = ok
+          ? 'text-[#4ade80]'
+          : failed
+            ? 'text-[#f87171]'
+            : 'text-[var(--text-muted)]';
+        const glyph = ok ? '✓' : failed ? '✗' : '·';
+        const diff = Math.floor(Date.now() / 1000) - lc.at;
+        const rel = diff < 60 ? `${diff}s`
+          : diff < 3600 ? `${Math.floor(diff / 60)}m`
+            : diff < 86400 ? `${Math.floor(diff / 3600)}h`
+              : `${Math.floor(diff / 86400)}d`;
+        const iso = new Date(lc.at * 1000).toLocaleString();
+        return (
+          <span className={`text-[12px] tabular-nums ${color}`} title={`${iso} · ${lc.state}${lc.ota_result ? ` / ota=${lc.ota_result}` : ''}`}>
+            {rel} ago {glyph}
+          </span>
+        );
+      },
+      sortingFn: 'alphanumeric',
+    }),
     columnHelper.accessor(row => row.running_version || '', {
       id: 'running',
       // Bug #29: "Version" was ambiguous now that the config git history
@@ -459,6 +497,7 @@ export function useDeviceColumns(options: Options) {
           onPin={onPin}
           onUnpin={onUnpin}
           onOpenHistory={onOpenHistory}
+          onOpenCompileHistory={onOpenCompileHistory}
           onCommitChanges={onCommitChanges}
           onMenuOpenChange={(o) => setMenuOpenTarget(o ? t.target : null)}
         />
@@ -478,6 +517,7 @@ export function useDeviceColumns(options: Options) {
     onPin,
     onUnpin,
     onOpenHistory,
+    onOpenCompileHistory,
     onCommitChanges,
     menuOpenTarget,
     setMenuOpenTarget,

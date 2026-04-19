@@ -39,6 +39,8 @@ interface Props {
   onUnpin: (target: string) => void;
   /** AV.6: open the per-file History panel. */
   onOpenHistory: (target: string) => void;
+  /** JH.5: open the per-device Compile History panel. */
+  onOpenCompileHistory: (target: string) => void;
   /** Bug #16: open the manual-commit dialog for this target. */
   onCommitChanges: (target: string) => void;
   onMenuOpenChange: (open: boolean) => void;
@@ -58,6 +60,7 @@ function ActionsCellImpl({
   onPin,
   onUnpin,
   onOpenHistory,
+  onOpenCompileHistory,
   onCommitChanges,
   onMenuOpenChange,
 }: Props) {
@@ -99,6 +102,7 @@ function ActionsCellImpl({
         onPin={onPin}
         onUnpin={onUnpin}
         onOpenHistory={onOpenHistory}
+        onOpenCompileHistory={onOpenCompileHistory}
         onCommitChanges={onCommitChanges}
         open={menuOpen}
         onOpenChange={onMenuOpenChange}

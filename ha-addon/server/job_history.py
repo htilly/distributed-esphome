@@ -217,16 +217,34 @@ class JobHistoryDAO:
         return conn
 
     def init(self) -> None:
-        """Create the schema if missing. Safe to call repeatedly."""
+        """Create the schema if missing. Safe to call repeatedly.
+
+        Assumes ``self._db_path.parent`` already exists — on HA the
+        parent is ``/data`` which the Supervisor always mounts, and in
+        tests callers pass a tmp_path that pytest pre-creates. Avoids
+        the mkdir that used to live here because CI runs can't write
+        to ``/`` when the DAO is instantiated with the default ``/data``
+        path under a test harness that never reaches any write path.
+        """
         with self._init_lock:
             if self._initialized:
                 return
-            self._db_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._connect() as conn:
-                conn.executescript(self._SCHEMA)
-                conn.commit()
-            self._initialized = True
-            logger.debug("Job-history DB ready at %s", self._db_path)
+            try:
+                with self._connect() as conn:
+                    conn.executescript(self._SCHEMA)
+                    conn.commit()
+                self._initialized = True
+                logger.debug("Job-history DB ready at %s", self._db_path)
+            except sqlite3.Error:
+                # Parent dir missing / read-only filesystem / locked.
+                # Leaving ``_initialized = False`` causes the next call
+                # to retry, which is what we want on transient failures.
+                logger.warning(
+                    "Could not open job-history DB at %s; history "
+                    "will be unavailable until the path is writable.",
+                    self._db_path,
+                    exc_info=True,
+                )
 
     # ------------------------------------------------------------------
     # Writes
@@ -249,6 +267,8 @@ class JobHistoryDAO:
         otherwise. No-op + False for non-terminal jobs.
         """
         self.init()
+        if not self._initialized:
+            return False  # DB unavailable; history is best-effort.
         state_val = getattr(job.state, "value", str(job.state))
         if state_val not in TERMINAL_STATES:
             return False
@@ -314,6 +334,8 @@ class JobHistoryDAO:
         error — the caller gets nothing rather than a 500.
         """
         self.init()
+        if not self._initialized:
+            return []
         limit = max(1, min(int(limit), 500))
         offset = max(0, int(offset))
 
@@ -351,6 +373,14 @@ class JobHistoryDAO:
         0/None when there are no matching rows.
         """
         self.init()
+        empty_stats: dict[str, object] = {
+            "total": 0, "success": 0, "failed": 0, "cancelled": 0, "timed_out": 0,
+            "avg_duration_seconds": None, "p95_duration_seconds": None,
+            "last_success_at": None, "last_failure_at": None,
+            "window_days": max(1, min(int(window_days), 3650)),
+        }
+        if not self._initialized:
+            return empty_stats
         window_days = max(1, min(int(window_days), 3650))
         now = int(datetime.now(timezone.utc).timestamp())
         since = now - window_days * 86400
@@ -453,6 +483,8 @@ class JobHistoryDAO:
         ``(target, finished_at DESC)`` index.
         """
         self.init()
+        if not self._initialized:
+            return {}
         params: list[object] = []
         target_clause = ""
         if targets is not None:
@@ -490,6 +522,8 @@ class JobHistoryDAO:
         if days <= 0:
             return 0
         self.init()
+        if not self._initialized:
+            return 0
         cutoff = int(datetime.now(timezone.utc).timestamp()) - days * 86400
         with self._connect() as conn:
             cur = conn.execute(
