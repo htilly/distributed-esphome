@@ -195,10 +195,36 @@ def _purge_firmware(job_ids: Iterable[str]) -> None:
 class JobQueue:
     """Thread-safe (asyncio) job queue with JSON persistence."""
 
-    def __init__(self, queue_file: Path = QUEUE_FILE) -> None:
+    def __init__(
+        self,
+        queue_file: Path = QUEUE_FILE,
+        history: "JobHistoryDAO | None" = None,  # type: ignore[name-defined]  # noqa: F821
+    ) -> None:
         self._jobs: OrderedDict[str, Job] = OrderedDict()
         self._lock = asyncio.Lock()
         self._queue_file = queue_file
+        # JH.2: history DAO — snapshots every terminal transition so the
+        # /ui/api/history endpoint and per-device drawer can surface
+        # past compiles even after the live queue has coalesced them
+        # away. Optional; unset in tests that don't exercise history.
+        self._history = history
+
+    def _record_history(self, job: Job) -> None:
+        """JH.2: snapshot *job* into the persistent history table.
+
+        Swallows any exception — history is best-effort and must never
+        prevent a legitimate queue state transition. Logged at DEBUG to
+        avoid noise on the fast path.
+        """
+        if self._history is None:
+            return
+        try:
+            self._history.record_terminal(job)
+        except Exception:
+            logger.debug(
+                "job_history.record_terminal failed for %s (%s); continuing",
+                job.id, job.target, exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # Persistence
@@ -377,6 +403,13 @@ class JobQueue:
                     JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT, JobState.CANCELLED
                 )
             ]
+            # JH.2: defensively record each coalesced job before evicting.
+            # Upsert in the DAO makes this idempotent: if the terminal
+            # transition path already recorded them, this is a no-op.
+            # Guards against a pre-1.6-history queue.json being loaded on
+            # a server that *does* want the rows preserved.
+            for jid in stale:
+                self._record_history(self._jobs[jid])
             for jid in stale:
                 del self._jobs[jid]
             if stale:
@@ -499,6 +532,10 @@ class JobQueue:
                     "Job %s (%s on %s) OTA result: %s",
                     job_id, job.target, job.assigned_hostname or "?", ota_result,
                 )
+                # JH.2: upsert history row so the new ota_result lands.
+                # The initial compile-result call already wrote state
+                # and the null ota_result; this call replaces it.
+                self._record_history(job)
                 return True
 
             if job.state != JobState.WORKING:
@@ -516,6 +553,11 @@ class JobQueue:
                 job.ota_result = ota_result
             job.finished_at = _utcnow()
             self._persist()
+            # JH.2: snapshot this terminal transition. Inside the async
+            # lock so the history row carries the exact in-memory state
+            # the persist just wrote. The OTA-patch branch above already
+            # returned, so only the real compile result lands here.
+            self._record_history(job)
             # #94: include target + worker hostname so log readers can see
             # which device on which worker just finished without joining IDs.
             logger.info(
@@ -534,6 +576,7 @@ class JobQueue:
         """
         async with self._lock:
             cancelled = 0
+            just_cancelled: list[Job] = []
             for job_id in job_ids:
                 job = self._jobs.get(job_id)
                 if job is None:
@@ -544,6 +587,7 @@ class JobQueue:
                     job.finished_at = _utcnow()
                     job.log = (job.log or "") + "\nCancelled by user."
                     cancelled += 1
+                    just_cancelled.append(job)
                     logger.info(
                         "Cancelled job %s (%s) from state %s%s",
                         job_id,
@@ -555,6 +599,9 @@ class JobQueue:
                     )
             if cancelled:
                 self._persist()
+                # JH.2: record each cancellation as a terminal row.
+                for job in just_cancelled:
+                    self._record_history(job)
             return cancelled
 
     async def check_timeouts(
@@ -620,6 +667,10 @@ class JobQueue:
                     job.finished_at = now
                     reason = "timeouts" if timed_out else "offline-worker requeues"
                     job.log = (job.log or "") + f"\nPermanently failed after {MAX_RETRIES} {reason}."
+                    # JH.2: record the permanent failure. Non-permanent
+                    # retries (the else branch) go back to PENDING and
+                    # aren't terminal yet — don't record those.
+                    self._record_history(job)
                 else:
                     # CR.4: dropped the `job.state = JobState.TIMED_OUT`
                     # write that used to sit here — the very next line
@@ -677,6 +728,11 @@ class JobQueue:
                         JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT, JobState.CANCELLED
                     )
                 ]
+                # JH.2: defensively snapshot retried-away jobs. Idempotent
+                # via upsert — if they were already recorded during their
+                # terminal transition, nothing changes.
+                for jid in stale:
+                    self._record_history(self._jobs[jid])
                 for jid in stale:
                     del self._jobs[jid]
                 version_for_target = (target_versions or {}).get(target, esphome_version)

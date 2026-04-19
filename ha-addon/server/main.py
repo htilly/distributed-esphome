@@ -310,6 +310,35 @@ async def timeout_checker(app: web.Application) -> None:
             logger.exception("Error in timeout checker")
 
 
+async def job_history_retention(app: web.Application) -> None:
+    """JH.3: evict job-history rows older than Settings' retention window.
+
+    Runs once a day. Reads ``job_history_retention_days`` from Settings
+    on every tick so drawer edits take effect on the next run without
+    a server restart (0 disables retention; the DAO treats ``days <= 0``
+    as a no-op). Does its first tick one minute after startup so a
+    fresh boot doesn't stall while the migration/init dance runs.
+    """
+    history = app.get("job_history")
+    if history is None:
+        return
+    first = True
+    while True:
+        await asyncio.sleep(60 if first else 24 * 60 * 60)
+        first = False
+        try:
+            from settings import get_settings  # noqa: PLC0415
+            days = int(getattr(get_settings(), "job_history_retention_days", 0) or 0)
+            deleted = history.evict_older_than(days)
+            if deleted:
+                logger.info(
+                    "Job-history retention: evicted %d row(s) older than %d day(s)",
+                    deleted, days,
+                )
+        except Exception:
+            logger.exception("Error in job_history_retention loop")
+
+
 async def ha_entity_poller(app: web.Application) -> None:
     """Background task: poll HA entity registry every 30s to determine which
     ESPHome devices are configured in Home Assistant and whether they are
@@ -1111,7 +1140,14 @@ def create_app() -> web.Application:
     # subsequent boots.
     clear_supervisor_options_if_needed()
 
-    queue = JobQueue()
+    # JH.1/JH.2: persistent job history DAO. One DAO per app; JobQueue
+    # snapshots every terminal transition into it so the /ui/api/history
+    # endpoint and per-device drawer survive queue coalescing + clears.
+    from job_history import JobHistoryDAO  # noqa: PLC0415
+    job_history = JobHistoryDAO()
+    job_history.init()
+
+    queue = JobQueue(history=job_history)
     queue.load()
 
     registry = WorkerRegistry()
@@ -1146,6 +1182,7 @@ def create_app() -> web.Application:
     )
     app["config"] = cfg
     app["queue"] = queue
+    app["job_history"] = job_history
     app["registry"] = registry
     app["scanner_config_dir"] = cfg.config_dir
     app["device_poller"] = device_poller
@@ -1323,6 +1360,9 @@ def create_app() -> web.Application:
         app["config_scanner_task"] = asyncio.create_task(config_scanner(app))
         app["pypi_version_refresher_task"] = asyncio.create_task(pypi_version_refresher(app))
         app["ha_entity_poller_task"] = asyncio.create_task(ha_entity_poller(app))
+        # JH.3: nightly job-history retention task. Reads the Settings
+        # value live each tick so drawer edits take effect next run.
+        app["job_history_retention_task"] = asyncio.create_task(job_history_retention(app))
 
         # #87: APScheduler replaces the DIY schedule_checker
         import scheduler as scheduler_module  # noqa: PLC0415
@@ -1377,7 +1417,7 @@ def create_app() -> web.Application:
                 proc.kill()
             logger.info("Local worker stopped")
 
-        for task_name in ("timeout_checker_task", "config_scanner_task", "pypi_version_refresher_task", "ha_entity_poller_task", "esphome_install_task"):
+        for task_name in ("timeout_checker_task", "config_scanner_task", "pypi_version_refresher_task", "ha_entity_poller_task", "esphome_install_task", "job_history_retention_task"):
             task = app.get(task_name)
             if task:
                 task.cancel()

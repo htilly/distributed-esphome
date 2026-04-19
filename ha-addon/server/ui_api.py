@@ -752,6 +752,71 @@ async def get_queue(request: web.Request) -> web.Response:
     return web.json_response(jobs)
 
 
+@routes.get("/ui/api/history")
+async def get_history(request: web.Request) -> web.Response:
+    """JH.4: list persistent compile history rows newest-first.
+
+    Query params (all optional):
+      ``target``        — filter to one YAML filename
+      ``state``         — one of success / failed / timed_out / cancelled
+      ``since``         — epoch seconds; rows finished before this are excluded
+      ``limit``         — page size, clamped to [1, 500] (default 50)
+      ``offset``        — for pagination
+
+    The live Queue tab keeps reading from /ui/api/queue — this endpoint
+    is the append-only counterpart that survives coalescing + clears.
+    """
+    history = request.app.get("job_history")
+    if history is None:
+        return web.json_response([])
+    q = request.rel_url.query
+    target = q.get("target") or None
+    state = q.get("state") or None
+    since_raw = q.get("since")
+    try:
+        since = int(since_raw) if since_raw is not None else None
+    except ValueError:
+        since = None
+    try:
+        limit = int(q.get("limit", "50"))
+    except ValueError:
+        limit = 50
+    try:
+        offset = int(q.get("offset", "0"))
+    except ValueError:
+        offset = 0
+    rows = history.query(target=target, state=state, since=since, limit=limit, offset=offset)
+    return web.json_response(rows)
+
+
+@routes.get("/ui/api/history/stats")
+async def get_history_stats(request: web.Request) -> web.Response:
+    """JH.4: return a compile-history rollup.
+
+    Query params:
+      ``target``       — filter to one YAML filename (optional)
+      ``window_days``  — rolling window in days (default 30, max 3650)
+
+    Response keys: total / success / failed / cancelled / timed_out /
+    avg_duration_seconds / p95_duration_seconds / last_success_at /
+    last_failure_at / window_days.
+    """
+    history = request.app.get("job_history")
+    if history is None:
+        return web.json_response({
+            "total": 0, "success": 0, "failed": 0, "cancelled": 0, "timed_out": 0,
+            "avg_duration_seconds": None, "p95_duration_seconds": None,
+            "last_success_at": None, "last_failure_at": None, "window_days": 30,
+        })
+    q = request.rel_url.query
+    target = q.get("target") or None
+    try:
+        window_days = int(q.get("window_days", "30"))
+    except ValueError:
+        window_days = 30
+    return web.json_response(history.stats(target=target, window_days=window_days))
+
+
 @routes.get("/ui/api/jobs/{id}/log")
 async def get_job_log(request: web.Request) -> web.Response:
     """HTTP fallback for log tailing (used when WebSocket fails)."""
