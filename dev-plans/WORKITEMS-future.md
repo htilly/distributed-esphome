@@ -70,6 +70,10 @@ Enabled via add-on option `pio_cache_enabled: true` (default off). Workers detec
 
 - [ ] **2.1c Create device: import from URL** — fetch config from GitHub/project URL
 
+## Config versioning refinements
+
+- [ ] **Move archive under git tracking (from 1.6 #62).** Today `delete` renames a YAML into `.archive/` (which the fresh-init gitignore excludes) and commits the delete as a plain "file removed" entry; restore renames back and commits as a plain "file added". That's easy to reason about but drops the file's history on a delete-then-restore. Alternative: un-ignore `.archive/`, swap the raw `Path.rename` for `git mv`, and commit the archive as a move — `git log --follow` then threads the file's history across the archive/restore boundary. Cost: `.archive/` contents start showing up in the repo (YAML-only, small, but visible in `git status`). Evaluate whether history continuity is worth the extra tracked surface — decision point when the file-tree editor lands (which makes `.archive/` directly browsable anyway).
+
 ## LLM-Augmented UX
 
 Introduce an optional LLM backend to generate content that currently falls back to hand-curated templates. First use case (from 1.6 bug #34): replace the static `"Automatically saved after editing in UI"` auto-commit subject with an LLM-generated one-line summary of the actual diff ("Tuned PWM duty cycle", "Added wifi fallback AP", etc). Opt-in — no LLM calls unless the user configures a provider + key. Candidate providers: Anthropic, OpenAI, local Ollama. Scope a dedicated release (naming TBD) when we're ready to commit to the operational cost / privacy tradeoffs.

@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Calendar, Clock, Download, History as HistoryIcon, HomeIcon, Pin, User } from 'lucide-react';
+import { Calendar, Clock, Download, History as HistoryIcon, HomeIcon, Pin, Terminal, User } from 'lucide-react';
 import {
   useReactTable,
   getCoreRowModel,
@@ -320,7 +320,12 @@ export function QueueTab({
     // timestamp and render an inline "@ HH:MM" or "@ YYYY-MM-DD HH:MM" affix.
     // Hover reveals the full cron expression + tz so users can reconcile with
     // the Schedules tab.
-    columnHelper.accessor(row => row.ha_action ? 'ha_action' : row.scheduled ? (row.schedule_kind ?? 'schedule') : 'user', {
+    columnHelper.accessor(
+      row => row.ha_action ? 'ha_action'
+        : row.api_triggered ? 'api'
+          : row.scheduled ? (row.schedule_kind ?? 'schedule')
+            : 'user',
+      {
       id: 'triggered_by',
       header: ({ column }) => <SortHeader label="Triggered" column={column} />,
       cell: ({ row: { original: job } }) => {
@@ -335,6 +340,21 @@ export function QueueTab({
               title="Triggered by a Home Assistant service action (esphome_fleet.compile)"
             >
               <HomeIcon className="size-3" aria-hidden="true" /> HA action
+            </span>
+          );
+        }
+        // Bug #61: direct API callers (curl, scripts, Postman) share
+        // the server-token Bearer with the HA integration but come in
+        // without the ``HomeAssistant/*`` User-Agent. Split them out
+        // under their own badge so operators can tell fleet
+        // automation from ad-hoc external API use.
+        if (job.api_triggered) {
+          return (
+            <span
+              className="inline-flex items-center gap-1 text-[12px]"
+              title="Triggered by a direct API call (server-token Bearer, not the HA integration)"
+            >
+              <Terminal className="size-3" aria-hidden="true" /> API
             </span>
           );
         }

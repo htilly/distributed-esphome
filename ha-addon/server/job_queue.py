@@ -90,6 +90,16 @@ class Job:
     # Lets the Queue tab's Triggered column distinguish HA-driven
     # compiles from user-clicked ones.
     ha_action: bool = False
+    # Bug #61: True when the enqueue came from the /ui/api/compile
+    # endpoint via the system-token Bearer but NOT from the HA
+    # integration (e.g. a direct ``curl`` call, a script, or a
+    # third-party tool). Both paths currently carry the same
+    # ``esphome_fleet_integration`` ha_user tag because they share the
+    # server token; we split them by User-Agent at the endpoint
+    # (HomeAssistant/* → ha_action, anything else → api_triggered).
+    # Exposed in the Queue's Triggered column with a distinct icon so
+    # operators can tell fleet automation from ad-hoc API use.
+    api_triggered: bool = False
     # AV.7: HEAD of /config/esphome/ at enqueue time. `None` when the
     # config dir isn't a git repo (hasn't been through AV.1 auto-init)
     # or git_versioning is unavailable. When auto-commit is on, this is
@@ -128,6 +138,7 @@ class Job:
             "scheduled": self.scheduled,
             "schedule_kind": self.schedule_kind,
             "ha_action": self.ha_action,
+            "api_triggered": self.api_triggered,
             "config_hash": self.config_hash,
             "status_text": self.status_text,
             "duration_seconds": self.duration_seconds(),
@@ -165,6 +176,7 @@ class Job:
             scheduled=d.get("scheduled", False),
             schedule_kind=d.get("schedule_kind"),
             ha_action=d.get("ha_action", False),
+            api_triggered=d.get("api_triggered", False),
             config_hash=d.get("config_hash"),
         )
 

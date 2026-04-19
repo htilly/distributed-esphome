@@ -1838,9 +1838,21 @@ async def start_compile(request: web.Request) -> web.Response:
             # service action when the caller authenticated with our
             # system-token Bearer (see ha_auth.py Path 2 —
             # ``ha_user.name == "esphome_fleet_integration"``).
+            #
+            # Bug #61: system-token bearer splits into *two* sources —
+            # the HA integration's coordinator (HomeAssistant/* UA) vs
+            # any other tool the user aimed at /ui/api/compile with the
+            # same token (curl, scripts, Postman, etc.). Use User-Agent
+            # to split: HomeAssistant/* → ha_action, anything else →
+            # api_triggered. Both flags are mutually exclusive by
+            # construction.
             ha_user = request.get("ha_user") or {}
             if ha_user.get("name") == "esphome_fleet_integration":
-                job.ha_action = True
+                user_agent = request.headers.get("User-Agent", "")
+                if user_agent.startswith("HomeAssistant/"):
+                    job.ha_action = True
+                else:
+                    job.api_triggered = True
             enqueued += 1
 
     logger.info(

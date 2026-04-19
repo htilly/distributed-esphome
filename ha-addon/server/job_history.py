@@ -108,10 +108,15 @@ def _triggered_by(job: "Job") -> tuple[str, str | None]:
     Ordering matters because ``scheduled`` runs originating from an HA
     service action (unusual but possible in theory) would carry both
     flags; the user sees the HA integration as the more informative
-    label, so it wins.
+    label, so it wins. Bug #61 adds the ``api`` source for direct
+    system-token callers (curl, scripts) that aren't the HA
+    integration — split from ``ha_action`` by User-Agent at enqueue
+    time in ``/ui/api/compile``.
     """
     if getattr(job, "ha_action", False):
         return ("ha_action", None)
+    if getattr(job, "api_triggered", False):
+        return ("api", None)
     if getattr(job, "scheduled", False):
         return ("schedule", getattr(job, "schedule_kind", None))
     return ("user", None)

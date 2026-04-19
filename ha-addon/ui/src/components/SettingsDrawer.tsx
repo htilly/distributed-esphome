@@ -5,14 +5,11 @@ import { Copy, Eye, EyeOff } from 'lucide-react';
 
 import {
   commitFile,
-  deleteArchivedConfig,
-  getArchivedConfigs,
   getSettings,
-  restoreArchivedConfig,
   updateSettings,
   type AppSettings,
-  type ArchivedConfig,
 } from '@/api/client';
+import { ArchivedDevicesList } from './ArchivedDevicesList';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -353,153 +350,6 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 
-// --------------------------------------------------------------------- //
-// CF.2: archived-config viewer.
-// --------------------------------------------------------------------- //
-
-function ArchivedDevicesList() {
-  const { data, error, isLoading, mutate } = useSWR<ArchivedConfig[]>(
-    'archived-configs',
-    getArchivedConfigs,
-    { revalidateOnFocus: false },
-  );
-  const [busy, setBusy] = useState<string | null>(null);
-  // Two-step delete confirmation — matches the live device-delete flow:
-  // the Permanently-delete action is destructive and should not be
-  // one-click from the list.
-  const [deleteCandidate, setDeleteCandidate] = useState<ArchivedConfig | null>(null);
-
-  async function handleRestore(filename: string) {
-    setBusy(filename);
-    try {
-      await restoreArchivedConfig(filename);
-      toast.success(`Restored ${filename}`);
-      await mutate();
-    } catch (err) {
-      toast.error((err as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function handleConfirmDelete(filename: string) {
-    setBusy(filename);
-    try {
-      await deleteArchivedConfig(filename);
-      toast.success(`Permanently deleted ${filename}`);
-      await mutate();
-    } catch (err) {
-      toast.error((err as Error).message);
-    } finally {
-      setBusy(null);
-      setDeleteCandidate(null);
-    }
-  }
-
-  if (error) {
-    return (
-      <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-400">
-        Failed to load archive: {error.message}
-      </div>
-    );
-  }
-  if (isLoading && !data) {
-    return <div className="text-xs text-[var(--text-muted)]">Loading…</div>;
-  }
-  if (!data || data.length === 0) {
-    return (
-      <p className="text-xs text-[var(--text-muted)]">
-        No archived devices. Deleted devices land here unless you pass{' '}
-        <code className="rounded bg-[var(--surface2)] px-1 py-0.5">archive=false</code>.
-      </p>
-    );
-  }
-
-  return (
-    <>
-      <p className="text-xs text-[var(--text-muted)]">
-        Devices you delete are kept here so you can restore them later. Restore puts the YAML
-        back under <code className="rounded bg-[var(--surface2)] px-1 py-0.5">/config/esphome/</code>;
-        permanent-delete removes the file from disk entirely and cannot be undone.
-      </p>
-      <ul className="flex flex-col gap-2 text-xs">
-        {data.map((a) => {
-          const ago = Math.floor((Date.now() / 1000 - a.archived_at));
-          const when = ago < 60 ? `${ago}s ago`
-            : ago < 3600 ? `${Math.floor(ago / 60)}m ago`
-              : ago < 86_400 ? `${Math.floor(ago / 3600)}h ago`
-                : `${Math.floor(ago / 86_400)}d ago`;
-          const kb = (a.size / 1024).toFixed(1);
-          return (
-            <li key={a.filename} className="flex items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--surface2)] px-2 py-1.5">
-              <div className="flex-1 min-w-0">
-                <div className="truncate font-mono text-[12px] text-[var(--text)]" title={a.filename}>
-                  {a.filename}
-                </div>
-                <div className="text-[10px] text-[var(--text-muted)]">
-                  {when} · {kb} KB
-                </div>
-              </div>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => handleRestore(a.filename)}
-                disabled={busy !== null}
-              >
-                Restore
-              </Button>
-              <Button
-                variant="destructive"
-                size="sm"
-                onClick={() => setDeleteCandidate(a)}
-                disabled={busy !== null}
-                title="Permanently delete — cannot be undone"
-              >
-                Delete
-              </Button>
-            </li>
-          );
-        })}
-      </ul>
-
-      {/* Two-step delete confirmation — destructive action. */}
-      <Dialog
-        open={deleteCandidate !== null}
-        onOpenChange={(o) => { if (!o && busy === null) setDeleteCandidate(null); }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Permanently delete {deleteCandidate?.filename}?</DialogTitle>
-          </DialogHeader>
-          <div className="px-4 py-3 text-sm text-[var(--text)]">
-            <p>
-              This removes the archived file from disk. You won't be able to restore it
-              after this action.
-            </p>
-          </div>
-          <DialogFooter>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setDeleteCandidate(null)}
-              disabled={busy !== null}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={() => deleteCandidate && handleConfirmDelete(deleteCandidate.filename)}
-              disabled={busy !== null}
-            >
-              Delete permanently
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
-  );
-}
 
 function Row({
   label,

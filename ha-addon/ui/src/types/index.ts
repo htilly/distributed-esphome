@@ -266,9 +266,18 @@ export interface Job {
   /** Bug 27: True when the job was enqueued by Home Assistant's
    * esphome_fleet.compile (or similar) service action — i.e. the
    * caller authenticated with the add-on's system-token Bearer as
-   * ``esphome_fleet_integration``. Drives a distinct badge in the
-   * Queue tab's Triggered column. */
+   * ``esphome_fleet_integration`` AND the request carried a
+   * ``HomeAssistant/*`` User-Agent (i.e. the HA integration's
+   * coordinator, not a direct API call). Drives a distinct badge in
+   * the Queue tab's Triggered column. */
   ha_action?: boolean;
+  /** Bug #61: True when the job was enqueued through /ui/api/compile
+   * with the server-token Bearer but NOT from the HA integration —
+   * e.g. a curl call, a script, Postman. Mutually exclusive with
+   * ``ha_action`` by construction. Shown in the Triggered column
+   * with a distinct terminal icon so "fleet automation" and
+   * "ad-hoc external API use" read differently at a glance. */
+  api_triggered?: boolean;
   /** AV.7: git HEAD hash of /config/esphome/ at enqueue time. Used by
    * the "Diff since compile" button in the log modal to open the
    * History panel pre-set to (from=this_hash, to=working tree). */

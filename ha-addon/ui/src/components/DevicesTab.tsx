@@ -14,6 +14,13 @@ import type { AddressSource, Device, Job, Target, Worker } from '../types';
 import { stripYaml, haDeepLink, usePersistedState } from '../utils';
 import { StatusDot } from './StatusDot';
 import { Button } from './ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from './ui/dialog';
+import { ArchivedDevicesList } from './ArchivedDevicesList';
 import { getAriaSort } from './ui/sort-header';
 import { DeleteModal, RenameModal } from './devices/DeviceTableModals';
 import { useDeviceColumns } from './devices/useDeviceColumns';
@@ -158,6 +165,10 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
   // triggered by SWR polls. See useDeviceColumns / DeviceContextMenu.
   const [menuOpenTarget, setMenuOpenTarget] = useState<string | null>(null);
   const [showUnmanaged, setShowUnmanaged] = useState(() => localStorage.getItem('showUnmanaged') !== 'false');
+  // #62: Devices-toolbar Archive button → shadcn Dialog wrapping the
+  // shared ArchivedDevicesList component. State lives here rather
+  // than in App.tsx because the button's local to this tab.
+  const [archiveOpen, setArchiveOpen] = useState(false);
 
   // VP.4 / QS.20: pin/unpin version from the hamburger menu. Memoized so
   // useDeviceColumns' dep array can actually cache — the hook re-runs only
@@ -349,6 +360,17 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
             <Button size="sm" onClick={onNewDevice} title="Create a new device YAML">
               + New Device
             </Button>
+            {/* #62: fast entry into the archive viewer, parallel to the
+                Settings drawer path. Same ArchivedDevicesList component
+                renders either way so the two surfaces stay in sync. */}
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => setArchiveOpen(true)}
+              title="Open archived devices — restore or permanently delete"
+            >
+              Archive…
+            </Button>
             {/* Upgrade dropdown */}
             <DropdownMenu>
               <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg border border-transparent bg-primary px-2.5 h-7 text-[0.8rem] font-medium text-primary-foreground hover:bg-primary/80 cursor-pointer">
@@ -499,6 +521,20 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
       )}
 
       {/* QS.18: bulk schedule UpgradeModal moved into DeviceTableActions. */}
+
+      {/* #62: Archive modal — toolbar "Archive…" button opens a Dialog
+          that wraps the shared ArchivedDevicesList. Same list the
+          Settings drawer renders; only the entry point differs. */}
+      <Dialog open={archiveOpen} onOpenChange={setArchiveOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Archived devices</DialogTitle>
+          </DialogHeader>
+          <div className="px-4 pb-4 pt-2">
+            <ArchivedDevicesList />
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

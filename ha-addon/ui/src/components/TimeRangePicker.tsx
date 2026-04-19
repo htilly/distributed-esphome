@@ -19,6 +19,7 @@ import { DayPicker, type DateRange } from 'react-day-picker';
 import { Calendar, ChevronDown } from 'lucide-react';
 
 import 'react-day-picker/style.css';
+import './TimeRangePicker.css';
 
 import { Popover } from '@base-ui/react/popover';
 
@@ -163,7 +164,7 @@ export function TimeRangePicker({ value, onChange, activePresetLabel }: Props) {
               <div className="pb-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">
                 Absolute range
               </div>
-              <div className="flex justify-center">
+              <div className="rdp-tight flex justify-center">
                 <DayPicker
                   mode="range"
                   selected={draftRange}
@@ -173,12 +174,9 @@ export function TimeRangePicker({ value, onChange, activePresetLabel }: Props) {
                   // Match the app's dark surface — react-day-picker ships
                   // a light default that's jarring against our theme.
                   style={{
-                    // Scoped CSS vars read by react-day-picker's stylesheet.
                     ['--rdp-accent-color' as string]: 'var(--accent, #2472c8)',
                     ['--rdp-accent-background-color' as string]: 'color-mix(in srgb, var(--accent, #2472c8) 25%, transparent)',
                     ['--rdp-background-color' as string]: 'var(--surface)',
-                    ['--rdp-day-height' as string]: '2rem',
-                    ['--rdp-day-width' as string]: '2rem',
                     color: 'var(--text)',
                   }}
                 />

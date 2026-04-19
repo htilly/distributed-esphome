@@ -1,0 +1,56 @@
+/*
+ * #60: scoped layout + theme overrides for react-day-picker inside the
+ * TimeRangePicker popover. The default ``react-day-picker/style.css``
+ * works fine structurally — nav chevrons live at top-right of the
+ * month, day cells grid correctly — but ships with roomy defaults
+ * that stretch the popover vertically and uses a light-theme palette
+ * that clashes against our dark ``var(--surface)``. Scoped to the
+ * ``.rdp-tight`` wrapper so overrides don't leak to any future
+ * consumer of react-day-picker.
+ */
+
+.rdp-tight {
+  /* Tighter day cells so the 6-row grid fits without padding the
+     popover vertically. */
+  --rdp-day-height: 1.85rem;
+  --rdp-day-width: 1.85rem;
+  /* Keep the weekday header compact too — default ~1rem padding is
+     loud against the 12 px text size we use elsewhere. */
+  --rdp-weekday-padding: 0.125rem 0;
+}
+
+.rdp-tight .rdp-caption_label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* Nav chevrons: keep rdp's built-in absolute positioning (sibling of
+   the month caption, anchored top-right of the month), but tone the
+   buttons + add a hover background so they match our shell. */
+.rdp-tight .rdp-button_previous,
+.rdp-tight .rdp-button_next {
+  color: var(--text-muted);
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 0.25rem;
+}
+.rdp-tight .rdp-button_previous:hover,
+.rdp-tight .rdp-button_next:hover {
+  background-color: var(--surface2);
+  color: var(--text);
+}
+
+/* Weekday header: match our muted-uppercase convention. */
+.rdp-tight .rdp-weekday {
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  font-weight: normal;
+  text-transform: uppercase;
+}
+
+/* Day hover tint. */
+.rdp-tight .rdp-day_button:hover:not([data-disabled]) {
+  background-color: var(--surface2);
+  border-radius: 0.25rem;
+}
