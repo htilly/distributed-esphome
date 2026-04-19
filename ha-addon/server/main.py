@@ -1421,12 +1421,18 @@ def create_app() -> web.Application:
         local_worker_script = Path("/app/client/client.py")
         if local_worker_script.exists():
             import subprocess as sp  # noqa: PLC0415
-            # Restore persisted slot count (default 0 on first run)
+            # #99: fresh installs default to 1 slot (active). Previously
+            # defaulted to 0 (paused) which was a poor out-of-the-box
+            # experience — new users saw "local-worker: 0 slots" and
+            # had to discover the +/- buttons before any compile would
+            # run. If the user has explicitly configured a slot count
+            # via the UI, the persisted file wins; we only use the
+            # default when the file is absent.
             local_slots_file = Path("/data/local_worker_slots")
-            local_slots = "0"
+            local_slots = "1"
             try:
                 if local_slots_file.exists():
-                    local_slots = local_slots_file.read_text().strip() or "0"
+                    local_slots = local_slots_file.read_text().strip() or "1"
             except Exception:
                 pass
             # SP.8: local-worker is a subprocess started once at add-on

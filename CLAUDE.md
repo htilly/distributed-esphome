@@ -54,7 +54,7 @@ Key worker env vars:
 | `JOB_TIMEOUT` | `600` | Compile timeout in seconds |
 | `OTA_TIMEOUT` | `120` | OTA upload timeout in seconds |
 | `MAX_ESPHOME_VERSIONS` | `3` | Max cached ESPHome versions on disk |
-| `MAX_PARALLEL_JOBS` | `2` | Concurrent build jobs per worker (0 = paused) |
+| `MAX_PARALLEL_JOBS` | `2` | Concurrent build jobs per worker (0 = paused). Server-spawned local worker defaults to `1` on fresh install unless the user has configured it via the UI (persisted in `/data/local_worker_slots`) — #99. |
 | `HOSTNAME` | system hostname | Worker name shown in UI |
 | `ESPHOME_SEED_VERSION` | — | Pre-install this ESPHome version at startup |
 | `ESPHOME_BIN` | — | Use this binary instead of the version-manager venvs |

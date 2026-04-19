@@ -1382,6 +1382,25 @@ async def validate_config(request: web.Request) -> web.Response:
     if config_path is None or not config_path.exists():
         return json_error("Target file not found", 404)
 
+    # #103: ``secrets.yaml`` is a flat key/value dict consumed by
+    # ``!secret`` references in other YAMLs — it isn't itself an ESPHome
+    # device config, and ``esphome config secrets.yaml`` fails with a
+    # schema error because the top level is missing ``esphome:`` /
+    # ``esp32:`` etc. The ESPHome Dashboard's own editor treats
+    # ``secrets.yaml`` the same way (no "Validate" action). Mirror that:
+    # return success with an explanatory note so the UI's Validate
+    # button doesn't light up red on an intentional-shape file.
+    if Path(target).name == "secrets.yaml":
+        return web.json_response({
+            "success": True,
+            "output": (
+                "secrets.yaml holds !secret values — ESPHome's config "
+                "validator doesn't apply to it (no device schema). "
+                "Skipped.\n"
+            ),
+            "skipped": True,
+        })
+
     # #84: use the correct ESPHome version for validation. If the device is
     # pinned, install that version via the version manager and validate with
     # its binary — not the server's default. This ensures pinned devices

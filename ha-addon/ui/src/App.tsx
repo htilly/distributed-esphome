@@ -928,6 +928,10 @@ export default function App() {
       <HistoryPanel
         filename={historyTarget}
         initialFromHash={historyFromHash}
+        // #100: thread the app theme into the DiffEditor so the history
+        // panel matches the surrounding surface in light mode instead
+        // of hard-coding vs-dark. Same expression EditorModal uses.
+        monacoTheme={theme === 'light' ? 'vs' : 'vs-dark'}
         onOpenChange={(open) => { if (!open) { setHistoryTarget(null); setHistoryFromHash(null); } }}
         // Bug #31: bump the nonce on rollback / manual commit so any
         // open EditorModal re-fetches the file content. Conditioned on

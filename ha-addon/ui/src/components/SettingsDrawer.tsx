@@ -114,26 +114,43 @@ export function SettingsDrawer({ open, onOpenChange, dirtyTargets = [] }: Settin
           {data && (
             <div className="flex flex-col gap-6">
               <Section title="Config versioning">
+                {/* #97: master feature toggle. When OFF the server
+                    runs zero git commands and the sub-options below
+                    are dimmed + disabled. "Enable config versioning"
+                    reads as a first-class Pat-facing concept;
+                    "auto-commit on save" is a specific behaviour
+                    inside it. */}
                 <BoolRow
-                  label="Auto-commit on save"
-                  help="Every save creates a local git commit in /config/esphome/. Turn off if you manage this directory with your own git workflow."
-                  value={data.auto_commit_on_save}
-                  onChange={v => patch({ auto_commit_on_save: v })}
+                  label="Enable versioning"
+                  help="Turn on the local git-backed history for /config/esphome/ — per-file history, diff, and rollback. Off disables all git operations."
+                  value={data.versioning_enabled}
+                  onChange={v => patch({ versioning_enabled: v })}
                 />
-                <StringRow
-                  label="Commit author name"
-                  help="Used on Fleet-created commits. If /config/esphome/ has its own user.name set (per-repo, global, or system), that wins."
-                  maxLength={100}
-                  value={data.git_author_name}
-                  onCommit={v => patch({ git_author_name: v })}
-                />
-                <StringRow
-                  label="Commit author email"
-                  help="Paired with the name above. Free-form — no format validation."
-                  maxLength={256}
-                  value={data.git_author_email}
-                  onCommit={v => patch({ git_author_email: v })}
-                />
+                <div
+                  className={data.versioning_enabled ? 'flex flex-col gap-6' : 'flex flex-col gap-6 opacity-50 pointer-events-none'}
+                  aria-disabled={!data.versioning_enabled}
+                >
+                  <BoolRow
+                    label="Auto-commit on save"
+                    help="Every save creates a local git commit in /config/esphome/. Turn off if you manage this directory with your own git workflow."
+                    value={data.auto_commit_on_save}
+                    onChange={v => patch({ auto_commit_on_save: v })}
+                  />
+                  <StringRow
+                    label="Commit author name"
+                    help="Used on Fleet-created commits. If /config/esphome/ has its own user.name set (per-repo, global, or system), that wins."
+                    maxLength={100}
+                    value={data.git_author_name}
+                    onCommit={v => patch({ git_author_name: v })}
+                  />
+                  <StringRow
+                    label="Commit author email"
+                    help="Paired with the name above. Free-form — no format validation."
+                    maxLength={256}
+                    value={data.git_author_email}
+                    onCommit={v => patch({ git_author_email: v })}
+                  />
+                </div>
               </Section>
               <Section title="Job history">
                 <IntRow

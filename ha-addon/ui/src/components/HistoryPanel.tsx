@@ -58,6 +58,13 @@ interface HistoryPanelProps {
    */
   initialFromHash?: string | null;
   initialToHash?: string | null;
+  /**
+   * #100: Monaco theme — pass through the app's current theme so the
+   * diff editor matches. Default ``vs-dark`` for backwards compat;
+   * consumers should explicitly pass ``theme === 'light' ? 'vs' :
+   * 'vs-dark'`` (same expression App.tsx uses for EditorModal).
+   */
+  monacoTheme?: 'vs' | 'vs-dark';
 }
 
 // Sentinel used in the From/To dropdowns to mean "current working tree".
@@ -69,6 +76,7 @@ export function HistoryPanel({
   onFileChanged,
   initialFromHash,
   initialToHash,
+  monacoTheme = 'vs-dark',
 }: HistoryPanelProps) {
   const open = filename !== null;
 
@@ -339,7 +347,7 @@ export function HistoryPanel({
                 original={fromContent}
                 modified={toContent}
                 language="yaml"
-                theme="vs-dark"
+                theme={monacoTheme}
                 options={{
                   readOnly: true,
                   renderSideBySide: true,

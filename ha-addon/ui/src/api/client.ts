@@ -255,6 +255,8 @@ export async function commitFile(filename: string, message?: string): Promise<Co
 // ha-addon/server/settings.py. Any rename there is a UI contract change
 // — update this interface in the same commit.
 export interface AppSettings {
+  // #97: master toggle for the AV.* config-versioning feature.
+  versioning_enabled: boolean;
   auto_commit_on_save: boolean;
   git_author_name: string;
   git_author_email: string;

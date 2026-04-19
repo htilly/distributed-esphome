@@ -96,6 +96,13 @@ class SettingsValidationError(ValueError):
 class AppSettings:
     """User-facing settings editable at runtime via ``/ui/api/settings``."""
 
+    # #97: top-level toggle for the AV.* config-versioning feature
+    # set. When False, the server skips all git operations (no init,
+    # no auto-commit, no rollback, no history fetch) and the UI dims
+    # the sub-settings. Default True so existing installs carry over
+    # their current behavior; #98 turns this into a tristate with an
+    # "ask-on-first-login" value.
+    versioning_enabled: bool = True
     auto_commit_on_save: bool = True
     # Author used on Fleet-originated auto-commits (AV.2). Only applied
     # when the repo itself has no ``user.name``/``user.email`` configured
@@ -223,6 +230,7 @@ def _validate_token(value: Any, field: str) -> str:
 # Per-field validators. Any PATCH that names a key not listed here is
 # rejected — keeps typos from silently disappearing.
 _VALIDATORS: dict[str, Callable[[Any, str], Any]] = {
+    "versioning_enabled": _validate_bool,
     "auto_commit_on_save": _validate_bool,
     # Git author. Don't validate email format — git itself accepts
     # arbitrary strings (e.g. "ha@distributed-esphome.local" isn't a

@@ -170,6 +170,12 @@ export function TimeRangePicker({ value, onChange, activePresetLabel }: Props) {
                   selected={draftRange}
                   onSelect={setDraftRange}
                   numberOfMonths={1}
+                  // #102: first-day-of-week follows the browser locale
+                  // (Monday in most of Europe, Sunday in the US + most
+                  // Asia). ``navigator.language`` is what ``Intl`` also
+                  // resolves against, so the calendar matches Pat's
+                  // date expectations.
+                  weekStartsOn={firstDayOfWeekForLocale()}
                   className="text-[12px]"
                   // Match the app's dark surface — react-day-picker ships
                   // a light default that's jarring against our theme.
@@ -215,6 +221,43 @@ export function TimeRangePicker({ value, onChange, activePresetLabel }: Props) {
 function fmtTimeHHMM(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/**
+ * #102: Derive the first day of the week from the browser's locale.
+ * Returns ``0`` (Sunday) or ``1`` (Monday) — the two values
+ * react-day-picker's ``weekStartsOn`` prop accepts most cleanly for
+ * our Pat-mix user base. Uses ``Intl.Locale.weekInfo`` where supported
+ * (Chrome 130+, Safari 17+, Firefox 134+); falls back to a region
+ * heuristic for older UAs.
+ */
+function firstDayOfWeekForLocale(): 0 | 1 {
+  const lang = typeof navigator !== 'undefined' ? navigator.language : 'en-US';
+  try {
+    // weekInfo is a stage-3 Intl extension; TS doesn't type it yet.
+    const locale = new Intl.Locale(lang) as Intl.Locale & {
+      weekInfo?: { firstDay?: number };
+      getWeekInfo?: () => { firstDay?: number };
+    };
+    const weekInfo = locale.weekInfo ?? locale.getWeekInfo?.();
+    // Intl uses 1-7 (Mon-Sun). rdp uses 0-6 (Sun-Sat).
+    if (weekInfo?.firstDay === 7) return 0;
+    if (typeof weekInfo?.firstDay === 'number') return 1;
+  } catch {
+    // Intl.Locale.weekInfo unsupported — fall through.
+  }
+  const ll = lang.toLowerCase();
+  // US / CA / JP / KR / IL / BR / MX default Sunday-first.
+  if (
+    ll.startsWith('en-us') || ll.startsWith('en-ca') ||
+    ll.startsWith('ja') || ll.startsWith('ko') ||
+    ll.startsWith('he') || ll.startsWith('pt-br') ||
+    ll.startsWith('es-mx')
+  ) {
+    return 0;
+  }
+  // Most European / ISO 8601 locales default to Monday.
+  return 1;
 }
 
 function combineDateAndTime(date: Date, time: string): Date {

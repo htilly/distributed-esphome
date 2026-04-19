@@ -63,7 +63,7 @@ Home Assistant also auto-discovers the add-on and offers to add the companion in
 
 ### Adding a remote build worker
 
-You don't need one to start — the add-on ships with a built-in local worker that runs inside the HA host (paused by default; give it at least one build slot on the **Workers** tab to wake it up). If local compiles feel slow, add a remote worker on a faster machine:
+You don't need one to start — the add-on ships with a built-in local worker that runs inside the HA host with one build slot out of the box. If local compiles feel slow, raise the slot count for `local-worker` on the **Workers** tab or add a remote worker on a faster machine:
 
 1. Open the **Workers** tab and click **+ Connect Worker**.
 2. Pick **Bash**, **PowerShell**, or **Docker Compose** depending on the target machine.

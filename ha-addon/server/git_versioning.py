@@ -116,6 +116,28 @@ def _is_git_repo(path: Path) -> bool:
     return git_marker.is_dir() or git_marker.is_file()
 
 
+def _versioning_active(path: Path) -> bool:
+    """#97: combined gate — the feature toggle AND a real repo on disk.
+
+    Used by every git-write wrapper in this module. When the user has
+    flipped ``versioning_enabled`` off in Settings we don't run any git
+    commands: no commit, no ls-files, no blame. The module becomes
+    inert. Callers should generally prefer this over raw
+    :func:`_is_git_repo` except for the init path itself.
+    """
+    try:
+        from settings import get_settings  # noqa: PLC0415
+
+        if not get_settings().versioning_enabled:
+            return False
+    except Exception:
+        # Settings not initialised (e.g. very early startup). Fall
+        # through to the repo-presence check so this doesn't block
+        # init_repo from running.
+        pass
+    return _is_git_repo(path)
+
+
 # ---------------------------------------------------------------------------
 # AV.1 — Auto-init
 # ---------------------------------------------------------------------------
@@ -140,6 +162,16 @@ def init_repo(config_dir: Path) -> bool:
     commits don't fail on a bare repo with no author configured) —
     the user's own config is never overridden.
     """
+    # #97: top-level feature toggle. When versioning is disabled no
+    # new repo should appear — not even on a fresh install.
+    try:
+        from settings import get_settings  # noqa: PLC0415
+        if not get_settings().versioning_enabled:
+            logger.info("versioning_enabled=False; skipping git auto-init")
+            return False
+    except Exception:
+        pass
+
     config_dir = Path(config_dir)
     if not config_dir.is_dir():
         logger.warning("config_dir %s does not exist; skipping git auto-init", config_dir)
@@ -431,7 +463,7 @@ def _do_commit(
     message: str | None = None,
 ) -> None:
     """Stage and commit a single path. Safe to call even if nothing changed."""
-    if not _is_git_repo(config_dir):
+    if not _versioning_active(config_dir):
         logger.debug("Not a git repo: %s; skipping auto-commit of %s", config_dir, relpath)
         return
 
@@ -521,7 +553,7 @@ def get_head(config_dir: Path) -> str | None:
     since last compile" can be computed from git without a snapshot
     directory.
     """
-    if not _is_git_repo(Path(config_dir)):
+    if not _versioning_active(Path(config_dir)):
         return None
     try:
         result = _run(["git", "rev-parse", "HEAD"], cwd=Path(config_dir), check=False)
@@ -551,7 +583,7 @@ def changed_paths_between(config_dir: Path, from_hash: str, to_hash: str) -> set
     validation failure, non-repo, or git error — never raises.
     """
     config_dir = Path(config_dir)
-    if not _is_git_repo(config_dir):
+    if not _versioning_active(config_dir):
         return set()
     for h in (from_hash, to_hash):
         if not (4 <= len(h) <= 40 and all(c in "0123456789abcdef" for c in h.lower())):
@@ -584,7 +616,7 @@ def _find_creation_commit(config_dir: Path, relpath: str) -> str | None:
     renames, this is the *original* filename's creation commit (the
     correct "start of history" to include in the drawer).
     """
-    if not _is_git_repo(Path(config_dir)):
+    if not _versioning_active(Path(config_dir)):
         return None
     try:
         result = _run(
@@ -633,7 +665,7 @@ def file_history(
     errors. Never raises — callers render "no history yet" when empty.
     """
     config_dir = Path(config_dir)
-    if not _is_git_repo(config_dir):
+    if not _versioning_active(config_dir):
         return []
 
     # Per-commit header line starts with a distinct marker so we can
@@ -803,7 +835,7 @@ async def archive_and_commit(config_dir: Path, relpath: str) -> bool:
     moved = archive_with_git_mv(config_dir, relpath)
     if not moved:
         return False
-    if not _is_git_repo(config_dir) or not get_settings().auto_commit_on_save:
+    if not _versioning_active(config_dir) or not get_settings().auto_commit_on_save:
         return True
 
     dest_rel = f"{ARCHIVE_DIRNAME}/{relpath}"
@@ -845,7 +877,7 @@ async def restore_and_commit(config_dir: Path, filename: str) -> bool:
     moved = restore_with_git_mv(config_dir, filename)
     if not moved:
         return False
-    if not _is_git_repo(config_dir) or not get_settings().auto_commit_on_save:
+    if not _versioning_active(config_dir) or not get_settings().auto_commit_on_save:
         return True
 
     src_rel = f"{ARCHIVE_DIRNAME}/{filename}"
@@ -892,7 +924,7 @@ async def delete_archived_and_commit(config_dir: Path, filename: str) -> bool:
     if not path.exists():
         return False
 
-    if not _is_git_repo(config_dir):
+    if not _versioning_active(config_dir):
         try:
             path.unlink()
             return True
@@ -966,7 +998,7 @@ def archive_with_git_mv(config_dir: Path, relpath: str) -> bool:
 
     archive_dir.mkdir(exist_ok=True)
 
-    if not _is_git_repo(config_dir):
+    if not _versioning_active(config_dir):
         try:
             src.rename(dest)
             return True
@@ -1025,7 +1057,7 @@ def restore_with_git_mv(config_dir: Path, filename: str) -> bool:
     if not src.exists():
         return False
 
-    if not _is_git_repo(config_dir):
+    if not _versioning_active(config_dir):
         try:
             src.rename(dest)
             return True
@@ -1090,7 +1122,7 @@ def rollback_file(config_dir: Path, relpath: str, hash: str) -> dict[str, object
     Raises nothing — callers render the returned ``content`` and status.
     """
     config_dir = Path(config_dir)
-    if not _is_git_repo(config_dir):
+    if not _versioning_active(config_dir):
         logger.warning("rollback_file called on non-repo %s", config_dir)
         return {"content": "", "committed": False, "hash": None, "short_hash": None}
 
@@ -1184,7 +1216,7 @@ def commit_file_now(
     error, just informational.
     """
     config_dir = Path(config_dir)
-    if not _is_git_repo(config_dir):
+    if not _versioning_active(config_dir):
         return {"committed": False, "hash": None, "short_hash": None, "message": None}
 
     # Bug #34: human-readable manual-commit subject. The "(manual)" tail
@@ -1244,7 +1276,7 @@ def file_content_at(config_dir: Path, relpath: str, hash: str | None) -> str | N
             logger.exception("Failed to read %s for content-at(None)", relpath)
             return None
 
-    if not _is_git_repo(config_dir):
+    if not _versioning_active(config_dir):
         return None
     if not (4 <= len(hash) <= 40 and all(c in "0123456789abcdef" for c in hash.lower())):
         # Bug #15 (reopened): drop from WARNING to DEBUG. The 400
@@ -1281,7 +1313,7 @@ def dirty_paths(config_dir: Path) -> set[str]:
     target before its first commit shows up.
     """
     config_dir = Path(config_dir)
-    if not _is_git_repo(config_dir):
+    if not _versioning_active(config_dir):
         return set()
 
     try:
@@ -1314,7 +1346,7 @@ def file_status(config_dir: Path, relpath: str) -> dict[str, object]:
     All false / None on non-repo directories.
     """
     config_dir = Path(config_dir)
-    if not _is_git_repo(config_dir):
+    if not _versioning_active(config_dir):
         return {"has_uncommitted_changes": False, "head_hash": None, "head_short_hash": None}
 
     try:
@@ -1354,7 +1386,7 @@ def file_diff(
     input by validating hashes against ``[0-9a-f]{4,40}``.
     """
     config_dir = Path(config_dir)
-    if not _is_git_repo(config_dir):
+    if not _versioning_active(config_dir):
         return ""
 
     def _valid_hash(h: str) -> bool:

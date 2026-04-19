@@ -427,6 +427,10 @@ export async function mockApi(page: Page) {
   });
 
   const settingsState: Record<string, unknown> = {
+    // #97: master versioning toggle. Default true so the existing
+    // specs that interact with Config-versioning-section inputs
+    // (auto-commit toggle, git author fields) see the enabled path.
+    versioning_enabled: true,
     auto_commit_on_save: true,
     git_author_name: 'HA User',
     git_author_email: 'ha@distributed-esphome.local',
@@ -440,6 +444,8 @@ export async function mockApi(page: Page) {
     worker_offline_threshold: 30,
     device_poll_interval: 60,
     require_ha_auth: true,
+    // #82: default to 'auto' (follow browser locale).
+    time_format: 'auto',
   };
   await page.route('**/ui/api/settings', async (route) => {
     const method = route.request().method();

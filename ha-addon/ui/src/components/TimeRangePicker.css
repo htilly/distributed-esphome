@@ -85,6 +85,49 @@
   border-radius: 0.25rem;
 }
 
+/* #101 — final cage for the month grid.
+   Root cause: ``.rdp-tight .rdp-root`` was capped at its parent's width
+   via ``max-width: 100%``, but the inner ``<table>`` (``.rdp-month_grid``)
+   ignored that cap and expanded to ~500 px of auto-layout content,
+   bleeding past the popover's right edge by ~66 px. The day cells' CSS
+   ``width: var(--rdp-day-width)`` is a *minimum* in auto table-layout,
+   not a fix. Force the table to the exact 7 × day-width and switch to
+   ``table-layout: fixed`` so the cells honour the cell width var
+   instead of the browser's "distribute extra space" algorithm.
+   ``border-collapse: collapse`` removes the 2 px default border-spacing
+   per cell that would otherwise re-inflate the grid. */
+/* Constrain the `.rdp-month` block so its descendant `<table>` can't
+   push past the popover. A table's own ``width`` / ``max-width`` is
+   famously stubborn in auto-layout, so we cap the *parent's* size and
+   force the table to live inside it with ``display: block`` + allow
+   horizontal auto-sizing. */
+.rdp-tight .rdp-month {
+  max-width: 14rem;
+}
+.rdp-tight .rdp-month_grid {
+  /* Root cause of the #60→#64→#72 → #101 saga: ``theme.css`` has a
+     global ``table { min-width: 500px }`` rule (for the Devices /
+     Queue / Workers tables — they'd otherwise collapse below their
+     cell content on narrow viewports). That min-width was also
+     applied to the rdp calendar table, which is why *every* width
+     override we tried resolved to 500 px in computed style. Drop the
+     floor here. */
+  border-collapse: collapse;
+  table-layout: fixed;
+  width: 100%;
+  min-width: 0;
+}
+.rdp-tight .rdp-weekday,
+.rdp-tight .rdp-day {
+  /* Explicit per-cell width so ``table-layout: fixed`` has a first-row
+     hint to distribute columns from. Without this the browser picks
+     minimum widths (reported as 1 px in computed style under fixed
+     layout) and the day_button overflows its cell. */
+  width: var(--rdp-day-width, 2rem);
+  padding-left: 0;
+  padding-right: 0;
+}
+
 /* #64 — zero out TD padding on day cells. rdp 9 itself doesn't add any,
    but UA/Tailwind preflight and our own wrapper chain leave a ``6px 4px
    6px 8px`` computed padding that inflates every row to ~43 px even

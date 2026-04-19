@@ -359,6 +359,7 @@ def test_init_creates_settings_file_when_absent(tmp_path: Path):
     # the exact 32-char hex value.
     assert len(on_disk.pop("server_token")) == 32
     assert on_disk == {
+        "versioning_enabled": True,
         "auto_commit_on_save": True,
         "git_author_name": "HA User",
         "git_author_email": "ha@distributed-esphome.local",
@@ -624,6 +625,7 @@ def test_settings_as_dict_round_trips():
     with patch("settings._settings", AppSettings(auto_commit_on_save=False, server_token="abc123")):
         out = settings_as_dict()
     assert out == {
+        "versioning_enabled": True,
         "auto_commit_on_save": False,
         "git_author_name": "HA User",
         "git_author_email": "ha@distributed-esphome.local",
