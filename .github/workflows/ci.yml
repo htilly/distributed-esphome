@@ -50,34 +50,25 @@ jobs:
             aiohttp zeroconf voluptuous
 
       - name: Run server + client tests
-        # Excludes HA integration tests — those need HA, which conflicts
-        # with esphome in the same env. IT.1: the ``_logic.py`` helper
-        # tests DON'T need HA at runtime, so they run in the main env
-        # alongside everything else. Only the true HA-fixture tests
-        # (unsuffixed ``test_integration_*.py``) land in the isolated env.
+        # Excludes ALL tests/test_integration_*.py — they transitively
+        # import `homeassistant.*` (via esphome_fleet modules) and that
+        # dep conflicts with esphome in the same env. Both the `_logic`
+        # helper tests and any real-hass-fixture tests land in the
+        # isolated .ha-testenv in the next step.
         run: |
           pytest tests/ -n auto -v \
             --cov=ha-addon/server --cov=ha-addon/client \
             --cov-report=term-missing --cov-report=html \
-            $(for f in tests/test_integration_*.py; do
-                case "$f" in
-                  *_logic.py) ;;  # run in main env
-                  *) echo "--ignore=$f" ;;
-                esac
-              done)
+            --ignore-glob='tests/test_integration_*.py'
 
       - name: Run HA integration tests (isolated venv)
-        # IT.2: any ``test_integration_*.py`` that's NOT ``_logic.py``
-        # must import pytest_homeassistant_custom_component (enforced
-        # by the PY-10 invariant in scripts/check-invariants.sh) and
-        # runs against the real ``hass`` fixture from that plugin.
-        run: |
-          real_ha_tests=$(ls tests/test_integration_*.py 2>/dev/null | grep -v '_logic.py' | tr '\n' ' ')
-          if [ -n "$real_ha_tests" ]; then
-            ./.ha-testenv/bin/pytest $real_ha_tests -v
-          else
-            echo "No non-_logic integration tests yet — skipping."
-          fi
+        # Runs every ``tests/test_integration_*.py`` (both the `_logic`
+        # helper files and the real-hass-fixture files) against the
+        # isolated env where `homeassistant` and
+        # `pytest-homeassistant-custom-component` are installed. The
+        # PY-10 invariant (checked in the `lint` job) enforces that
+        # non-`_logic` files import the real-hass plugin.
+        run: ./.ha-testenv/bin/pytest tests/test_integration_*.py -v
 
       - name: Upload coverage report
         if: always()

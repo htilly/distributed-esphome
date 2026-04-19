@@ -258,6 +258,8 @@ Surfaced by the 2026-04-16 archive sweep. Each item was deferred (or filed as a 
 
 - [x] **#55** *(1.6.0-dev.27)* — TimeRangePicker popover was clipped to ~286 px wide, chopping off the entire presets column + most of the calendar. Root cause: `absolute right-0` anchored the popover's right edge to the trigger's right edge then extended leftward 640 px, which was clipped by the viewport gutter. Playwright-verified with headless browser. Fixed by anchoring left-0 instead — popover now expands rightward from the trigger (which lives near the left of the Queue-History filter row, so there's always room). Also added `flex-wrap` for defence on narrower viewports. 
 
+- [ ] **#56** — **`WARNING job_queue: submit_result: job <id> in unexpected state JobState.CANCELLED` log noise on cancel-during-compile.** Observed once per Playwright smoke run on hass-4 at 2026-04-18 21:21:32 against `cyd-office-info.yaml`. The race is benign: a user (or the smoke suite's "cancel and verify" step) cancels a job while the worker is still compiling; the worker eventually finishes and POSTs `submit_result`; server's `JobQueue.submit_result` sees `state == CANCELLED` (not `WORKING`) and logs WARNING before discarding the result. The warning is *defensively correct* but the scenario is *expected behaviour* — cancel-during-compile is a documented affordance, not a bug — so the log line shouldn't read at WARNING severity (which surfaces in operator-alerting filters). Drop to INFO with a clearer message: `INFO job_queue: discarding submit_result for cancelled job <id> (worker <client_id> finished after cancel)`. While we're there, count the discard so the metric is queryable. No code-flow change; pure log-level fix.
+
 
 
 

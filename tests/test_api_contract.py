@@ -32,7 +32,11 @@ from typing import Any
 
 import pytest
 
-from tests.test_ui_api import _UiApp, _make_ui_app, _write_config  # type: ignore[attr-defined]
+# pytest's rootdir discovery puts ``tests/`` on sys.path, so sibling
+# test files are importable by their base name. Using ``tests.``-prefixed
+# paths fails on CI because ``tests/`` isn't a Python package (no
+# ``__init__.py``) — only on the rootdir-scan path.
+from test_ui_api import _UiApp, _make_ui_app, _write_config  # type: ignore[import-not-found]
 
 
 # -------------------------------------------------------------------------
