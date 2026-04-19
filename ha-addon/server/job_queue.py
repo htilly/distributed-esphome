@@ -175,8 +175,17 @@ class Job:
         return (end - self.assigned_at).total_seconds()
 
 
-def _purge_firmware(job_ids: Iterable[str]) -> None:
+def _purge_firmware(jobs: Iterable["Job"]) -> None:
     """Remove .bin files for removed jobs (FD.7).
+
+    Bug #38: download-only firmware is now retained past the job's
+    queue lifetime — the user wanted those binaries to survive
+    coalescing + explicit clears and only evict on disk budget
+    pressure. This helper now filters ``download_only`` jobs out of
+    the purge set; their binaries live on disk until the
+    ``firmware_budget_enforcer`` task in ``main.py`` evicts them (or
+    the user explicitly deletes the job-history row). OTA firmware
+    retains its original eager-delete semantics.
 
     Imported lazily so unit tests that replace `DEFAULT_FIRMWARE_DIR`
     via monkeypatch see the patched value.
@@ -185,11 +194,14 @@ def _purge_firmware(job_ids: Iterable[str]) -> None:
         from firmware_storage import delete_firmware  # noqa: PLC0415
     except Exception:
         return
-    for jid in job_ids:
+    for job in jobs:
+        if getattr(job, "download_only", False) and getattr(job, "has_firmware", False):
+            # Preserve — budget enforcer will evict on disk pressure.
+            continue
         try:
-            delete_firmware(jid)
+            delete_firmware(job.id)
         except Exception:
-            logger.debug("Firmware purge for %s raised", jid, exc_info=True)
+            logger.debug("Firmware purge for %s raised", job.id, exc_info=True)
 
 
 class JobQueue:
@@ -306,10 +318,28 @@ class JobQueue:
             logger.warning("Skipped %d unparseable job entries on startup", skipped)
         logger.info("Loaded %d jobs from %s (persisted across restarts)", len(self._jobs), self._queue_file)
         # FD.7: sweep orphan firmware binaries whose job no longer
-        # exists (add-on crashed mid-cleanup, etc.).
+        # exists (add-on crashed mid-cleanup, etc.). Bug #38: the
+        # "active" set is expanded to include download-only history
+        # rows — their binaries survive queue coalescing/clears until
+        # the firmware_budget_enforcer evicts them.
         try:
             from firmware_storage import reconcile_orphans  # noqa: PLC0415
-            reconcile_orphans(self._jobs.keys())
+            protected: set[str] = set()
+            if self._history is not None:
+                try:
+                    rows = self._history.query(state="success", limit=500, offset=0)
+                    for r in rows:
+                        if r.get("download_only") and r.get("has_firmware"):
+                            protected.add(str(r["id"]))
+                except Exception:
+                    logger.debug(
+                        "Couldn't pull protected download-only IDs from history",
+                        exc_info=True,
+                    )
+            reconcile_orphans(
+                self._jobs.keys(),
+                protected_job_ids=protected,
+            )
         except Exception:
             logger.debug("Firmware reconciliation skipped", exc_info=True)
 
@@ -408,15 +438,17 @@ class JobQueue:
             # transition path already recorded them, this is a no-op.
             # Guards against a pre-1.6-history queue.json being loaded on
             # a server that *does* want the rows preserved.
-            for jid in stale:
-                self._record_history(self._jobs[jid])
+            stale_jobs = [self._jobs[jid] for jid in stale]
+            for j in stale_jobs:
+                self._record_history(j)
             for jid in stale:
                 del self._jobs[jid]
-            if stale:
-                logger.debug("Removed %d stale job(s) for target %s", len(stale), target)
+            if stale_jobs:
+                logger.debug("Removed %d stale job(s) for target %s", len(stale_jobs), target)
                 # FD.7: purge any firmware binaries the stale jobs owned
                 # so per-target coalescing doesn't leak disk storage.
-                _purge_firmware(stale)
+                # Bug #38: download-only firmware is now retained.
+                _purge_firmware(stale_jobs)
 
             is_followup = active is not None and active.state == JobState.WORKING and not validate_only
             job = Job(
@@ -843,16 +875,17 @@ class JobQueue:
         """
         terminal = {JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT, JobState.CANCELLED}
         async with self._lock:
-            removed_ids: list[str] = []
+            removed_jobs: list[Job] = []
             for job_id in job_ids:
                 job = self._jobs.get(job_id)
                 if job and job.state in terminal:
                     del self._jobs[job_id]
-                    removed_ids.append(job_id)
-            if removed_ids:
+                    removed_jobs.append(job)
+            if removed_jobs:
                 self._persist()
-        _purge_firmware(removed_ids)
-        return len(removed_ids)
+        # Bug #38: _purge_firmware now takes Jobs and preserves download_only firmware.
+        _purge_firmware(removed_jobs)
+        return len(removed_jobs)
 
     async def clear(self, states: list[str], require_ota_success: bool = False) -> int:
         """Remove terminal jobs whose state is in *states*. Returns count removed.
@@ -865,17 +898,19 @@ class JobQueue:
         terminal = {JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT, JobState.CANCELLED}
         target_states = {JobState(s) for s in states if JobState(s) in terminal}
         async with self._lock:
-            to_remove = []
+            to_remove: list[Job] = []
             for job_id, job in self._jobs.items():
                 if job.state not in target_states:
                     continue
                 if require_ota_success and job.ota_result == "failed":
                     continue
-                to_remove.append(job_id)
-            for job_id in to_remove:
-                del self._jobs[job_id]
+                to_remove.append(job)
+            for job in to_remove:
+                del self._jobs[job.id]
             if to_remove:
                 self._persist()
+        # Bug #38: _purge_firmware filters out download_only — those binaries
+        # survive user Clear and only evict via the firmware budget task.
         _purge_firmware(to_remove)
         return len(to_remove)
 

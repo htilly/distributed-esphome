@@ -16,6 +16,7 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet';
 import { getJobBadge } from '@/utils/jobState';
+import { renderAnsi } from '@/utils/ansi';
 
 // JH.5: per-device "Compile history" panel.
 //
@@ -33,6 +34,13 @@ interface Props {
   /** Fully-qualified filename (e.g. "bedroom.yaml"). ``null`` = closed. */
   target: string | null;
   onOpenChange: (open: boolean) => void;
+  /**
+   * Bug #41: click on a commit-hash cell opens the AV.6 History panel
+   * preset to ``from = hash, to = Current``. Lets the user jump from
+   * "this compile ran at X" to "what's changed since then" with one
+   * click, matching the Queue tab's Commit-column button.
+   */
+  onOpenHistoryDiff?: (target: string, fromHash: string) => void;
 }
 
 const PAGE_SIZE = 50;
@@ -69,7 +77,7 @@ function triggeredLabel(row: JobHistoryEntry): string {
   return 'User';
 }
 
-export function CompileHistoryPanel({ target, onOpenChange }: Props) {
+export function CompileHistoryPanel({ target, onOpenChange, onOpenHistoryDiff }: Props) {
   const open = target !== null;
   // Page offset for "Load more" — resets when the target changes.
   const [offset, setOffset] = useState(0);
@@ -157,6 +165,7 @@ export function CompileHistoryPanel({ target, onOpenChange }: Props) {
                   onToggle={() =>
                     setExpandedId((prev) => (prev === row.id ? null : row.id))
                   }
+                  onOpenHistoryDiff={onOpenHistoryDiff}
                 />
               ))}
             </div>
@@ -212,10 +221,12 @@ function HistoryRow({
   row,
   expanded,
   onToggle,
+  onOpenHistoryDiff,
 }: {
   row: JobHistoryEntry;
   expanded: boolean;
   onToggle: () => void;
+  onOpenHistoryDiff?: (target: string, fromHash: string) => void;
 }) {
   const badge = getJobBadge({
     state: row.state,
@@ -226,12 +237,13 @@ function HistoryRow({
   const hasExcerpt = !!row.log_excerpt;
   return (
     <div className="flex flex-col">
-      <button
-        type="button"
-        className="flex items-center gap-2 px-3 py-2 text-left hover:bg-[var(--surface2)] cursor-pointer"
+      <div
+        role={hasExcerpt ? 'button' : undefined}
+        tabIndex={hasExcerpt ? 0 : undefined}
+        className={`flex items-center gap-2 px-3 py-2 text-left ${hasExcerpt ? 'hover:bg-[var(--surface2)] cursor-pointer' : ''}`}
         onClick={hasExcerpt ? onToggle : undefined}
-        disabled={!hasExcerpt}
-        title={hasExcerpt ? 'Click to see log excerpt' : 'No log excerpt stored'}
+        onKeyDown={hasExcerpt ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(); } } : undefined}
+        title={hasExcerpt ? 'Click to see log excerpt' : undefined}
       >
         <span className="shrink-0">
           {hasExcerpt ? (
@@ -245,9 +257,16 @@ function HistoryRow({
           )}
         </span>
         <span className={`shrink-0 ${badge.cls}`}>{badge.label}</span>
+        {/* Bug #39: show when the compile actually *started* (claimed by
+            worker) alongside the "finished" relative time. Hover reveals
+            both absolute timestamps. */}
         <span
           className="text-[12px] text-[var(--text-muted)] tabular-nums"
-          title={formatAbsolute(row.finished_at)}
+          title={
+            row.started_at
+              ? `Started: ${formatAbsolute(row.started_at)}\nFinished: ${formatAbsolute(row.finished_at)}`
+              : formatAbsolute(row.finished_at)
+          }
         >
           <Clock className="inline-block size-3 mr-1 -mt-0.5" aria-hidden="true" />
           {formatRelative(row.finished_at)}
@@ -264,15 +283,32 @@ function HistoryRow({
         <span className="ml-auto text-[11px] text-[var(--text-muted)] font-mono">
           {row.esphome_version || '—'}
           {row.config_hash && (
-            <span title={row.config_hash}>
-              {' '}· {row.config_hash.slice(0, 7)}
-            </span>
+            <>
+              {' '}·{' '}
+              {/* Bug #41: commit hash is clickable — opens the History panel
+                  preset to `from = hash, to = Current`. Stop propagation so
+                  we don't toggle the row expansion at the same time. */}
+              {onOpenHistoryDiff ? (
+                <button
+                  type="button"
+                  className="underline-offset-2 hover:underline cursor-pointer"
+                  title={`Diff since this compile: ${row.config_hash}`}
+                  onClick={(e) => { e.stopPropagation(); onOpenHistoryDiff(row.target, row.config_hash!); }}
+                >
+                  {row.config_hash.slice(0, 7)}
+                </button>
+              ) : (
+                <span title={row.config_hash}>{row.config_hash.slice(0, 7)}</span>
+              )}
+            </>
           )}
         </span>
-      </button>
+      </div>
       {expanded && hasExcerpt && (
-        <pre className="px-3 pb-3 pt-1 overflow-auto text-[11px] leading-snug font-mono bg-[var(--surface2)] border-t border-[var(--border)] text-[var(--text-muted)] max-h-[320px] whitespace-pre-wrap break-words">
-          {row.log_excerpt}
+        <pre className="px-3 pb-3 pt-1 overflow-auto text-[11px] leading-snug font-mono bg-[var(--surface2)] border-t border-[var(--border)] text-[var(--text)] max-h-[320px] whitespace-pre-wrap break-words">
+          {/* Bug #36: render ANSI SGR codes instead of showing them as
+              literal ``\x1b[31m…`` noise. */}
+          {renderAnsi(row.log_excerpt ?? '')}
         </pre>
       )}
     </div>

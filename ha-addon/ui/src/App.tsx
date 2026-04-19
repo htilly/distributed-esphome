@@ -899,6 +899,12 @@ export default function App() {
       <CompileHistoryPanel
         target={compileHistoryTarget}
         onOpenChange={(open) => { if (!open) setCompileHistoryTarget(null); }}
+        // Bug #41: hash-cell → AV.6 History drawer preset to
+        // `from=hash, to=Current`. Matches Queue tab's Commit column.
+        onOpenHistoryDiff={(target, fromHash) => {
+          setHistoryFromHash(fromHash);
+          setHistoryTarget(target);
+        }}
       />
 
       {/* AV.6: per-file History + diff panel. Same Sheet pattern —

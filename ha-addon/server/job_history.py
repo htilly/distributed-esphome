@@ -53,11 +53,14 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = Path("/data/job-history.db")
 
-# Last ~2 KB of the live log is what we store per row. Picked so a year's
-# worth of daily compiles (~365) at the default retention lands well
-# under 1 MB per active target — and keeps the whole DB tractable even
-# for busy fleets.
-LOG_EXCERPT_BYTES = 2048
+# Last ~8 KB of the live log is what we store per row. Originally 2 KB
+# (bug #37) but most PlatformIO error lines are long enough that 2 KB
+# only captured 3–5 lines of tail — not enough context to diagnose a
+# failed compile without reopening the live log. At 8 KB we're still
+# well under 100 MB for a year's worth of daily compiles at fleet-scale
+# retention defaults (default 365 d × ~100 compiles/day × 8 KB ≈ 290 MB
+# on an extreme upper bound; typical home use is 1–2 orders lower).
+LOG_EXCERPT_BYTES = 8192
 
 TERMINAL_STATES: frozenset[str] = frozenset(
     {"success", "failed", "timed_out", "cancelled"},
@@ -154,6 +157,13 @@ def _job_to_row(job: "Job") -> dict[str, object]:
         "config_hash": getattr(job, "config_hash", None),
         "retry_count": getattr(job, "retry_count", 0),
         "log_excerpt": _log_excerpt(getattr(job, "log", None)),
+        # Bug #38: records whether the job produced firmware at all.
+        # A subsequent firmware-budget eviction can remove the `.bin`
+        # from disk while this column stays truthy — the UI uses the
+        # combination (``has_firmware`` + live ``firmware_available``
+        # stat) to distinguish "never had firmware" from "had it, now
+        # evicted".
+        "has_firmware": 1 if getattr(job, "has_firmware", False) else 0,
     }
 
 
@@ -188,8 +198,12 @@ class JobHistoryDAO:
             ota_result TEXT,
             config_hash TEXT,
             retry_count INTEGER DEFAULT 0,
-            log_excerpt TEXT
+            log_excerpt TEXT,
+            has_firmware INTEGER NOT NULL DEFAULT 0
         );
+        -- Bug #38: late-added column. ADD COLUMN is idempotent-safe via
+        -- OR IGNORE's error on existing column, so we run it unconditionally
+        -- inside a try/except at init time rather than here.
         CREATE INDEX IF NOT EXISTS idx_jobs_target_finished
             ON jobs(target, finished_at DESC);
         CREATE INDEX IF NOT EXISTS idx_jobs_finished
@@ -232,6 +246,17 @@ class JobHistoryDAO:
             try:
                 with self._connect() as conn:
                     conn.executescript(self._SCHEMA)
+                    # Bug #38 migration: add has_firmware to any pre-
+                    # existing DBs shipped before the column landed. Safe
+                    # to run on every init — "duplicate column" is the
+                    # only error we ignore.
+                    try:
+                        conn.execute(
+                            "ALTER TABLE jobs ADD COLUMN has_firmware INTEGER NOT NULL DEFAULT 0"
+                        )
+                    except sqlite3.OperationalError as exc:
+                        if "duplicate column" not in str(exc).lower():
+                            raise
                     conn.commit()
                 self._initialized = True
                 logger.debug("Job-history DB ready at %s", self._db_path)
@@ -281,13 +306,15 @@ class JobHistoryDAO:
                     download_only, validate_only, pinned_client_id,
                     esphome_version, assigned_client_id, assigned_hostname,
                     submitted_at, started_at, finished_at, duration_seconds,
-                    ota_result, config_hash, retry_count, log_excerpt
+                    ota_result, config_hash, retry_count, log_excerpt,
+                    has_firmware
                 ) VALUES (
                     :id, :target, :state, :triggered_by, :trigger_detail,
                     :download_only, :validate_only, :pinned_client_id,
                     :esphome_version, :assigned_client_id, :assigned_hostname,
                     :submitted_at, :started_at, :finished_at, :duration_seconds,
-                    :ota_result, :config_hash, :retry_count, :log_excerpt
+                    :ota_result, :config_hash, :retry_count, :log_excerpt,
+                    :has_firmware
                 )
                 ON CONFLICT(id) DO UPDATE SET
                     state = excluded.state,
@@ -301,7 +328,8 @@ class JobHistoryDAO:
                     ota_result = excluded.ota_result,
                     config_hash = excluded.config_hash,
                     retry_count = excluded.retry_count,
-                    log_excerpt = excluded.log_excerpt
+                    log_excerpt = excluded.log_excerpt,
+                    has_firmware = excluded.has_firmware
                 """,
                 row,
             )
@@ -361,6 +389,24 @@ class JobHistoryDAO:
         with self._connect() as conn:
             cur = conn.execute(sql, params)
             rows = [dict(r) for r in cur.fetchall()]
+
+        # Bug #38: for rows that originally produced firmware, probe
+        # the storage layer at read time to tell the UI whether the
+        # `.bin` is still on disk (vs evicted by the budget task).
+        # `has_firmware` stays 1 either way; `firmware_variants` carries
+        # the live-available variants (empty list = evicted).
+        try:
+            from firmware_storage import list_variants  # noqa: PLC0415
+        except Exception:
+            list_variants = None  # type: ignore[assignment]
+        for r in rows:
+            if r.get("has_firmware") and list_variants is not None:
+                try:
+                    r["firmware_variants"] = list_variants(str(r["id"]))
+                except Exception:
+                    r["firmware_variants"] = []
+            else:
+                r["firmware_variants"] = []
         return rows
 
     def stats(self, target: str | None = None, window_days: int = 30) -> dict[str, object]:

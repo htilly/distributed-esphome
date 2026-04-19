@@ -754,6 +754,16 @@ export interface JobHistoryEntry {
   config_hash: string | null;
   retry_count: number;
   log_excerpt: string | null;
+  /** Bug #38: 1 when the job produced firmware. Stays 1 even after the
+   *  .bin has been evicted by the firmware budget task — use
+   *  `firmware_variants.length > 0` to know whether the binary is
+   *  still downloadable right now. */
+  has_firmware?: 0 | 1;
+  /** Bug #38: live list of variants still on disk (e.g. ["factory","ota"]).
+   *  Empty when has_firmware is 0, OR when the firmware has been evicted
+   *  by the budget enforcer. Drives the Download button's visibility on
+   *  history rows. */
+  firmware_variants?: string[];
 }
 
 export interface JobHistoryStats {

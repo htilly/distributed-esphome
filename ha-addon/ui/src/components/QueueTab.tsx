@@ -666,6 +666,7 @@ export function QueueTab({
         open={historyOpen}
         onOpenChange={setHistoryOpen}
         targets={targets}
+        onOpenHistoryDiff={onOpenHistoryDiff}
       />
     </div>
   );

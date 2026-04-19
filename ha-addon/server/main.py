@@ -310,6 +310,44 @@ async def timeout_checker(app: web.Application) -> None:
             logger.exception("Error in timeout checker")
 
 
+async def firmware_budget_enforcer(app: web.Application) -> None:
+    """Bug #38: evict oldest firmware binaries when over
+    ``firmware_cache_max_gb`` Settings budget.
+
+    First tick 90 s after startup (lets reconcile_orphans run first
+    and the queue settle), then every 30 min. Live-queue binaries
+    with ``has_firmware`` are protected from eviction; everything
+    else is fair game, oldest-mtime first. No-op when the budget
+    Setting resolves to ``<= 0`` (unlimited).
+    """
+    queue = app.get("queue")
+    if queue is None:
+        return
+    first = True
+    while True:
+        await asyncio.sleep(90 if first else 30 * 60)
+        first = False
+        try:
+            from settings import get_settings  # noqa: PLC0415
+            from firmware_storage import enforce_budget  # noqa: PLC0415
+            gb = float(getattr(get_settings(), "firmware_cache_max_gb", 0.0) or 0.0)
+            max_bytes = int(gb * 1024 * 1024 * 1024)
+            if max_bytes <= 0:
+                continue
+            protected = {
+                job.id for job in queue.get_all()
+                if getattr(job, "has_firmware", False)
+            }
+            deleted = enforce_budget(max_bytes=max_bytes, protected_job_ids=protected)
+            if deleted:
+                logger.info(
+                    "Firmware budget enforcer: evicted %d file(s) (limit %.2f GiB)",
+                    deleted, gb,
+                )
+        except Exception:
+            logger.exception("Error in firmware_budget_enforcer loop")
+
+
 async def job_history_retention(app: web.Application) -> None:
     """JH.3: evict job-history rows older than Settings' retention window.
 
@@ -1365,6 +1403,11 @@ def create_app() -> web.Application:
         # JH.3: nightly job-history retention task. Reads the Settings
         # value live each tick so drawer edits take effect next run.
         app["job_history_retention_task"] = asyncio.create_task(job_history_retention(app))
+        # Bug #38: firmware disk-budget enforcer. Complements
+        # reconcile_orphans at startup — this one runs periodically
+        # while the server is up so download-only binaries saved days
+        # ago get evicted when they fall out of budget.
+        app["firmware_budget_task"] = asyncio.create_task(firmware_budget_enforcer(app))
 
         # #87: APScheduler replaces the DIY schedule_checker
         import scheduler as scheduler_module  # noqa: PLC0415
@@ -1419,7 +1462,7 @@ def create_app() -> web.Application:
                 proc.kill()
             logger.info("Local worker stopped")
 
-        for task_name in ("timeout_checker_task", "config_scanner_task", "pypi_version_refresher_task", "ha_entity_poller_task", "esphome_install_task", "job_history_retention_task"):
+        for task_name in ("timeout_checker_task", "config_scanner_task", "pypi_version_refresher_task", "ha_entity_poller_task", "esphome_install_task", "job_history_retention_task", "firmware_budget_task"):
             task = app.get(task_name)
             if task:
                 task.cancel()
