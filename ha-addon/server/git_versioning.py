@@ -117,18 +117,19 @@ def _is_git_repo(path: Path) -> bool:
 
 
 def _versioning_active(path: Path) -> bool:
-    """#97: combined gate — the feature toggle AND a real repo on disk.
+    """#97 + #98: combined gate — the feature toggle AND a real repo on disk.
 
     Used by every git-write wrapper in this module. When the user has
-    flipped ``versioning_enabled`` off in Settings we don't run any git
-    commands: no commit, no ls-files, no blame. The module becomes
-    inert. Callers should generally prefer this over raw
+    flipped ``versioning_enabled`` off (or hasn't yet decided — the
+    ``'unset'`` state #98 introduces), we don't run any git commands:
+    no commit, no ls-files, no blame. The module becomes inert.
+    Callers should generally prefer this over raw
     :func:`_is_git_repo` except for the init path itself.
     """
     try:
         from settings import get_settings  # noqa: PLC0415
 
-        if not get_settings().versioning_enabled:
+        if get_settings().versioning_enabled != "on":
             return False
     except Exception:
         # Settings not initialised (e.g. very early startup). Fall
@@ -162,12 +163,16 @@ def init_repo(config_dir: Path) -> bool:
     commits don't fail on a bare repo with no author configured) —
     the user's own config is never overridden.
     """
-    # #97: top-level feature toggle. When versioning is disabled no
-    # new repo should appear — not even on a fresh install.
+    # #97 + #98: top-level feature toggle. When versioning is
+    # anything other than ``'on'`` (including the ``'unset'`` first-
+    # boot state) no new repo should appear — not even on a fresh
+    # install. The user has to explicitly opt in via the onboarding
+    # modal before we touch their config dir.
     try:
         from settings import get_settings  # noqa: PLC0415
-        if not get_settings().versioning_enabled:
-            logger.info("versioning_enabled=False; skipping git auto-init")
+        state = get_settings().versioning_enabled
+        if state != "on":
+            logger.info("versioning_enabled=%r; skipping git auto-init", state)
             return False
     except Exception:
         pass

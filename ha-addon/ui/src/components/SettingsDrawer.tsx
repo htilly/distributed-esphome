@@ -63,6 +63,12 @@ export function SettingsDrawer({ open, onOpenChange, dirtyTargets = [] }: Settin
   // commit those stragglers before the new behavior kicks in.
   const [turnOnOpen, setTurnOnOpen] = useState(false);
   const [turnOnBusy, setTurnOnBusy] = useState(false);
+  // #96: split drawer into Basic / Advanced. "Basic" hosts the
+  // settings Pat reaches for often (versioning toggle, auth, display
+  // preferences). "Advanced" hosts the plumbing knobs (retention,
+  // cache sizes, timeouts, polling). Both live in the same drawer —
+  // just behind a tab strip so the default view is short.
+  const [activeTab, setActiveTab] = useState<'basic' | 'advanced'>('basic');
 
   async function patch(partial: Partial<AppSettings>): Promise<boolean> {
     // Bug #21: intercept the auto-commit flip-to-ON when there are
@@ -113,22 +119,51 @@ export function SettingsDrawer({ open, onOpenChange, dirtyTargets = [] }: Settin
           {isLoading && <div className="text-xs text-[var(--text-muted)]">Loading…</div>}
           {data && (
             <div className="flex flex-col gap-6">
+              {/* #96: two-tab split. Keep the tab strip sticky so it
+                  stays visible as the user scrolls the Advanced body. */}
+              <div className="sticky top-0 z-10 -mx-4 -mt-3 bg-[var(--surface)] px-4 pt-3 pb-2 border-b border-[var(--border)] flex gap-1">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('basic')}
+                  className={`px-3 py-1 text-xs rounded-md cursor-pointer ${
+                    activeTab === 'basic'
+                      ? 'bg-[var(--surface2)] text-[var(--text)] font-semibold'
+                      : 'text-[var(--text-muted)] hover:text-[var(--text)]'
+                  }`}
+                >
+                  Basic
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('advanced')}
+                  className={`px-3 py-1 text-xs rounded-md cursor-pointer ${
+                    activeTab === 'advanced'
+                      ? 'bg-[var(--surface2)] text-[var(--text)] font-semibold'
+                      : 'text-[var(--text-muted)] hover:text-[var(--text)]'
+                  }`}
+                >
+                  Advanced
+                </button>
+              </div>
+              {activeTab === 'basic' && <>
               <Section title="Config versioning">
-                {/* #97: master feature toggle. When OFF the server
-                    runs zero git commands and the sub-options below
-                    are dimmed + disabled. "Enable config versioning"
-                    reads as a first-class Pat-facing concept;
-                    "auto-commit on save" is a specific behaviour
-                    inside it. */}
+                {/* #97 + #98: master tristate. UI presents it as a
+                    BoolRow because Pat sees "on vs off" and the
+                    ``'unset'`` state is only meaningful as "the
+                    onboarding modal will ask on next load". A user
+                    flipping this toggle in Settings is always an
+                    explicit on/off choice, never unset — the modal
+                    is the only producer of ``'unset'`` → ``'on'`` /
+                    ``'off'`` transitions. */}
                 <BoolRow
                   label="Enable versioning"
                   help="Turn on the local git-backed history for /config/esphome/ — per-file history, diff, and rollback. Off disables all git operations."
-                  value={data.versioning_enabled}
-                  onChange={v => patch({ versioning_enabled: v })}
+                  value={data.versioning_enabled === 'on'}
+                  onChange={v => patch({ versioning_enabled: v ? 'on' : 'off' })}
                 />
                 <div
-                  className={data.versioning_enabled ? 'flex flex-col gap-6' : 'flex flex-col gap-6 opacity-50 pointer-events-none'}
-                  aria-disabled={!data.versioning_enabled}
+                  className={data.versioning_enabled === 'on' ? 'flex flex-col gap-6' : 'flex flex-col gap-6 opacity-50 pointer-events-none'}
+                  aria-disabled={data.versioning_enabled !== 'on'}
                 >
                   <BoolRow
                     label="Auto-commit on save"
@@ -152,6 +187,41 @@ export function SettingsDrawer({ open, onOpenChange, dirtyTargets = [] }: Settin
                   />
                 </div>
               </Section>
+              <Section title="Authentication">
+                <SecretRow
+                  label="Server token"
+                  help="Shared bearer token for build workers and direct-port API access. Changing this will disconnect existing workers until their SERVER_TOKEN env var is updated."
+                  value={data.server_token}
+                  onCommit={v => patch({ server_token: v })}
+                />
+                <BoolRow
+                  label="Require Home Assistant auth on direct port"
+                  help="When on, requests to port 8765 (outside the Home Assistant Ingress tunnel) must carry a valid HA bearer token or this server token. Leave on unless you have a specific reason to allow anonymous direct-port access."
+                  value={data.require_ha_auth}
+                  onChange={v => patch({ require_ha_auth: v })}
+                />
+              </Section>
+              {/* #82 / UX_REVIEW §3.10 — time-of-day format. Applied
+                  app-wide by App.tsx via ``setTimeFormatPref`` the
+                  moment this dropdown commits. ``auto`` defers to the
+                  browser's resolved locale (hour12 from
+                  ``Intl.DateTimeFormat().resolvedOptions()``); ``12h``
+                  / ``24h`` override it. */}
+              <Section title="Display">
+                <EnumRow
+                  label="Time format"
+                  help="How times render in the Queue, History, and log timestamps."
+                  value={data.time_format}
+                  options={[
+                    { value: 'auto', label: 'Auto (follow browser locale)' },
+                    { value: '24h', label: '24-hour (13:45:09)' },
+                    { value: '12h', label: '12-hour (1:45:09 PM)' },
+                  ]}
+                  onCommit={v => patch({ time_format: v as 'auto' | '12h' | '24h' })}
+                />
+              </Section>
+              </>}
+              {activeTab === 'advanced' && <>
               <Section title="Job history">
                 <IntRow
                   label="Retention (days)"
@@ -182,20 +252,6 @@ export function SettingsDrawer({ open, onOpenChange, dirtyTargets = [] }: Settin
                   defaultValue={30}
                   value={data.job_log_retention_days}
                   onCommit={v => patch({ job_log_retention_days: v })}
-                />
-              </Section>
-              <Section title="Authentication">
-                <SecretRow
-                  label="Server token"
-                  help="Shared bearer token for build workers and direct-port API access. Changing this will disconnect existing workers until their SERVER_TOKEN env var is updated."
-                  value={data.server_token}
-                  onCommit={v => patch({ server_token: v })}
-                />
-                <BoolRow
-                  label="Require Home Assistant auth on direct port"
-                  help="When on, requests to port 8765 (outside the Home Assistant Ingress tunnel) must carry a valid HA bearer token or this server token. Leave on unless you have a specific reason to allow anonymous direct-port access."
-                  value={data.require_ha_auth}
-                  onChange={v => patch({ require_ha_auth: v })}
                 />
               </Section>
               <Section title="Timeouts">
@@ -238,25 +294,6 @@ export function SettingsDrawer({ open, onOpenChange, dirtyTargets = [] }: Settin
                   onCommit={v => patch({ device_poll_interval: v })}
                 />
               </Section>
-              {/* #82 / UX_REVIEW §3.10 — time-of-day format. Applied
-                  app-wide by App.tsx via ``setTimeFormatPref`` the
-                  moment this dropdown commits. ``auto`` defers to the
-                  browser's resolved locale (hour12 from
-                  ``Intl.DateTimeFormat().resolvedOptions()``); ``12h``
-                  / ``24h`` override it. */}
-              <Section title="Display">
-                <EnumRow
-                  label="Time format"
-                  help="How times render in the Queue, History, and log timestamps."
-                  value={data.time_format}
-                  options={[
-                    { value: 'auto', label: 'Auto (follow browser locale)' },
-                    { value: '24h', label: '24-hour (13:45:09)' },
-                    { value: '12h', label: '12-hour (1:45:09 PM)' },
-                  ]}
-                  onCommit={v => patch({ time_format: v as 'auto' | '12h' | '24h' })}
-                />
-              </Section>
               {/* #92: Archived-devices section lived here briefly
                   (CF.2). It moved into the Devices-tab "Add device ▾"
                   dropdown (#70's "Restore from archive…") where Pat
@@ -272,6 +309,7 @@ export function SettingsDrawer({ open, onOpenChange, dirtyTargets = [] }: Settin
                   Home Assistant add-on Configuration tab.
                 </p>
               </Section>
+              </>}
             </div>
           )}
         </SheetBody>

@@ -111,6 +111,74 @@ async def test_time_format_defaults_to_auto(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# #98 — versioning_enabled tristate + legacy bool migration
+# ---------------------------------------------------------------------------
+
+
+def test_versioning_enabled_defaults_to_unset(tmp_path):
+    """Fresh install → 'unset'; the UI modal asks the user to decide."""
+    s = init_settings(settings_path=tmp_path / "s.json", options_path=tmp_path / "o.json")
+    assert s.versioning_enabled == "unset"
+
+
+def test_versioning_enabled_migrates_legacy_true(tmp_path):
+    """dev.38–dev.39 wrote booleans; those installs must upgrade cleanly."""
+    settings_file = tmp_path / "s.json"
+    settings_file.write_text(json.dumps({
+        "versioning_enabled": True,  # legacy bool shape
+        "auto_commit_on_save": True,
+        "server_token": "x" * 16,
+    }))
+    s = init_settings(settings_path=settings_file, options_path=tmp_path / "o.json")
+    assert s.versioning_enabled == "on"
+
+
+def test_versioning_enabled_migrates_legacy_false(tmp_path):
+    settings_file = tmp_path / "s.json"
+    settings_file.write_text(json.dumps({
+        "versioning_enabled": False,  # user had it explicitly off
+        "auto_commit_on_save": False,
+        "server_token": "x" * 16,
+    }))
+    s = init_settings(settings_path=settings_file, options_path=tmp_path / "o.json")
+    assert s.versioning_enabled == "off"
+
+
+async def test_versioning_enabled_rejects_bool_patch(tmp_path):
+    """The PATCH validator enforces the tristate string enum."""
+    init_settings(settings_path=tmp_path / "s.json", options_path=tmp_path / "o.json")
+    with pytest.raises(SettingsValidationError) as exc:
+        await update_settings({"versioning_enabled": True})
+    assert exc.value.field == "versioning_enabled"
+
+
+async def test_versioning_enabled_accepts_tristate(tmp_path):
+    init_settings(settings_path=tmp_path / "s.json", options_path=tmp_path / "o.json")
+    for val in ("on", "off", "unset"):
+        updated = await update_settings({"versioning_enabled": val})
+        assert updated.versioning_enabled == val
+
+
+def test_preexisting_repo_starts_on(tmp_path):
+    """If Fleet finds a repo it didn't create, versioning starts 'on' (#98).
+
+    The user is already versioning their config directory via git; not
+    auto-enabling would mean Fleet keeps asking the onboarding question
+    to someone who's clearly opted in. Auto-commit stays off so we
+    don't write to their log uninvited.
+    """
+    settings_file = tmp_path / "s.json"
+    options_file = tmp_path / "o.json"
+    s = init_settings(
+        settings_path=settings_file,
+        options_path=options_file,
+        fresh_repo_init=False,  # i.e. repo already existed
+    )
+    assert s.versioning_enabled == "on"
+    assert s.auto_commit_on_save is False
+
+
+# ---------------------------------------------------------------------------
 # SP.8 — migrated Supervisor-options fields
 # ---------------------------------------------------------------------------
 
@@ -359,7 +427,7 @@ def test_init_creates_settings_file_when_absent(tmp_path: Path):
     # the exact 32-char hex value.
     assert len(on_disk.pop("server_token")) == 32
     assert on_disk == {
-        "versioning_enabled": True,
+        "versioning_enabled": "unset",
         "auto_commit_on_save": True,
         "git_author_name": "HA User",
         "git_author_email": "ha@distributed-esphome.local",
@@ -625,7 +693,7 @@ def test_settings_as_dict_round_trips():
     with patch("settings._settings", AppSettings(auto_commit_on_save=False, server_token="abc123")):
         out = settings_as_dict()
     assert out == {
-        "versioning_enabled": True,
+        "versioning_enabled": "unset",
         "auto_commit_on_save": False,
         "git_author_name": "HA User",
         "git_author_email": "ha@distributed-esphome.local",

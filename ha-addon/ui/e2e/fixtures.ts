@@ -427,10 +427,11 @@ export async function mockApi(page: Page) {
   });
 
   const settingsState: Record<string, unknown> = {
-    // #97: master versioning toggle. Default true so the existing
-    // specs that interact with Config-versioning-section inputs
-    // (auto-commit toggle, git author fields) see the enabled path.
-    versioning_enabled: true,
+    // #97 + #98: master versioning tristate. ``'on'`` keeps the
+    // existing specs' assumptions (Config-versioning-section inputs
+    // enabled). Specs that exercise the onboarding modal override
+    // this to ``'unset'`` via their own page.route overlay.
+    versioning_enabled: 'on',
     auto_commit_on_save: true,
     git_author_name: 'HA User',
     git_author_email: 'ha@distributed-esphome.local',

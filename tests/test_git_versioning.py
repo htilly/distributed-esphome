@@ -22,6 +22,9 @@ import pytest
 
 import git_versioning as gv
 import settings as settings_mod
+from dataclasses import asdict  # noqa: E402  (re-exported below for the fixture)
+
+settings_mod.asdict = asdict  # keep the fixture one-line friendly
 
 
 @pytest.fixture(autouse=True)
@@ -38,6 +41,13 @@ def _reset_modules(tmp_path: Path, monkeypatch):
     settings_mod.init_settings(
         settings_path=tmp_path / "settings.json",
         options_path=tmp_path / "options.json",
+    )
+    # #98: tests exercise the active versioning path. The dataclass
+    # default is ``'unset'`` (onboarding modal state), which would
+    # turn every ``_versioning_active`` call into a no-op. Flip to
+    # the active state so every existing test keeps its behaviour.
+    settings_mod._settings = settings_mod.AppSettings(
+        **{**settings_mod.asdict(settings_mod._settings), "versioning_enabled": "on"},
     )
     for var in (
         "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",

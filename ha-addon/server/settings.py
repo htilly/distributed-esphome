@@ -96,13 +96,22 @@ class SettingsValidationError(ValueError):
 class AppSettings:
     """User-facing settings editable at runtime via ``/ui/api/settings``."""
 
-    # #97: top-level toggle for the AV.* config-versioning feature
-    # set. When False, the server skips all git operations (no init,
-    # no auto-commit, no rollback, no history fetch) and the UI dims
-    # the sub-settings. Default True so existing installs carry over
-    # their current behavior; #98 turns this into a tristate with an
-    # "ask-on-first-login" value.
-    versioning_enabled: bool = True
+    # #97 + #98: top-level tristate for the AV.* config-versioning
+    # feature set. When not ``'on'``, the server skips all git
+    # operations (no init, no auto-commit, no rollback, no history
+    # fetch) and the UI dims the sub-settings.
+    #   - ``'on'``    — versioning active; git wrappers run.
+    #   - ``'off'``   — versioning explicitly off; the module is inert.
+    #   - ``'unset'`` — the user hasn't decided yet. Treated like
+    #                   ``'off'`` on the server side (no git ops) so a
+    #                   fresh install doesn't mutate the config
+    #                   directory before the user consents; the UI
+    #                   shows a one-time onboarding modal that prompts
+    #                   Pat to pick ``'on'`` or ``'off'``. #99-era
+    #                   upgrades with a prior ``versioning_enabled:
+    #                   true`` boolean are migrated to ``'on'`` at
+    #                   settings-load time (see ``_migrate_settings``).
+    versioning_enabled: str = "unset"
     auto_commit_on_save: bool = True
     # Author used on Fleet-originated auto-commits (AV.2). Only applied
     # when the repo itself has no ``user.name``/``user.email`` configured
@@ -230,7 +239,7 @@ def _validate_token(value: Any, field: str) -> str:
 # Per-field validators. Any PATCH that names a key not listed here is
 # rejected — keeps typos from silently disappearing.
 _VALIDATORS: dict[str, Callable[[Any, str], Any]] = {
-    "versioning_enabled": _validate_bool,
+    "versioning_enabled": _validate_enum("on", "off", "unset"),
     "auto_commit_on_save": _validate_bool,
     # Git author. Don't validate email format — git itself accepts
     # arbitrary strings (e.g. "ha@distributed-esphome.local" isn't a
@@ -457,15 +466,25 @@ def init_settings(
     # so the server still boots.
     _settings = _seed_from_options()
 
-    # Bug #19: pre-existing git repo → auto-commit OFF by default.
-    # The user picked git before us; we shouldn't start writing commits
-    # into their log on their behalf without consent. They can turn
-    # this back on in the Settings drawer if they want the Fleet
-    # safety net.
+    # Bug #19 + #98: pre-existing git repo means the user is already
+    # versioning their config — flip ``versioning_enabled`` to
+    # ``'on'`` (they've already opted in by using git) and keep
+    # auto-commit OFF so we don't spray ``save:`` commits into their
+    # curated log without consent. They can flip auto-commit on in
+    # the Settings drawer if they want the Fleet safety net.
+    #
+    # Fresh install (``fresh_repo_init`` is True or None) — stay at
+    # the dataclass default of ``'unset'``; the UI will prompt the
+    # user the first time they open it.
     if fresh_repo_init is False:
-        _settings = AppSettings(**{**asdict(_settings), "auto_commit_on_save": False})
+        _settings = AppSettings(**{
+            **asdict(_settings),
+            "auto_commit_on_save": False,
+            "versioning_enabled": "on",
+        })
         logger.info(
-            "Pre-existing git repo detected on first boot; defaulting auto_commit_on_save=False",
+            "Pre-existing git repo detected on first boot; "
+            "versioning_enabled='on', auto_commit_on_save=False",
         )
 
     try:
@@ -554,6 +573,19 @@ def _load_from_file() -> AppSettings:
     known = {f.name for f in fields(AppSettings)}
     for key in sorted(set(raw) - known):
         logger.warning("Unknown key in %s: %r — ignored", _settings_path, key)
+
+    # #98: legacy migration — ``versioning_enabled`` was a bool in
+    # dev.38–dev.39. Upgrade those values to the tristate string the
+    # rest of the codebase now expects. ``True`` → ``'on'``, ``False``
+    # → ``'off'``. Absent key → let the dataclass default ('unset')
+    # stand, which means the user will see the onboarding modal.
+    if "versioning_enabled" in raw and isinstance(raw["versioning_enabled"], bool):
+        migrated = "on" if raw["versioning_enabled"] else "off"
+        logger.info(
+            "Migrating legacy bool versioning_enabled=%r to tristate %r",
+            raw["versioning_enabled"], migrated,
+        )
+        raw["versioning_enabled"] = migrated
 
     defaults = AppSettings()
     kwargs: dict[str, Any] = {}

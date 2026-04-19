@@ -14,10 +14,16 @@ test('gear icon opens the Settings drawer with all sections', async ({ page }) =
   await page.getByRole('button', { name: 'Settings' }).click();
 
   await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible();
+  // #96: Basic tab opens by default — versioning + auth + display sections.
   await expect(page.getByText('Config versioning')).toBeVisible();
+  await expect(page.getByText('Authentication')).toBeVisible();
+  await expect(page.getByText(/^Display$/)).toBeVisible();
+
+  // Switch to Advanced — retention/disk/timeouts/polling + About.
+  const drawer = page.locator('[data-slot="sheet-content"]');
+  await drawer.getByRole('button', { name: /^Advanced$/ }).click();
   await expect(page.getByText('Job history')).toBeVisible();
   await expect(page.getByText('Disk management')).toBeVisible();
-  await expect(page.getByText('Authentication')).toBeVisible();
   await expect(page.getByText('Timeouts')).toBeVisible();
   await expect(page.getByText('Polling')).toBeVisible();
   await expect(page.getByText('About')).toBeVisible();
@@ -66,6 +72,10 @@ test('auto-commit toggle flips and persists after reopen', async ({ page }) => {
 test('numeric retention field rejects out-of-range input', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Settings' }).click();
+
+  // #96: numeric settings live under the Advanced tab now.
+  const drawer = page.locator('[data-slot="sheet-content"]');
+  await drawer.getByRole('button', { name: /^Advanced$/ }).click();
 
   // Retention (days) under Job history — default 365.
   const retention = page.locator('input[type="number"]').first();

@@ -47,6 +47,7 @@ import { EsphomeVersionDropdown } from './components/EsphomeVersionDropdown';
 import { LogModal } from './components/LogModal';
 import { QueueTab } from './components/QueueTab';
 import { SettingsDrawer } from './components/SettingsDrawer';
+import { VersioningOnboardingModal } from './components/VersioningOnboardingModal';
 import { HistoryPanel } from './components/HistoryPanel';
 import { CompileHistoryPanel } from './components/CompileHistoryPanel';
 import { toast } from 'sonner';
@@ -203,7 +204,7 @@ export default function App() {
   // (Queue, History, Log timestamps) via the module-local pref in
   // utils/format.ts. SWR's default dedupe means this is a single fetch
   // shared with the Settings drawer + EditorModal's own subscribers.
-  const { data: appSettings } = useSWR<AppSettings>('settings', getSettings, {
+  const { data: appSettings, mutate: mutateAppSettings } = useSWR<AppSettings>('settings', getSettings, {
     refreshInterval: 30_000,
     onError: logSwrError('settings'),
   });
@@ -829,6 +830,15 @@ export default function App() {
       )}
 
       <Toaster />
+
+      {/* #98: first-login onboarding for config versioning. Rendered
+          only when the server reports versioning_enabled='unset' —
+          the modal writes 'on' or 'off' and then unmounts via the
+          SWR mutate. No Esc/outside-click dismiss — the user has to
+          make an explicit choice (see VersioningOnboardingModal). */}
+      {appSettings?.versioning_enabled === 'unset' && (
+        <VersioningOnboardingModal onDecided={() => void mutateAppSettings()} />
+      )}
 
       <LogModal
         jobId={logJobId}

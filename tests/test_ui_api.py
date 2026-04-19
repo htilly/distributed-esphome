@@ -1003,7 +1003,7 @@ async def test_get_settings_returns_defaults_on_fresh_boot(tmp_path, _settings_i
         # (see _make_ui_app); assert on shape, not the value.
         assert isinstance(data.pop("server_token"), str)
         assert data == {
-            "versioning_enabled": True,
+            "versioning_enabled": "unset",
             "auto_commit_on_save": True,
             "git_author_name": "HA User",
             "git_author_email": "ha@distributed-esphome.local",
