@@ -781,14 +781,17 @@ async def get_queue(request: web.Request) -> web.Response:
 
 @routes.get("/ui/api/history")
 async def get_history(request: web.Request) -> web.Response:
-    """JH.4: list persistent compile history rows newest-first.
+    """JH.4: list persistent compile history rows.
 
     Query params (all optional):
-      ``target``        — filter to one YAML filename
-      ``state``         — one of success / failed / timed_out / cancelled
-      ``since``         — epoch seconds; rows finished before this are excluded
-      ``limit``         — page size, clamped to [1, 500] (default 50)
-      ``offset``        — for pagination
+      ``target``    — filter to one YAML filename
+      ``state``     — one of success / failed / timed_out / cancelled
+      ``since``     — epoch seconds; rows finished before this are excluded
+      ``until``     — epoch seconds; rows finished after this are excluded (bug #49)
+      ``limit``     — page size, clamped to [1, 500] (default 50)
+      ``offset``    — for pagination
+      ``sort``      — column to sort by (bug #53); see job_history.JobHistoryDAO._SORT_COLUMNS
+      ``desc``      — ``"1"`` / ``"true"`` for descending (default); anything else ascending
 
     The live Queue tab keeps reading from /ui/api/queue — this endpoint
     is the append-only counterpart that survives coalescing + clears.
@@ -799,20 +802,30 @@ async def get_history(request: web.Request) -> web.Response:
     q = request.rel_url.query
     target = q.get("target") or None
     state = q.get("state") or None
-    since_raw = q.get("since")
-    try:
-        since = int(since_raw) if since_raw is not None else None
-    except ValueError:
-        since = None
-    try:
-        limit = int(q.get("limit", "50"))
-    except ValueError:
-        limit = 50
-    try:
-        offset = int(q.get("offset", "0"))
-    except ValueError:
-        offset = 0
-    rows = history.query(target=target, state=state, since=since, limit=limit, offset=offset)
+
+    def _int(key: str) -> int | None:
+        raw = q.get(key)
+        if raw is None or raw == "":
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+
+    since = _int("since")
+    until = _int("until")
+    limit = _int("limit") or 50
+    offset = _int("offset") or 0
+
+    sort_by = q.get("sort", "finished_at")
+    desc_raw = (q.get("desc") or "1").lower()
+    sort_desc = desc_raw in ("1", "true", "yes")
+
+    rows = history.query(
+        target=target, state=state, since=since, until=until,
+        limit=limit, offset=offset,
+        sort_by=sort_by, sort_desc=sort_desc,
+    )
     return web.json_response(rows)
 
 

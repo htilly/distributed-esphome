@@ -127,11 +127,17 @@ def _job_to_row(job: "Job") -> dict[str, object]:
     duration: float | None = None
     if started is not None and finished is not None:
         duration = float(finished - started)
+    elif submitted is not None and finished is not None:
+        # Bug #47: cancelled / immediately-failed jobs never reach a
+        # worker so ``started_at`` is None. Fall back to submit → finish
+        # so the history view can still show *something* for duration
+        # instead of a blank cell. This is the "time the job existed"
+        # rather than "time it ran" — documented in the UI tooltip.
+        duration = float(finished - submitted)
     elif hasattr(job, "duration_seconds"):
-        # Fall back to the Job's computed duration if assigned_at was
-        # cleared during a retry (rare but observed on CR.4's PENDING
-        # requeue path). This keeps the row self-contained even when
-        # the queue's transient state has been lost.
+        # Last-resort fallback: the Job's own computed duration. Used
+        # when both timestamps came in as None (rare but observed on
+        # CR.4's PENDING requeue path that clears ``assigned_at``).
         try:
             d = job.duration_seconds()
             duration = float(d) if d is not None else None
@@ -346,6 +352,16 @@ class JobHistoryDAO:
     # Reads
     # ------------------------------------------------------------------
 
+    # Bug #53: whitelist the columns that can be used for ORDER BY, so
+    # a caller can't inject arbitrary SQL through the `sort` query param
+    # on /ui/api/history. Every entry here is an indexed or small
+    # enough field that sorting is fast in practice.
+    _SORT_COLUMNS: frozenset[str] = frozenset({
+        "finished_at", "started_at", "submitted_at", "duration_seconds",
+        "target", "state", "esphome_version", "assigned_hostname",
+        "triggered_by",
+    })
+
     def query(
         self,
         target: str | None = None,
@@ -353,13 +369,20 @@ class JobHistoryDAO:
         since: int | None = None,
         limit: int = 50,
         offset: int = 0,
+        sort_by: str = "finished_at",
+        sort_desc: bool = True,
+        until: int | None = None,
     ) -> list[dict[str, object]]:
-        """Return history rows newest-first, filtered by the given dims.
+        """Return history rows filtered by the given dims.
 
-        *since* is epoch seconds; rows with ``finished_at < since`` are
-        excluded. *limit* is clamped to [1, 500]. *offset* is clamped to
-        >= 0. Unknown filter values yield an empty list instead of a DB
-        error — the caller gets nothing rather than a 500.
+        *since* / *until* are epoch seconds; rows outside the window
+        are excluded. *limit* is clamped to [1, 500]. *offset* is
+        clamped to ≥ 0. *sort_by* is whitelisted against
+        :attr:`_SORT_COLUMNS`; anything else falls back to
+        ``finished_at``.
+
+        Unknown filter values (state not in the set, sort_by outside
+        the whitelist) yield an empty list rather than a DB error.
         """
         self.init()
         if not self._initialized:
@@ -380,10 +403,18 @@ class JobHistoryDAO:
         if since is not None:
             where.append("finished_at >= ?")
             params.append(int(since))
+        if until is not None:
+            where.append("finished_at <= ?")
+            params.append(int(until))
         sql = "SELECT * FROM jobs"
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY finished_at DESC, submitted_at DESC LIMIT ? OFFSET ?"
+        # Bug #53: whitelisted sort. Tie-break on submitted_at so two
+        # rows finishing in the same second (back-to-back failures,
+        # validate-only coalescing) stay stable across paginated fetches.
+        sort_col = sort_by if sort_by in self._SORT_COLUMNS else "finished_at"
+        direction = "DESC" if sort_desc else "ASC"
+        sql += f" ORDER BY {sort_col} {direction}, submitted_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
 
         with self._connect() as conn:

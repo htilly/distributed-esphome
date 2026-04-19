@@ -783,15 +783,25 @@ export async function getJobHistory(params: {
   target?: string;
   state?: JobHistoryEntry['state'];
   since?: number;
+  /** Bug #49: upper epoch bound for the finished-at window. */
+  until?: number;
   limit?: number;
   offset?: number;
+  /** Bug #53: column to sort by. Server whitelist enforces valid values. */
+  sort?: 'finished_at' | 'started_at' | 'submitted_at' | 'duration_seconds'
+    | 'target' | 'state' | 'esphome_version' | 'assigned_hostname' | 'triggered_by';
+  /** Bug #53: ``true`` for descending (default). */
+  desc?: boolean;
 } = {}): Promise<JobHistoryEntry[]> {
   const qs = new URLSearchParams();
   if (params.target) qs.set('target', params.target);
   if (params.state) qs.set('state', params.state);
   if (params.since !== undefined) qs.set('since', String(params.since));
+  if (params.until !== undefined) qs.set('until', String(params.until));
   if (params.limit !== undefined) qs.set('limit', String(params.limit));
   if (params.offset !== undefined) qs.set('offset', String(params.offset));
+  if (params.sort) qs.set('sort', params.sort);
+  if (params.desc !== undefined) qs.set('desc', params.desc ? '1' : '0');
   const url = qs.toString() ? `./ui/api/history?${qs}` : './ui/api/history';
   return parseResponse<JobHistoryEntry[]>(await apiFetch(url), 'fetching job history');
 }

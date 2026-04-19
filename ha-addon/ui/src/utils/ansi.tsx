@@ -76,9 +76,20 @@ const CSI_RE = /\x1b\[([0-9;]*)([A-Za-z])|\x1b\]([^\x07]*?)\x07|\x1b[=>]/g;
 
 export function renderAnsi(raw: string): ReactNode {
   if (!raw) return null;
-  // Strip `\r` that trailed a non-final line (common on progress bars)
-  // so each line is clean when rendered in a <pre>.
-  const input = raw.replace(/\r(?!\n)/g, '');
+  // Bug #51: PlatformIO emits progress bars as `partial\rpartial\r…final\n`
+  // where each `\r` means "redraw this line from column 0". The previous
+  // implementation dropped the `\r` outright which left *all* the partial
+  // states concatenated end-to-end — unreadable garbage. Proper terminal
+  // semantics: split into physical lines by `\n`, and within each line
+  // keep only the segment after the last `\r` (the final frame of that
+  // line's redraw sequence). `\r\n` pairs are normalized to `\n`.
+  const physicalLines = raw.replace(/\r\n/g, '\n').split('\n');
+  const input = physicalLines
+    .map((line) => {
+      const lastCr = line.lastIndexOf('\r');
+      return lastCr === -1 ? line : line.slice(lastCr + 1);
+    })
+    .join('\n');
 
   const out: ReactNode[] = [];
   let style: Style = {};

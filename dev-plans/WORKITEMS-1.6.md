@@ -240,5 +240,22 @@ Surfaced by the 2026-04-16 archive sweep. Each item was deferred (or filed as a 
 
 - [x] **#46** *(1.6.0-dev.25)* — Previous/Next pagination replaced with IntersectionObserver-driven infinite scroll. A sentinel row beneath the last result triggers the next page when it scrolls into view (200 px rootMargin so the fetch kicks off just before the user reaches the end). Pages stack into one accumulating list; filter changes reset it clean.
 
+- [x] **#47** *(1.6.0-dev.26)* — Cancelled / immediately-failed jobs now surface a duration. `_job_to_row` in `job_history.py` falls back to `submitted_at → finished_at` (the time the job *existed*) when `started_at` is None — cancelled rows never reach a worker so `assigned_at` stays null. The Duration cell tooltip explains it's queue-time-only when started_at is missing. Started column shows `—` for those rows rather than pretending the job started; the duration is the real answer to "how long did this cost".
+
+- [x] **#48** *(1.6.0-dev.26)* — Shared duration + time formatters in `utils/format.ts`. Added `fmtEpochRelative` + `fmtEpochAbsolute` alongside existing `fmtDuration`; `fmtDuration` was already rounding to whole seconds. Both history surfaces (CompileHistoryPanel + QueueHistoryDialog) now use these exclusively — local copies with `toFixed(1)` fractional-second formatting removed, so the Queue tab, Log modal, and history panels all render durations identically.
+
+- [x] **#49** *(1.6.0-dev.26)* — Grafana-style time-range picker in `components/TimeRangePicker.tsx`. Popover with a quick-ranges column (Last 5m / 15m / 1h / 6h / 24h / 7d / 30d / 90d / 1y / All time) on the left and an absolute-range calendar + from/to `<input type=time>` on the right. Built on `react-day-picker` (new dep, ~20 KB tree-shaken, the shadcn-canonical choice) with the palette themed to our dark surface via CSS vars. Emits an epoch `{since, until}` pair — `null` on either side means "open-ended". Replaces the previous "preset pill + native datetime-local" combo on the Queue History modal.
+
+- [x] **#50** *(1.6.0-dev.26)* — Queue History modal now uses the existing `dialog-xl` size class (already defined for the editor) — `calc(100vw - 6rem) × calc(100dvh - 6rem)`. Dropped the previous `height: 'min(80vh, 720px)'` override that was capping it to ~720 px tall.
+
+- [x] **#51** *(1.6.0-dev.26)* — Progress bars render correctly in the log excerpt. Root cause: the previous ANSI helper was stripping `\r` outright, which concatenated every mid-line redraw frame (`Downloading [50%]\rDownloading [51%]…\n`) into one unreadable blob. Fixed by splitting the excerpt into physical lines (`\n` / `\r\n` normalised), then within each line keeping only the tail after the *last* `\r` — the final frame of the redraw sequence. That's terminal-accurate carriage-return semantics without needing xterm.js as a dependency.
+
+- [x] **#52** *(1.6.0-dev.26)* — Queue History table now uses the app's default sans font (13 px), matching the Queue / Devices / Schedules tabs. `font-mono` is scoped to the stuff that *should* be monospace (log excerpt in the expanded row, and optionally the commit-hash cell in CompileHistoryPanel for readability). The default header font (`font-normal`) lands on `<th>` cells so they don't read as bold against the rest of the app's muted header style.
+
+- [x] **#53** *(1.6.0-dev.26)* — Queue History table now uses TanStack Table + shared `SortHeader` for consistency with Queue / Devices / Schedules. Sortable columns: Device, State, ESPHome, Duration, Started, Finished, Trigger, Worker. Sorting is server-side: a new `sort=<col>&desc=1` pair on `/ui/api/history` maps to an SQL `ORDER BY` via a whitelisted `_SORT_COLUMNS` set in `JobHistoryDAO.query()` (prevents arbitrary SQL injection through the query string). Click a sortable header → infinite-scroll accumulator resets + next page fetches with the new ORDER BY.
+
+- [x] **#54** *(1.6.0-dev.26)* — Standalone window-days dropdown removed. The new TimeRangePicker from #49 folds the window presets into its quick-ranges column, so there's only one time-filter control instead of two competing ones. "All time" is now a first-class option inside the picker rather than a side-effect of leaving the dropdown empty.
+
+
 
 

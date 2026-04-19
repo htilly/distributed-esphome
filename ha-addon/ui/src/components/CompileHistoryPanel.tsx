@@ -17,6 +17,7 @@ import {
 } from '@/components/ui/sheet';
 import { getJobBadge } from '@/utils/jobState';
 import { renderAnsi } from '@/utils/ansi';
+import { fmtDuration, fmtEpochAbsolute, fmtEpochRelative } from '@/utils/format';
 
 // JH.5: per-device "Compile history" panel.
 //
@@ -46,28 +47,9 @@ interface Props {
 const PAGE_SIZE = 50;
 
 
-function formatRelative(epoch: number | null): string {
-  if (epoch == null) return '—';
-  const diff = Math.floor(Date.now() / 1000) - epoch;
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
-}
-
-function formatAbsolute(epoch: number | null): string {
-  if (epoch == null) return '';
-  const d = new Date(epoch * 1000);
-  return d.toLocaleString();
-}
-
-function formatDuration(seconds: number | null): string {
-  if (seconds == null) return '—';
-  if (seconds < 60) return `${seconds.toFixed(1)}s`;
-  const m = Math.floor(seconds / 60);
-  const s = Math.round(seconds - m * 60);
-  return `${m}m ${s}s`;
-}
+// Bug #48: all formatting helpers live in utils/format.ts so this panel
+// and QueueHistoryDialog agree on duration / relative-time rendering.
+// No local copies here — removed to prevent drift.
 
 function triggeredLabel(row: JobHistoryEntry): string {
   if (row.triggered_by === 'ha_action') return 'HA action';
@@ -133,7 +115,7 @@ export function CompileHistoryPanel({ target, onOpenChange, onOpenHistoryDiff }:
               {stats.timed_out > 0 && <StatPill label={`${stats.timed_out} timed out`} tone="warn" />}
               {stats.cancelled > 0 && <StatPill label={`${stats.cancelled} cancelled`} />}
               {stats.avg_duration_seconds != null && (
-                <StatPill label={`avg ${formatDuration(stats.avg_duration_seconds)}`} />
+                <StatPill label={`avg ${fmtDuration(stats.avg_duration_seconds)}`} />
               )}
               <StatPill label={`last ${stats.window_days}d`} muted />
             </div>
@@ -264,15 +246,15 @@ function HistoryRow({
           className="text-[12px] text-[var(--text-muted)] tabular-nums"
           title={
             row.started_at
-              ? `Started: ${formatAbsolute(row.started_at)}\nFinished: ${formatAbsolute(row.finished_at)}`
-              : formatAbsolute(row.finished_at)
+              ? `Started: ${fmtEpochAbsolute(row.started_at)}\nFinished: ${fmtEpochAbsolute(row.finished_at)}`
+              : fmtEpochAbsolute(row.finished_at)
           }
         >
           <Clock className="inline-block size-3 mr-1 -mt-0.5" aria-hidden="true" />
-          {formatRelative(row.finished_at)}
+          {fmtEpochRelative(row.finished_at)}
         </span>
         <span className="text-[12px] text-[var(--text-muted)] tabular-nums">
-          {formatDuration(row.duration_seconds)}
+          {fmtDuration(row.duration_seconds)}
         </span>
         <span className="text-[12px] text-[var(--text-muted)] truncate">
           {triggeredLabel(row)}
