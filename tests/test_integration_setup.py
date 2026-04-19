@@ -37,9 +37,44 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 # pytest-homeassistant-custom-component expects the integration on the
 # import path as a top-level ``esphome_fleet`` module — the package is
 # at ``ha-addon/custom_integration/esphome_fleet``.
-_INT_ROOT = Path(__file__).parent.parent / "ha-addon" / "custom_integration"
-if str(_INT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_INT_ROOT))
+_REPO_ROOT = Path(__file__).parent.parent
+_INT_SRC = _REPO_ROOT / "ha-addon" / "custom_integration" / "esphome_fleet"
+_INT_PARENT = _INT_SRC.parent
+if str(_INT_PARENT) not in sys.path:
+    sys.path.insert(0, str(_INT_PARENT))
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _custom_components_symlink():
+    """Expose the integration under ``custom_components/esphome_fleet``.
+
+    HA's integration loader (invoked by pytest-homeassistant-custom-component
+    when the test calls ``hass.config_entries.async_setup``) searches
+    ``<cwd>/custom_components/<domain>/`` for custom integrations. Our
+    package lives at ``ha-addon/custom_integration/esphome_fleet`` so
+    the add-on's Dockerfile can copy it to ``/config/custom_components/``
+    at runtime — we can't restructure the repo without breaking that.
+    Instead we drop a session-scoped symlink at the conventional spot
+    so HA finds the integration and ``Integration not found`` goes away.
+    """
+    cc_root = _REPO_ROOT / "custom_components"
+    cc_root.mkdir(exist_ok=True)
+    link = cc_root / "esphome_fleet"
+    created = False
+    if not link.exists() and not link.is_symlink():
+        link.symlink_to(_INT_SRC, target_is_directory=True)
+        created = True
+    try:
+        yield
+    finally:
+        # Clean up only if we created it — otherwise we risk removing
+        # a dev-created symlink the user wants to keep around.
+        if created:
+            try:
+                link.unlink()
+                cc_root.rmdir()
+            except OSError:
+                pass
 
 
 # Fixture enabling custom components for pytest-homeassistant-custom-component.
