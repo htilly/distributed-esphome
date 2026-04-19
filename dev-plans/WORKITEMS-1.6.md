@@ -265,3 +265,8 @@ Surfaced by the 2026-04-16 archive sweep. Each item was deferred (or filed as a 
 
 - [x] **#58** *(1.6.0-dev.32 — local copy landed; brands-repo submission deferred)* — `ha-addon/icon.png` and `logo.png` are now copied alongside the integration at `ha-addon/custom_integration/esphome_fleet/{icon,logo}.png`, so anyone inspecting the integration directory sees the artwork it represents. **Caveat documented in the integration's `README.md`:** Home Assistant does *not* render local branding for custom integrations — its Integrations UI fetches logos from `brands.home-assistant.io/<domain>/icon.png`, which requires a PR to `home-assistant/brands`. Our current on-disk assets are 64×64 / 192×192 (the sizes the Supervisor catalog needs); the brands repo needs 256×256 + 512×512 variants regenerated from source art. Submitting that PR is queued as a follow-up under HA-gold-standard polish.
 
+- [x] **#59** *(1.6.0-dev.33)* — TimeRangePicker no longer hand-rolls its popover. Swapped the custom `absolute left-0 mt-1` wrapper for the `Popover` primitive from `@base-ui/react` (already bundled — the floating-UI-backed component shadcn 's Popover pattern wraps) with `Popover.Portal` + `Popover.Positioner` doing collision detection, side-flip, and viewport clamping. react-day-picker stays as the calendar (standard library, no custom geometry). Verified via headless Playwright: popover renders with the full presets column + 7-day calendar + time inputs, no clipping at any viewport size. 
+
+- [ ] 60 the layout of the calendar is completely fucked up. Fix it. The arrows aren't even inside the window. 
+
+- [ ] 61 can we distinguish, for the triggered by column in the queue, between the API and the Home Assistant action? 
