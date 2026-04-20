@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Calendar, Clock, Download, History as HistoryIcon, Pin } from 'lucide-react';
+import { Calendar, Clock, History as HistoryIcon, Pin } from 'lucide-react';
 import { classifyTrigger, getTriggerBadge } from '@/utils/trigger';
 import {
   useReactTable,
@@ -24,6 +24,7 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from './ui/dropdown-menu';
+import { FirmwareDownloadMenu } from './FirmwareDownloadMenu';
 import { QueueHistoryDialog } from './QueueHistoryDialog';
 
 interface Props {
@@ -65,18 +66,6 @@ const stateSort: SortingFn<Job> = (rowA, rowB) => {
 };
 
 // Inline sort header — mirrors the pattern used in DevicesTab
-
-// #69: display labels for the firmware variants served by the
-// Download dropdown. Maps server-side variant names (stable wire
-// identifiers) to user-facing strings.
-const variantLabel = (variant: string): string => {
-  switch (variant) {
-    case 'factory': return 'Factory image';
-    case 'ota':     return 'OTA image';
-    case 'firmware': return 'Firmware';  // legacy pre-#69 blob
-    default:        return variant;
-  }
-};
 
 const columnHelper = createColumnHelper<Job>();
 
@@ -453,54 +442,12 @@ export function QueueTab({
                 : <Button variant="warn" size="sm" onClick={() => onRetry([job.id])}>Retry</Button>
             )}
             {canDownload && variants.length > 0 && (
-              <DropdownMenu
+              <FirmwareDownloadMenu
+                jobId={job.id}
+                variants={variants}
                 open={downloadMenuOpenJobId === job.id}
                 onOpenChange={(open) => setDownloadMenuOpenJobId(open ? job.id : null)}
-              >
-                <DropdownMenuTrigger
-                  className="inline-flex items-center gap-1 rounded-lg border border-border bg-background px-2.5 h-7 text-[0.8rem] font-medium text-foreground hover:bg-muted cursor-pointer"
-                  title="Download compiled firmware"
-                  aria-label="Download firmware"
-                >
-                  <Download className="size-3.5" aria-hidden="true" />
-                  Download
-                </DropdownMenuTrigger>
-                <DropdownMenuContent>
-                  <DropdownMenuGroup>
-                    {variants.map((variant) => (
-                      <DropdownMenuItem
-                        key={`${variant}-raw`}
-                        render={(props) => (
-                          <a
-                            {...props}
-                            href={`./ui/api/jobs/${job.id}/firmware?variant=${variant}`}
-                            download
-                          >
-                            {variantLabel(variant)} (.bin)
-                          </a>
-                        )}
-                      />
-                    ))}
-                  </DropdownMenuGroup>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuGroup>
-                    {variants.map((variant) => (
-                      <DropdownMenuItem
-                        key={`${variant}-gz`}
-                        render={(props) => (
-                          <a
-                            {...props}
-                            href={`./ui/api/jobs/${job.id}/firmware?variant=${variant}&gz=1`}
-                            download
-                          >
-                            {variantLabel(variant)} (.bin.gz)
-                          </a>
-                        )}
-                      />
-                    ))}
-                  </DropdownMenuGroup>
-                </DropdownMenuContent>
-              </DropdownMenu>
+              />
             )}
             {hasLog && (
               <Button variant="secondary" size="sm" onClick={() => onOpenLog(job.id)}>Log</Button>

@@ -891,10 +891,25 @@ async def download_job_firmware(request: web.Request) -> web.Response:
     job_id = request.match_info["id"]
     queue = request.app["queue"]
     job = queue.get(job_id)
-    if not job:
-        return web.json_response({"error": "Job not found"}, status=404)
-    if not job.has_firmware:
-        return web.json_response({"error": "Firmware not available"}, status=404)
+    # Bug #1 (1.6.1): fall back to the persistent job_history table when
+    # the job has been coalesced out of the live queue. The binary lives
+    # on disk under /data/firmware/<job_id>.*.bin regardless of queue
+    # state, so history downloads work as long as the firmware budget
+    # hasn't evicted the file. ``job_target`` is needed below to build
+    # the Content-Disposition filename.
+    job_target: str | None
+    if job is None:
+        history = request.app.get("job_history")
+        hist_row = history.get(job_id) if history is not None else None
+        if hist_row is None:
+            return web.json_response({"error": "Job not found"}, status=404)
+        if not hist_row.get("has_firmware"):
+            return web.json_response({"error": "Firmware not available"}, status=404)
+        job_target = str(hist_row.get("target") or "")
+    else:
+        if not job.has_firmware:
+            return web.json_response({"error": "Firmware not available"}, status=404)
+        job_target = job.target
 
     from firmware_storage import firmware_path, list_variants, read_firmware  # noqa: PLC0415
     available = list_variants(job_id)
@@ -923,7 +938,8 @@ async def download_job_firmware(request: web.Request) -> web.Response:
         )
         return web.json_response({"error": "Firmware not available"}, status=404)
 
-    stem = job.target.removesuffix(".yaml").removesuffix(".yml") or job.target
+    target_name = job_target or "job"
+    stem = target_name.removesuffix(".yaml").removesuffix(".yml") or target_name
     # Surface the variant in the filename so a user who downloads both
     # doesn't end up with two indistinguishable `.bin`s in their
     # browser's Downloads folder.
@@ -975,8 +991,17 @@ async def list_job_firmware_variants(request: web.Request) -> web.Response:
     job_id = request.match_info["id"]
     queue = request.app["queue"]
     job = queue.get(job_id)
-    if not job:
-        return web.json_response({"error": "Job not found"}, status=404)
+    # Bug #1 (1.6.1): the UI calls this from the history surfaces too,
+    # so fall back to job_history for jobs that have already been
+    # coalesced out of the live queue. The variant list itself is
+    # filesystem-derived (see :func:`firmware_storage.list_variants`),
+    # so no DB hit is needed for the variant data — we just confirm
+    # that the id is a real job before exposing the directory scan.
+    if job is None:
+        history = request.app.get("job_history")
+        hist_row = history.get(job_id) if history is not None else None
+        if hist_row is None:
+            return web.json_response({"error": "Job not found"}, status=404)
     return web.json_response({"variants": list_variants(job_id)})
 
 

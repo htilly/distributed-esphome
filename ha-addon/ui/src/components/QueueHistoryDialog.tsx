@@ -77,6 +77,7 @@ const SORTABLE: Record<string, SortColumn> = {
 // vs Queue's rich icon+label badges); unifying them kills the drift.
 import { getTriggerBadge, isScheduledCancelBeforeStart } from '@/utils/trigger';
 import { useVersioningEnabled } from '@/hooks/useVersioning';
+import { FirmwareDownloadMenu } from './FirmwareDownloadMenu';
 
 function friendlyFor(targets: Target[], filename: string): string {
   const t = targets.find((x) => x.target === filename);
@@ -96,6 +97,10 @@ export function QueueHistoryDialog({ open, onOpenChange, targets, onOpenHistoryD
   const [presetLabel, setPresetLabel] = useState<string | null>('Last 30 days');
   // Bug #112: drop the Commit column entirely when versioning is off.
   const versioningEnabled = useVersioningEnabled();
+  // Bug #1: per-row Download-menu open state, lifted to the dialog so
+  // SWR doesn't tear it down on re-render. Keyed by job id; null = no
+  // menu open.
+  const [downloadMenuOpenId, setDownloadMenuOpenId] = useState<string | null>(null);
 
   const [stateFilter, setStateFilter] = useState<StateFilter>('');
   const [q, setQ] = useState('');
@@ -349,8 +354,30 @@ export function QueueHistoryDialog({ open, onOpenChange, targets, onOpenHistoryD
           );
         },
       }),
+      // Bug #1 (1.6.1): firmware download dropdown on rows whose binary
+      // is still on disk. Column is always present (no header text, just
+      // a narrow icon-sized cell) so row heights stay consistent as
+      // firmwares age out under the retention budget.
+      ch.display({
+        id: 'download',
+        header: '',
+        cell: ({ row: { original: r } }) => {
+          const variants = r.firmware_variants ?? [];
+          if (variants.length === 0) return null;
+          return (
+            <FirmwareDownloadMenu
+              jobId={r.id}
+              variants={variants}
+              open={downloadMenuOpenId === r.id}
+              onOpenChange={(o) => setDownloadMenuOpenId(o ? r.id : null)}
+              size="icon"
+              label="Download firmware"
+            />
+          );
+        },
+      }),
     ];
-  }, [targets, onOpenHistoryDiff, expandedId, versioningEnabled]);
+  }, [targets, onOpenHistoryDiff, expandedId, versioningEnabled, downloadMenuOpenId]);
 
   const table = useReactTable({
     data: flatRows,

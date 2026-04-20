@@ -20,6 +20,7 @@ import { renderAnsi } from '@/utils/ansi';
 import { fmtDuration, fmtEpochAbsolute, fmtEpochRelative } from '@/utils/format';
 import { isScheduledCancelBeforeStart } from '@/utils/trigger';
 import { useVersioningEnabled } from '@/hooks/useVersioning';
+import { FirmwareDownloadMenu } from './FirmwareDownloadMenu';
 
 // JH.5: per-device "Compile history" panel.
 //
@@ -96,6 +97,11 @@ export function CompileHistoryPanel({ target, onOpenChange, onOpenHistoryDiff }:
 
   // Track which row's log excerpt is expanded (at most one at a time).
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  // Bug #1: lift the per-row Download dropdown's open state into the
+  // panel so SWR re-fetches don't tear it down mid-click (same pattern
+  // we use for the Devices-tab hamburger and the Queue tab's Download
+  // menu). Keyed by row id so only one menu is open at a time.
+  const [downloadMenuOpenId, setDownloadMenuOpenId] = useState<string | null>(null);
 
   // Reset pagination + expanded state when the panel closes/reopens on
   // a different target. onOpenChange of false triggers this flow via
@@ -163,6 +169,10 @@ export function CompileHistoryPanel({ target, onOpenChange, onOpenHistoryDiff }:
                   }
                   onOpenHistoryDiff={versioningEnabled ? onOpenHistoryDiff : undefined}
                   showHash={versioningEnabled}
+                  downloadMenuOpen={downloadMenuOpenId === row.id}
+                  onDownloadMenuOpenChange={(o) =>
+                    setDownloadMenuOpenId(o ? row.id : null)
+                  }
                 />
               ))}
             </div>
@@ -220,6 +230,8 @@ function HistoryRow({
   onToggle,
   onOpenHistoryDiff,
   showHash,
+  downloadMenuOpen,
+  onDownloadMenuOpenChange,
 }: {
   row: JobHistoryEntry;
   expanded: boolean;
@@ -227,6 +239,9 @@ function HistoryRow({
   onOpenHistoryDiff?: (target: string, fromHash: string) => void;
   /** Bug #112: drop the `· <hash>` suffix entirely when versioning is off. */
   showHash: boolean;
+  /** Bug #1: per-row Download-menu open state, controlled by the panel. */
+  downloadMenuOpen: boolean;
+  onDownloadMenuOpenChange: (open: boolean) => void;
 }) {
   const badge = getJobBadge({
     state: row.state,
@@ -287,6 +302,21 @@ function HistoryRow({
             <span> · {row.assigned_hostname}</span>
           )}
         </span>
+        {/* Bug #1 (1.6.1): Download dropdown for history rows that still
+            have a firmware on disk. stopPropagation on the wrapper so
+            opening the menu doesn't also toggle the row expansion. */}
+        {row.firmware_variants && row.firmware_variants.length > 0 && (
+          <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+            <FirmwareDownloadMenu
+              jobId={row.id}
+              variants={row.firmware_variants}
+              open={downloadMenuOpen}
+              onOpenChange={onDownloadMenuOpenChange}
+              size="icon"
+              label="Download firmware"
+            />
+          </span>
+        )}
         <span className="ml-auto text-[11px] text-[var(--text-muted)] font-mono">
           {row.esphome_version || '—'}
           {showHash && row.config_hash && (

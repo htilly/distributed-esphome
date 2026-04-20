@@ -452,6 +452,38 @@ class JobHistoryDAO:
                 r["firmware_variants"] = []
         return rows
 
+    def get(self, job_id: str) -> dict[str, object] | None:
+        """Return a single history row keyed by *job_id*, or ``None``.
+
+        Bug #1 (1.6.1): firmware download from history needs the target
+        name + has_firmware flag for a job that's been coalesced out of
+        the live queue. Populated fields mirror :meth:`query` — in
+        particular ``firmware_variants`` is a live ``list_variants`` probe
+        rather than a DB column, so an evicted binary surfaces as ``[]``
+        even if ``has_firmware`` is still 1 from the row's original write.
+        """
+        self.init()
+        if not self._initialized:
+            return None
+        with self._connect() as conn:
+            cur = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,))
+            row = cur.fetchone()
+        if row is None:
+            return None
+        r = dict(row)
+        try:
+            from firmware_storage import list_variants  # noqa: PLC0415
+        except Exception:
+            list_variants = None  # type: ignore[assignment]
+        if r.get("has_firmware") and list_variants is not None:
+            try:
+                r["firmware_variants"] = list_variants(str(r["id"]))
+            except Exception:
+                r["firmware_variants"] = []
+        else:
+            r["firmware_variants"] = []
+        return r
+
     def stats(self, target: str | None = None, window_days: int = 30) -> dict[str, object]:
         """Return a rollup for *target* (or fleet-wide if None) over the
         last *window_days* days.

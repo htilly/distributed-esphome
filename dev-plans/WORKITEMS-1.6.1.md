@@ -59,7 +59,7 @@ Today `ha-addon/custom_integration/esphome_fleet/manifest.json` declares `"quali
 
 ### New in 1.6.1
 
-- [ ] 1 in the job history for compile and download jobs, we need the link to download the previously compiled firmware.
+- [x] **#1** *(1.6.1-dev.8)* — firmware download available from every history surface that shows the row. New `FirmwareDownloadMenu` component consolidates the .bin / .bin.gz × factory / ota dropdown used by QueueTab, per-device `CompileHistoryPanel`, and fleet-wide `QueueHistoryDialog`. Server-side, `JobHistoryDAO.get(job_id)` added so `/ui/api/jobs/{id}/firmware` can fall back to the persistent history table when the live queue has already coalesced the row — otherwise download would 404 the moment a job left the queue. `/ui/api/jobs/{id}/firmware-variants` has the same fallback so the UI's variant probe works on history rows. Accessibility: trigger still carries a stable `aria-label="Download firmware"` so mocked e2e tests (`compile-download.spec.ts`) stay green against the shared component.
 
 - [x] **#2** *(1.6.1-dev.6)* *(carried from PR #64 review)* — `ArchivedDevicesList.tsx` now calls `fmtEpochRelative(a.archived_at)` instead of the inline `Math.floor(...)` block. Pluralisation / rounding / negative-delta handling are now shared with Queue / History / Last-compiled columns so the Archive dialog can't drift out of sync. No behaviour change; one import + one constant assignment.
 
@@ -74,3 +74,7 @@ Today `ha-addon/custom_integration/esphome_fleet/manifest.json` declares `"quali
 Ping: [Errno 2] No such file or directory: 'ping'
 
 - [ ] 7 let's add an IP address table, a column to the devices table, please. We should be able to get that from ARP or Home Assistant. It seems the ESPHome Home Assistant integration reports the MAC address. 
+
+- [ ] 8 let's add some logging and a column in both the job history and the queue table that describes why a particular worker was chosen. 
+
+- [ ] 9 let's always archive the firmware binary on the server side, even when we go the OTA path. 
