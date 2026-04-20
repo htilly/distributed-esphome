@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.6.1
+
+A bug-fix + polish release on top of 1.6.
+
+**Bug fixes.**
+
+- Static-IP devices OTA correctly again — workers were shipping the `.local` mDNS hostname to `esphome upload` when the YAML declared a static IP.
+- Live logs and OTA to encrypted devices work on fresh first-boot — the scanner used to race the ESPHome install and miss the `api.encryption.key`.
+- Turning config versioning on from the Settings drawer now initialises the git repo immediately (no add-on restart needed). If `.git/` goes missing on a later boot (restored backup, container rebuild), it's recreated automatically.
+- The noisy `aioesphomeapi.connection: disconnect request failed` traceback that fired after every OTA is gone — the expected disconnect-during-reboot case now logs at DEBUG instead of ERROR.
+- OTA failure diagnostics now report real ping RTT / packet-loss instead of `Ping: [Errno 2] No such file or directory: 'ping'`.
+- When config versioning is off, every UI surface that led to an empty History drawer (hamburger *Config history…*, editor **History** button, *Diff since compile*, commit-hash columns) is now hidden or disabled with a tooltip.
+- Devices tab IP column is visible again for users upgrading from before it existed.
+
+**Small additions.**
+
+- Every successful compile's firmware is archived on the server, not just "Download Now" jobs. A **Download** button shows up on every row in Queue, per-device Compile history, and fleet-wide Queue history.
+- Optional **MAC** column on the Devices tab (toggle via the column picker). The IP column gets an ARP-table fallback when mDNS doesn't know the address.
+- New **Worker selection** column in Queue + Compile history explaining why a given worker picked up a compile (*Pinned to worker*, *Only worker online*, *Least busy*, *Fastest available*, *First to poll*).
+- The integration now supports HA **Download diagnostics** (redacted), shows up on the **System Health** panel, and the **Configure** button lets you edit the add-on URL + token in place. Deleted devices are removed from HA's device registry automatically.
+
+**Housekeeping.**
+
+- AppArmor profile added; the add-on runs under confinement now and the Supervisor security-star card reflects it. `stage: experimental` dropped.
+- All open Dependabot alerts resolved (dompurify + hono).
+- Integration quality scale bumped from bronze to silver.
+- Add-on icon now 128×128 (was 64×64) and the store logo is a proper landscape lockup.
+- YAML config comment marker renamed from `# distributed-esphome:` to `# esphome-fleet:` (both are still read; the new one is written on save).
+
+**Note for standalone worker users.** The worker Docker image bumped from version 6 to 7 (adds `iputils-ping`). Old-image workers are flagged in the Workers tab — run `docker pull ghcr.io/weirded/esphome-dist-client:latest && docker restart <name>` to refresh.
+
 ## 1.6.0
 
 **An in-app Settings drawer.** Fleet now has a proper Settings surface — click the gear icon in the header. Every knob that used to live on the Supervisor Configuration tab (server token, timeouts, worker-offline threshold, require-HA-auth) has moved here, and several new fields sit alongside them (history retention, firmware cache size, job-log retention, time-of-day format, config-versioning toggle + author). Edits apply immediately without restarting the add-on. The drawer is split into **Basic** and **Advanced** tabs — Basic holds what you'll touch most (versioning, authentication, display), Advanced holds the plumbing knobs (retention, cache, timeouts, polling). Values from your previous Supervisor configuration are imported on first boot so nothing you set before is lost.

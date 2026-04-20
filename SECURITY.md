@@ -4,8 +4,9 @@
 
 | Version  | Supported          |
 |----------|--------------------|
-| 1.6.x    | ✅ Current release  |
-| 1.5.x    | ✅ Previous stable — security fixes only if trivially backportable |
+| 1.6.1.x  | ✅ Current release  |
+| 1.6.0    | ✅ Previous stable — security fixes only if trivially backportable |
+| 1.5.x    | ⚠️ Superseded — upgrade to 1.6.x |
 | < 1.5.0  | ❌ No patches       |
 
 *(Note: the 1.5 release was developed as `1.4.1-dev.N` through dev.72 and renumbered late cycle as scope grew beyond a patch release. Docker tags with the `1.4.1-dev.N` stamp remain pullable from GHCR but are superseded by the 1.5.x stable tags.)*
@@ -28,7 +29,7 @@ This project's security posture is documented in [`dev-plans/SECURITY_AUDIT.md`]
 - An explicit **Threat Model** section spelling out the six trust assumptions (browser, LAN, workers, Supervisor, operator, build-log provenance) and the items explicitly NOT accepted
 - A supply chain threat model with current mitigation state
 - An OWASP Top 10 (2021) assessment
-- 20 individual findings (F-01 through F-20) with severity ratings and current status
+- 21 individual findings (F-01 through F-21) with severity ratings and current status
 - A "Post-audit mitigations" summary of everything shipped since the original 2026-03-29 audit
 
 The stated threat model is a **trusted home network** behind Home Assistant's Ingress authentication. The server add-on relies on HA Ingress for UI authentication and a shared Bearer token for worker authentication. No open findings remain; **F-18 (worker pip install hash-pinning)** is marked WONTFIX as of 1.6.1 — see §F-18 in the audit for the rationale (single-version hash-pinning is defense-useless against lazy-install drift, since the committed version rarely matches the version actually requested at job time).
@@ -39,7 +40,8 @@ The stated threat model is a **trusted home network** behind Home Assistant's In
 
 - **Hash-pinned Python dependencies** (`--require-hashes`) in both server and client Docker images. Lockfiles regenerated via `scripts/refresh-deps.sh`.
 - **`pip-audit` + `npm audit`** gating CI on every push — hard failures block merge.
-- **Dependabot** configured for pip × 2 (server + client), npm, docker × 2, and github-actions (weekly).
+- **Dependabot** configured for pip × 2 (server + client), npm, docker × 2, and github-actions (weekly). Zero open alerts at release time.
+- **Base-image digest pinning** — both the worker Dockerfile and the server's `ARG BUILD_FROM` default pin the Python base image by `@sha256:…`. In production under Supervisor the server base is overridden via `build.yaml` (which Supervisor's current `build_from` regex doesn't accept digest pins for — tracked); the worker pin is authoritative for every standalone deployment.
 - **Cosign-signed GHCR images** (keyless / GitHub OIDC) — verify with:
   ```bash
   cosign verify \
@@ -59,6 +61,7 @@ The stated threat model is a **trusted home network** behind Home Assistant's In
 - **Path traversal prevention** — all file-endpoint handlers route through `helpers.safe_resolve()`.
 - **`X-Ingress-Path` sanitization** — the Supervisor-supplied header is regex-stripped to `[/A-Za-z0-9._-]` before being interpolated into the HTML `<base href="…">`. Defence-in-depth against a misconfigured reverse proxy.
 - **Monaco editor bundled via Vite** — no external CDN, eliminates a supply-chain vector and enables offline/air-gapped HA installations.
+- **dompurify pinned to a patched version** via `package.json` overrides. Monaco's transitive dep tree kept the vulnerable 3.2.7 well past when 3.4.0 was released; we force the patched version directly rather than waiting on upstream. `shadcn` CLI is a devDependency so its `hono` transitive never ships to users.
 
 ### UI-API authentication (mandatory since 1.5.0)
 
@@ -71,6 +74,12 @@ The stated threat model is a **trusted home network** behind Home Assistant's In
 - **Typed protocol** (pydantic v2) with structured `ProtocolError` responses on malformed payloads. `PROTOCOL_VERSION` gate rejects mismatched peers with a clear error.
 - **Byte-identical `protocol.py`** between server and client, enforced by `tests/test_protocol.py::test_server_and_client_protocol_files_are_identical` — prevents wire-contract drift.
 - **Log payload DoS guard** — `/api/v1/jobs/{id}/log` rejects bodies larger than ~2MB (`log_payload_too_large` → HTTP 413) before aiohttp buffers the full input.
+
+### Supervisor hardening
+
+- **AppArmor profile** — `ha-addon/apparmor.txt` ships alongside `config.yaml` with `apparmor: true`. Supervisor loads the profile on install/upgrade and runs the container under confinement; the security-score card reflects the extra star. The first-pass profile is permissive (explicit rules for `file,`, `capability,`, `network,`, `signal,`, `dbus,`, `unix,`, `mount,`, `pivot_root,`, `ptrace,`) — tightening is gated on observed denial telemetry. Attached-and-permissive is still strictly better than unconfined.
+- **`stage: experimental` flag removed** from `config.yaml` — the add-on defaults to stable per Supervisor convention now that cosign signing, SBOM attestations, the AppArmor profile, and hash-pinned deps are all in place.
+- **Privileged-flag rationale documented** — `DOCS.md` has a "Why this add-on requests these permissions" section with a concise reason for each non-default flag (`host_network`, `hassio_api`, `homeassistant_api`, `auth_api`). The lower security star count has a written rationale store-page readers can check before install.
 
 ### Auth / observability
 
@@ -91,6 +100,10 @@ These are accepted risks within the home-network threat model; see the full audi
 
 ### Residual posture
 
-All 20 audit findings are now FIXED, WONTFIX-by-threat-model, or marked INFO. **F-18 (worker pip install hash-pinning)** was marked FIXED (partial) in 1.5.0 via SC.3, then re-assessed and marked **WONTFIX** in 1.6.1: the single-version constraints file we committed rarely matched the version actually requested at job time (users routinely pin older ESPHome versions or track newer releases than we'd had time to generate constraints for), so the hardened `--require-hashes` path's hit rate in practice was ~0% and the fallback-to-unpinned-install behavior was the load-bearing case. See §F-18 in the audit for the full re-assessment.
+All 21 audit findings are now FIXED, WONTFIX-by-threat-model, or marked INFO. Cycle deltas for 1.6.1:
+
+- **F-13 (Docker base image digest pinning)** moved OPEN → **FIXED (partial)** via SS.4. Worker Dockerfile pins `python:3.11-slim@sha256:…`; server Dockerfile pins the `ARG BUILD_FROM` default digest. Supervisor's production build path still can't carry a digest (upstream `build_from` regex rejects `@sha256:…`); partial until that's relaxed.
+- **F-18 (worker pip install hash-pinning)** was marked FIXED (partial) in 1.5.0 via SC.3, then re-assessed and marked **WONTFIX** in 1.6.1: the single-version constraints file we committed rarely matched the version actually requested at job time (users routinely pin older ESPHome versions or track newer releases than we'd had time to generate constraints for), so the hardened `--require-hashes` path's hit rate in practice was ~0% and the fallback-to-unpinned-install behavior was the load-bearing case. See §F-18 in the audit for the full re-assessment.
+- **F-21 (add-on ran unconfined)** added and immediately **FIXED** in the same cycle via SS.1 — AppArmor profile attached, Supervisor runs the container under confinement.
 
 If your deployment doesn't match the trusted-home-network model, read the audit carefully before exposing the add-on.
