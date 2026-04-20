@@ -121,7 +121,63 @@ class EsphomeFleetCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # HI.6: fire events for any job that crossed into a terminal
         # state since the last poll.
         self._fire_terminal_events(data["queue"])
+        # QS.6 (1.6.1): prune HA device-registry rows whose target or
+        # worker is no longer in the live snapshot. Without this, a
+        # deleted device lingers forever on HA's device page with its
+        # entities stuck on their last-known values.
+        self._prune_stale_devices(data["targets"], data["workers"])
         return data
+
+    def _prune_stale_devices(
+        self,
+        targets: list[dict[str, Any]],
+        workers: list[dict[str, Any]],
+    ) -> None:
+        """Remove device-registry rows for targets/workers that are
+        gone from the server's snapshot.
+
+        The hub device itself is always kept — removing it would take
+        the whole config entry's device tree with it. Identifiers are
+        matched against the ``{DOMAIN}`` tuple space so third-party
+        integrations that merged their own identifiers onto one of our
+        devices (e.g. the native ESPHome integration via MAC) are left
+        alone (HA only removes an identifier tuple owned by our domain,
+        leaving the device in place if any non-Fleet identifier
+        survives).
+        """
+        if self._entry is None:
+            return
+        from homeassistant.helpers import device_registry as dr  # noqa: PLC0415
+
+        live_ids: set[str] = {f"hub:{self._entry.entry_id}"}
+        for target in targets:
+            filename = target.get("target")
+            if filename:
+                live_ids.add(f"target:{filename}")
+        for worker in workers:
+            client_id = worker.get("client_id")
+            if client_id:
+                live_ids.add(f"worker:{client_id}")
+
+        reg = dr.async_get(self.hass)
+        stale_device_ids: list[str] = []
+        for device in dr.async_entries_for_config_entry(reg, self._entry.entry_id):
+            # Each device carries 1+ (domain, identifier) tuples. If
+            # this integration owns ANY of them, check whether at least
+            # one of those owned tuples is still live.
+            own_ids = {ident for (domain, ident) in device.identifiers if domain == DOMAIN}
+            if not own_ids:
+                continue
+            if own_ids & live_ids:
+                continue
+            stale_device_ids.append(device.id)
+
+        for device_id in stale_device_ids:
+            _LOGGER.info(
+                "QS.6: removing stale device registry entry %s (target/worker "
+                "no longer in the fleet)", device_id,
+            )
+            reg.async_remove_device(device_id)
 
     def _fire_terminal_events(self, queue: list[dict[str, Any]]) -> None:
         """Compare queue against last-poll state, fire events on transitions."""
