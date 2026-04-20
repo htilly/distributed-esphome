@@ -215,6 +215,8 @@ Everything lives in `dev-plans/`:
 
 **Release cadence is scope-driven, not time-boxed.** Ship a release when it delivers a meaningful chunk of functionality — never pad scope to fit a calendar and never compress it to meet one. Pull items forward from `WORKITEMS-future.md` or push them back into it based on whether they move the needle for Pat, not on how close to "done" they happen to be. The current `WORKITEMS-X.Y.md` is a commitment to a *coherent* release, not a deadline.
 
+**Never reshuffle workitems between releases without an explicit ask.** Don't move action items in or out of the current `WORKITEMS-X.Y.md`, between release files, to/from `WORKITEMS-future.md`, or to/from `dev-plans/archive/` unless the user explicitly asks for that move. This includes "helpful" consolidation like deferring an unchecked item to the next release, promoting a future item because it seems timely, or rescoping a release that looks too big. Scope decisions are the user's call — surface a concern if you have one, but wait for an explicit instruction before touching the file structure. The only edits to WORKITEMS files you make unprompted are: checking off an item you just completed (with the `(X.Y.Z-dev.N)` tag), adding a newly-discovered bug under the appropriate Open Bugs section of the current release, and updating bug status in place.
+
 **Turn** = one user prompt → one assistant response cycle. At the end of every turn:
 1. Run `bash scripts/bump-dev.sh` — auto-increments `-dev.N`. Never skip.
 2. Run `./push-to-hass-4.sh` for the prod smoke test.

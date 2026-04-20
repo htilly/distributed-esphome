@@ -1,14 +1,20 @@
-# Bug #8: build.yaml removed (Supervisor flagged it as deprecated
-# starting 2024.x). The per-arch build_from map it used to carry was
-# identical for aarch64 and amd64 (docker.io/library/python:3.11-slim)
-# — Docker's multi-arch manifest selection picks the right variant
-# based on the builder's platform, so one FROM line covers both. The
-# ``ARG BUILD_FROM`` is kept so Supervisor can still override via
-# ``--build-arg`` if needed (e.g. for a future per-arch override),
-# but the default here is authoritative and matches what build.yaml
-# used to set. Glibc-based Python is required for PlatformIO
-# toolchains that ESPHome pulls in; do NOT let this fall through to
-# Alpine/musl without a full compatibility pass.
+# Bug #8: keep this default aligned with ``ha-addon/build.yaml``.
+# Supervisor flags ``build.yaml`` as deprecated, but we still need it —
+# without it Supervisor falls back to its own arch-default base
+# (``ghcr.io/home-assistant/<arch>-base``, Alpine/musl), which breaks
+# the ``apt-get install`` step below and every sdist dep that ESPHome
+# pulls in at runtime. The per-arch ``build_from`` map in build.yaml
+# is identical for aarch64 and amd64
+# (``docker.io/library/python:3.11-slim``), and Docker's multi-arch
+# manifest selection picks the right variant based on the builder's
+# platform, so one FROM line covers both. The ``ARG BUILD_FROM`` lets
+# Supervisor override via ``--build-arg`` when it's actually driving
+# the build (that's the primary path in production), but this default
+# should continue to match what build.yaml sets so local ``docker
+# build`` without Supervisor still works. Glibc-based Python is
+# required for PlatformIO toolchains that ESPHome pulls in; do NOT
+# let this fall through to Alpine/musl without a full compatibility
+# pass.
 ARG BUILD_FROM=docker.io/library/python:3.11-slim
 FROM ${BUILD_FROM}
 
