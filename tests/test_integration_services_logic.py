@@ -394,19 +394,13 @@ def test_services_yaml_parses() -> None:
     assert SERVICE_COMPILE in data
     assert SERVICE_CANCEL in data
     assert SERVICE_VALIDATE in data
-    # compile + validate both expose a device-target selector (#37/#66).
-    # The device filter is now a list of filter dicts (manufacturer-scoped).
+    # Hassfest rule: ``target:`` must not carry integration or
+    # manufacturer filters (those are Selector-only). Both services
+    # ship bare ``target: {}`` — the runtime filter lives in
+    # ``_resolve_device_ids_to_targets``, which only accepts devices
+    # whose identifiers are under our DOMAIN.
     assert "target" in data[SERVICE_COMPILE]
-    assert "device" in data[SERVICE_COMPILE]["target"]
-    # Hassfest services-schema update: target.device is a flat list of
-    # DeviceSelector filter dicts (the old ``device: {filter: [...]}``
-    # wrapper was rejected as "extra keys not allowed"). Read straight
-    # off the list.
-    compile_filter = data[SERVICE_COMPILE]["target"]["device"]
-    assert any(f.get("integration") == DOMAIN for f in compile_filter)
-    assert any(f.get("manufacturer") == "ESPHome" for f in compile_filter)
     assert "target" in data[SERVICE_VALIDATE]
-    assert "device" in data[SERVICE_VALIDATE]["target"]
     # #66: compile exposes a separate `worker` device-selector field,
     # filtered to the worker manufacturer so stable/target devices hide.
     worker_field = data[SERVICE_COMPILE]["fields"]["worker"]
