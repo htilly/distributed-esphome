@@ -4,8 +4,7 @@ Roadmap and bug tracking for ESPHome Fleet, organized by release.
 
 ## Active files
 
-- **[WORKITEMS-1.6.md](WORKITEMS-1.6.md)** — **Current release.** Editor & config management (file tree, config diff, git integration)
-- **[WORKITEMS-1.6.1.md](WORKITEMS-1.6.1.md)** — Planned patch: HA gold-standard polish (AppArmor, signed image, integration Bronze→Gold, branding, repo hygiene)
+- **[WORKITEMS-1.6.1.md](WORKITEMS-1.6.1.md)** — **Current release.** HA gold-standard polish: AppArmor, signed image, integration Bronze→Gold, branding, repo hygiene. Carries #111 / #112 forward from 1.6.
 - **[WORKITEMS-1.7.md](WORKITEMS-1.7.md)** — Planned: Fleet operator tools + LLM assistance (device tags, disk budgets, worker constraints, file tree editor, AI editor, release breaking-change analyzer)
 - **[WORKITEMS-1.8.md](WORKITEMS-1.8.md)** — Planned: Dashboard parity (create device, web serial, log tail, adoption, remote compilation)
 - **[WORKITEMS-future.md](WORKITEMS-future.md)** — Backlog without committed scope
@@ -23,6 +22,7 @@ Historical release plans for versions already shipped. Kept for reference but no
 - **[archive/WORKITEMS-1.3.1.md](archive/WORKITEMS-1.3.1.md)** — Hardening: typed protocol, safety-net tests, supply chain, upgrade modal, network columns, 24 bug fixes
 - **[archive/WORKITEMS-1.4.md](archive/WORKITEMS-1.4.md)** — Fleet management & automation: per-device version pinning, scheduled upgrades, Schedules tab, "+ New Device", APScheduler, 88 bug fixes
 - **[archive/WORKITEMS-1.5.md](archive/WORKITEMS-1.5.md)** — Rebrand to ESPHome Fleet, native HA integration (services, entities, WebSocket events, mDNS discovery), ESPHome unbundled + lazy-installed, mandatory direct-port auth, downloadable firmware binaries (factory/OTA × raw/gzip), supply-chain hardening (SBOM, cosign, SHA-pinned Actions), full UI quality sprint + UX polish pass, 71 bug fixes
+- **[archive/WORKITEMS-1.6.md](archive/WORKITEMS-1.6.md)** — Per-file config history (AV.* with Monaco diff + rollback), first-login onboarding modal for versioning, archive tracked in git with `git mv`, persistent compile history DB (JH.*), in-app Settings drawer with Basic/Advanced tabs + full SP.8 migration of Supervisor options, Grafana-style time-range picker, Pat-centric UX pass from UX_REVIEW_1.6, 45+ numbered bug fixes
 
 ## How this works
 

@@ -375,9 +375,7 @@ Items surfaced by `dev-plans/UX_REVIEW_1.6.md` (pre-ship hyper-critical walkthro
   3. `Last compiled` column sort function switched from `'alphanumeric'` (lexicographic, sorted `100 < 9`) to `'basic'` (numeric comparator, epoch seconds sort correctly).
   4. `Last compiled` cell now uses `fmtEpochRelative` + `fmtEpochAbsolute` from `utils/format.ts` (respects the `time_format` Setting) instead of a hand-rolled relative time + `toLocaleString()` that ignored the preference.
 
-- [ ] **#111** *(carried from 1.6 — formerly #104 before 1.6 reused that slot)* — when config versioning is disabled, we should gray out the config history item in the hamburger menu. As well as any other places that lead us to the history drawer, like the history button in the editor and the various hashes that we show in the queue and job history table.
-
-- [ ] **#112** *(carried from 1.6 — formerly #105 before 1.6 reused that slot)* — when config versioning is disabled, if we don't have the history enabled, we probably need to not show the hashes and hide those columns.
+- **#111 / #112** — carried forward to `WORKITEMS-1.6.1.md` (server-side gating landed with #97; UI still shows history entries that lead to an empty drawer when versioning is off — per-surface audit best done in the polish patch).
 
 - [x] **#113** *(1.6.0-dev.42)* — Six follow-up review comments on PR #64 addressed:
 

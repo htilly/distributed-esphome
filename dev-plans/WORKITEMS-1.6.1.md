@@ -44,6 +44,14 @@ Today `ha-addon/custom_integration/esphome_fleet/manifest.json` declares `"quali
 
 ## Open Bugs & Tweaks
 
+### Carried forward from 1.6
+
+- [ ] **#111** *(carried from 1.6)* — when config versioning is disabled, we should gray out the config history item in the hamburger menu. As well as any other places that lead us to the history drawer, like the history button in the editor and the various hashes that we show in the queue and job history table.
+
+- [ ] **#112** *(carried from 1.6)* — when config versioning is disabled, if we don't have the history enabled, we probably need to not show the hashes and hide those columns.
+
+### New in 1.6.1
+
 - [ ] 1 in the job history for compile and download jobs, we need the link to download the previously compiled firmware.
 
 - [ ] 2 *(carried from PR #64 review)* — `ha-addon/ui/src/components/ArchivedDevicesList.tsx:~103` computes `"Xago"` inline (`const ago = Math.floor(...); const when = ago < 60 ? ...`) instead of calling `fmtEpochRelative()` from `utils/format.ts`. That helper already owns the relative-time shape for every other surface (Queue, History, Last-compiled column) and consolidates pluralisation / rounding / negative-delta handling. Swap the inline math for `fmtEpochRelative(a.archived_at)` so the Archive dialog's timestamps can't drift from Queue / History. Small consolidation; no new behaviour. 
