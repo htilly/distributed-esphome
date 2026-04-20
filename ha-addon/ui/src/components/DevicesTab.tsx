@@ -42,7 +42,7 @@ import {
 } from './ui/dropdown-menu';
 
 /* ---- Column configuration ---- */
-type OptionalColumnId = 'status' | 'ha' | 'ip' | 'running' | 'area' | 'comment' | 'project' | 'net' | 'ipconfig' | 'ap' | 'schedule' | 'last_compiled';
+type OptionalColumnId = 'status' | 'ha' | 'ip' | 'mac' | 'running' | 'area' | 'comment' | 'project' | 'net' | 'ipconfig' | 'ap' | 'schedule' | 'last_compiled';
 
 interface OptionalColumnDef {
   id: OptionalColumnId;
@@ -58,6 +58,10 @@ const OPTIONAL_COLUMNS: OptionalColumnDef[] = [
   { id: 'status', label: 'Status', defaultVisible: true },
   { id: 'ha', label: 'HA', defaultVisible: true },
   { id: 'ip', label: 'IP', defaultVisible: true },
+  // Bug #12 (1.6.1): MAC column. Off by default — most users don't
+  // need it, but it's useful when matching devices to ARP / DHCP
+  // reservations or to HA's device registry entries.
+  { id: 'mac', label: 'MAC', defaultVisible: false },
   { id: 'net', label: 'Net', defaultVisible: true },
   { id: 'ipconfig', label: 'IP Config', defaultVisible: false },
   { id: 'ap', label: 'AP', defaultVisible: false },

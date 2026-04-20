@@ -361,7 +361,7 @@ export function QueueHistoryDialog({ open, onOpenChange, targets, onOpenHistoryD
       // gets "worker X, because Y" in one glance.
       ch.accessor((r) => r.selection_reason ?? '', {
         id: 'selection_reason',
-        header: ({ column }) => <SortHeader label="Why" column={column} />,
+        header: ({ column }) => <SortHeader label="Worker selection" column={column} />,
         cell: ({ row: { original: r } }) => {
           const display = formatSelectionReason(r.selection_reason);
           if (!display) return <span className="text-[var(--text-muted)]">—</span>;

@@ -1102,6 +1102,15 @@ def build_name_to_target_map(
                 key = enc_block.get("key")
                 if key:
                     encryption_keys[key_name] = str(key)
+                    # Bug #11 (1.6.1): mirror the name-map's hyphen/underscore
+                    # normalization so mDNS-normalized lookups (aioesphomeapi
+                    # often surfaces the device as ``foo_bar`` when the
+                    # YAML says ``foo-bar``) still find the key. Without
+                    # this, live logs silently fell back to an unencrypted
+                    # handshake and the device rejected the connection.
+                    normalized_key_name = key_name.replace("-", "_")
+                    if normalized_key_name != key_name:
+                        encryption_keys[normalized_key_name] = str(key)
 
         # Always register an address override — get_device_address handles
         # wifi/ethernet/openthread with use_address, manual_ip.static_ip, and

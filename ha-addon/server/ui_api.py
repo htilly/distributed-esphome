@@ -1074,6 +1074,20 @@ async def ws_device_log(request: web.Request) -> web.WebSocketResponse:
 
     noise_psk = device_poller._encryption_keys.get(dev.name)
     addr = device_poller._address_overrides.get(dev.name) or dev.ip_address
+    # Bug #11 (1.6.1): if we end up with no key for a device the YAML
+    # declared one for, the usual symptom is ``Connection requires
+    # encryption`` from the device. That message lands in the user's
+    # terminal; this log line lands in the add-on log so support
+    # threads can point at the right triage endpoint in one round
+    # trip instead of asking for a code dive.
+    if noise_psk is None and dev.online:
+        logger.debug(
+            "ws_device_log: %s has no cached noise_psk. If the device "
+            "declares api.encryption.key the scan may have run before "
+            "ESPHome finished installing — check "
+            "GET /ui/api/targets/%s/api-key and restart the add-on if "
+            "it 404s.", dev.name, filename,
+        )
 
     import asyncio as _asyncio  # noqa: PLC0415
     import aioesphomeapi  # noqa: PLC0415

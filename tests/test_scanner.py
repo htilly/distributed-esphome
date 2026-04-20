@@ -347,6 +347,22 @@ def test_name_map_resolves_despite_unresolved_substitution():
     assert "un-sub-device" in overrides
 
 
+def test_name_map_encryption_keys_include_underscore_variant():
+    """Bug #11 (1.6.1): aioesphomeapi / mDNS often normalise hyphenated
+    device names to underscores (``un-sub-device`` → ``un_sub_device``),
+    so the encryption-key map must carry BOTH forms. Pre-1.6.1 only the
+    name_map did this mirroring; the key map didn't, and live logs for
+    an encrypted ``my-device`` silently fell through to an unencrypted
+    handshake that the device rejects."""
+    _, keys, _, _ = build_name_to_target_map(
+        str(FIXTURES), ["unresolved_subs_device.yaml"],
+    )
+    assert "un-sub-device" in keys
+    assert "un_sub_device" in keys
+    # Both aliases must point at the same key (not accidentally distinct).
+    assert keys["un-sub-device"] == keys["un_sub_device"]
+
+
 def test_get_device_metadata_uses_friendly_name_for_unresolved_subs():
     """Bug #22 follow-up: get_device_metadata must still extract
     device_name for a YAML that contains an unresolved substitution.

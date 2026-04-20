@@ -277,6 +277,20 @@ export function useDeviceColumns(options: Options) {
       },
       sortingFn: 'alphanumeric',
     }),
+    // Bug #12 (1.6.1): MAC column. Off by default so the row width
+    // doesn't blow up for users who don't care — toggle on via the
+    // Columns picker. Sourced from ``dev.mac_address`` in the
+    // device_poller, populated via mDNS TXT or native API poll.
+    columnHelper.accessor(row => row.mac_address || '', {
+      id: 'mac',
+      header: ({ column }) => <SortHeader label="MAC" column={column} />,
+      cell: ({ row: { original: t } }) => (
+        <span className="sensitive font-mono text-[12px] text-[var(--text-muted)] whitespace-nowrap">
+          {t.mac_address || '—'}
+        </span>
+      ),
+      sortingFn: 'alphanumeric',
+    }),
     columnHelper.accessor(
       row => `${row.network_type ?? 'zzz'}-${row.network_static_ip ? '0' : '1'}-${row.network_matter ? '0' : '1'}`,
       {

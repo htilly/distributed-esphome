@@ -291,7 +291,7 @@ export function QueueTab({
     // jobs that predate the column.
     columnHelper.accessor(row => row.selection_reason || '', {
       id: 'selection_reason',
-      header: ({ column }) => <SortHeader label="Why" column={column} />,
+      header: ({ column }) => <SortHeader label="Worker selection" column={column} />,
       cell: ({ row: { original: job } }) => {
         const display = formatSelectionReason(job.selection_reason);
         if (!display) return <span className="text-[var(--text-muted)] text-[12px]">—</span>;
