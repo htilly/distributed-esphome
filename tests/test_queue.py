@@ -979,13 +979,18 @@ async def test_mark_firmware_stored_requires_working_state(tmp_queue_file):
     assert q.get(job.id).has_firmware is True
 
 
-async def test_mark_firmware_stored_rejects_non_download_only_job(tmp_queue_file):
+async def test_mark_firmware_stored_accepts_non_download_only_job(tmp_queue_file):
+    """Bug #9 (1.6.1): OTA jobs also archive their compiled binary on
+    the server. The old contract refused the flag flip for
+    ``download_only=False`` so the budget enforcer never saw a
+    protectable row; the new contract accepts it and the enforcer
+    owns LRU eviction when disk pressure exceeds the cap."""
     q = JobQueue(queue_file=tmp_queue_file)
     job = await q.enqueue("device.yaml", "2026.3.2", "run1", 300, download_only=False)
     assert job is not None
     await q.claim_next("worker-A")
     ok = await q.mark_firmware_stored(job.id)
-    assert ok is False
+    assert ok is True
 
 
 async def test_remove_jobs_preserves_download_only_firmware(tmp_queue_file, tmp_path, monkeypatch):
@@ -1062,10 +1067,16 @@ async def test_per_target_coalescing_preserves_download_only_firmware(tmp_queue_
     assert firmware_path(first.id, root=firmware_dir).exists()
 
 
-async def test_remove_jobs_deletes_non_download_firmware(tmp_queue_file, tmp_path, monkeypatch):
-    """Bug #38: the retention exemption is scoped to download-only
-    jobs. A non-download-only job that happens to have firmware on
-    disk (OTA flow) still gets its binary purged on Remove."""
+async def test_remove_jobs_preserves_ota_firmware_when_archived(tmp_queue_file, tmp_path, monkeypatch):
+    """Bug #9 (1.6.1): the retention exemption now covers any job
+    whose firmware was actually archived. Pre-1.6.1 an OTA job's
+    ``.bin`` was eagerly purged on Remove (even if ``has_firmware``
+    was set); the new contract keeps it around so users can
+    hand-flash or rollback after the OTA ran.
+
+    The old test (``test_remove_jobs_deletes_non_download_firmware``)
+    asserted the opposite — kept here with the inverted assertion so
+    future refactors can't silently bring the eager purge back."""
     from firmware_storage import save_firmware, firmware_path
     import firmware_storage
 
@@ -1073,7 +1084,7 @@ async def test_remove_jobs_deletes_non_download_firmware(tmp_queue_file, tmp_pat
     monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
 
     q = JobQueue(queue_file=tmp_queue_file)
-    # Non-download_only — the OTA path.
+    # OTA path — download_only=False but firmware was archived.
     job = await q.enqueue("device.yaml", "2026.3.2", "run1", 300)
     assert job is not None
     await q.claim_next("worker-A")
@@ -1084,4 +1095,5 @@ async def test_remove_jobs_deletes_non_download_firmware(tmp_queue_file, tmp_pat
 
     removed = await q.remove_jobs([job.id])
     assert removed == 1
-    assert not firmware_path(job.id, root=firmware_dir).exists()
+    # Bug #9: retained — budget enforcer decides when to evict.
+    assert firmware_path(job.id, root=firmware_dir).exists()

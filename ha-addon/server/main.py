@@ -347,17 +347,14 @@ async def firmware_budget_enforcer(app: web.Application) -> None:
                 job.id for job in queue.get_all()
                 if getattr(job, "has_firmware", False)
             }
-            # Union with download-only history rows whose binary is
-            # still on disk (JobQueue.load does the same at startup).
+            # Union with history rows whose binary is still on disk.
+            # Bug #9 (1.6.1): every successful compile now has an
+            # archived binary, so the protection isn't limited to
+            # ``download_only`` rows anymore. The budget enforcer itself
+            # drives LRU eviction when disk pressure exceeds the limit.
             history = app.get("job_history")
             if history is not None:
                 try:
-                    # Pull all non-cancelled terminal rows with
-                    # firmware still on disk. We don't cap at a
-                    # hard-coded limit here — a fleet with hundreds
-                    # of download-only binaries is exactly the case
-                    # the budget is for. Paginate if that ever becomes
-                    # a memory issue.
                     offset = 0
                     page = 1000
                     while True:
@@ -365,14 +362,14 @@ async def firmware_budget_enforcer(app: web.Application) -> None:
                         if not rows:
                             break
                         for r in rows:
-                            if r.get("download_only") and r.get("has_firmware"):
+                            if r.get("has_firmware"):
                                 protected.add(str(r["id"]))
                         if len(rows) < page:
                             break
                         offset += page
                 except Exception:
                     logger.debug(
-                        "Couldn't pull protected download-only IDs from history",
+                        "Couldn't pull protected firmware IDs from history",
                         exc_info=True,
                     )
             deleted = enforce_budget(max_bytes=max_bytes, protected_job_ids=protected)

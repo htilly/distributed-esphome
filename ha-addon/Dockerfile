@@ -30,8 +30,10 @@ LABEL \
     io.hass.type="addon" \
     io.hass.version="${BUILD_VERSION}"
 
-# Same deps as the proven client Dockerfile — native glibc for PlatformIO toolchains
-RUN apt-get update && apt-get install -y gcc libffi-dev libssl-dev git && rm -rf /var/lib/apt/lists/*
+# Same deps as the proven client Dockerfile — native glibc for PlatformIO toolchains.
+# Bug #6 (1.6.1): `iputils-ping` keeps the client's OTA network-diagnostics
+# probe functional when the server also hosts a local worker.
+RUN apt-get update && apt-get install -y gcc libffi-dev libssl-dev git iputils-ping && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 # E.1: install from the hash-pinned lockfile, not the >= range list. The

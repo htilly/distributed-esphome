@@ -190,16 +190,21 @@ class Job:
 def _purge_firmware(jobs: Iterable["Job"]) -> None:
     """Remove .bin files for removed jobs (FD.7).
 
-    Bug #38: download-only firmware is now retained past the job's
-    queue lifetime — the user wanted those binaries to survive
-    coalescing + explicit clears and only evict on disk budget
-    pressure. This helper now filters ``download_only`` jobs out of
-    the purge set; their binaries live on disk until the
-    ``firmware_budget_enforcer`` task in ``main.py`` evicts them (or
-    the user explicitly deletes the job-history row). OTA firmware
-    retains its original eager-delete semantics.
+    Bug #38: download-only firmware is retained past the job's
+    queue lifetime so users can download it long after the queue row
+    is cleared; eviction happens under disk-budget pressure rather
+    than eager deletion.
 
-    Imported lazily so unit tests that replace `DEFAULT_FIRMWARE_DIR`
+    Bug #9 (1.6.1): the worker now archives every successful compile
+    (not just download-only), so this protection extends to any job
+    whose firmware was actually stored. A job with ``has_firmware``
+    set — regardless of ``download_only`` — is preserved until the
+    ``firmware_budget_enforcer`` task evicts it or the user deletes
+    the history row explicitly. Jobs that failed before producing a
+    binary still hit :func:`delete_firmware` defensively to clean up
+    any partial writes.
+
+    Imported lazily so unit tests that replace ``DEFAULT_FIRMWARE_DIR``
     via monkeypatch see the patched value.
     """
     try:
@@ -207,7 +212,7 @@ def _purge_firmware(jobs: Iterable["Job"]) -> None:
     except Exception:
         return
     for job in jobs:
-        if getattr(job, "download_only", False) and getattr(job, "has_firmware", False):
+        if getattr(job, "has_firmware", False):
             # Preserve — budget enforcer will evict on disk pressure.
             continue
         try:
@@ -330,13 +335,13 @@ class JobQueue:
             logger.warning("Skipped %d unparseable job entries on startup", skipped)
         logger.info("Loaded %d jobs from %s (persisted across restarts)", len(self._jobs), self._queue_file)
         # FD.7: sweep orphan firmware binaries whose job no longer
-        # exists (add-on crashed mid-cleanup, etc.). Bug #38: the
-        # "active" set is expanded to include download-only history
-        # rows — their binaries survive queue coalescing/clears until
-        # the firmware_budget_enforcer evicts them.
-        # PR #64 review: paginate the history query instead of capping
-        # at 500 — a fleet with >500 download-only successes would
-        # silently lose protection for the older ones on every boot.
+        # exists (add-on crashed mid-cleanup, etc.). Bug #38 / Bug #9:
+        # the protected set spans every history row whose binary is
+        # still on disk — download-only and OTA alike, since 1.6.1
+        # archives the binary for every successful compile.
+        # PR #64 review: paginate the history query so a fleet with
+        # hundreds of successes doesn't silently lose protection on
+        # the older half.
         try:
             from firmware_storage import reconcile_orphans  # noqa: PLC0415
             protected: set[str] = set()
@@ -349,14 +354,14 @@ class JobQueue:
                         if not rows:
                             break
                         for r in rows:
-                            if r.get("download_only") and r.get("has_firmware"):
+                            if r.get("has_firmware"):
                                 protected.add(str(r["id"]))
                         if len(rows) < page:
                             break
                         offset += page
                 except Exception:
                     logger.debug(
-                        "Couldn't pull protected download-only IDs from history",
+                        "Couldn't pull protected firmware IDs from history",
                         exc_info=True,
                     )
             reconcile_orphans(
@@ -974,6 +979,13 @@ class JobQueue:
 
         Returns True when the flag was flipped. Called by the worker
         firmware-upload endpoint (FD.5).
+
+        Bug #9 (1.6.1): accepts uploads for OTA jobs as well as
+        download-only — the worker now archives every successful compile
+        on the server. The WORKING-state check remains the real gate; a
+        stale worker uploading after requeue or coalesce can't race the
+        flag because the API handler already re-runs state + identity
+        checks before reaching this method.
         """
         async with self._lock:
             job = self._jobs.get(job_id)
@@ -983,11 +995,6 @@ class JobQueue:
                 logger.warning(
                     "Refusing firmware upload for job %s in state %s (not WORKING)",
                     job_id, job.state.value,
-                )
-                return False
-            if not job.download_only:
-                logger.warning(
-                    "Refusing firmware upload for non-download-only job %s", job_id,
                 )
                 return False
             job.has_firmware = True

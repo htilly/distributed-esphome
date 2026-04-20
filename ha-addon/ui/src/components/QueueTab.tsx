@@ -423,7 +423,11 @@ export function QueueTab({
         // variant (factory for ESP32 first-flash; ota for OTA / ESP8266)
         // plus a gzip toggle. Fallback to a single-item variants=["firmware"]
         // list for pre-#69 blobs still on disk after an upgrade.
-        const canDownload = job.state === 'success' && !!job.download_only && !!job.has_firmware;
+        // Bug #9 (1.6.1): the worker now archives every successful
+        // compile on the server, so the Download button is no longer
+        // gated on ``download_only`` — any successful compile with a
+        // stored binary can offer Download in the live Queue too.
+        const canDownload = job.state === 'success' && !!job.has_firmware;
         const variants = (job.firmware_variants && job.firmware_variants.length > 0)
           ? job.firmware_variants
           : (canDownload ? ['firmware'] : []);

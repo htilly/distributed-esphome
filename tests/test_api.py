@@ -1142,7 +1142,15 @@ async def test_firmware_upload_stores_bin_and_flips_has_firmware(tmp_path, monke
         await ta.close()
 
 
-async def test_firmware_upload_rejects_non_download_only_job(tmp_path, monkeypatch):
+async def test_firmware_upload_accepts_non_download_only_job(tmp_path, monkeypatch):
+    """Bug #9 (1.6.1): firmware archival covers OTA jobs too.
+
+    Pre-1.6.1 the server refused uploads for ``download_only=False``
+    jobs (the previous version of this test asserted the 400). After
+    #9 the worker archives every successful compile, so the endpoint
+    accepts the upload as long as the job is still WORKING and the
+    caller identity matches the assigned worker.
+    """
     import firmware_storage
     monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", tmp_path / "firmware")
 
@@ -1159,7 +1167,7 @@ async def test_firmware_upload_rejects_non_download_only_job(tmp_path, monkeypat
             data=b"fw",
             headers={**AUTH_HEADERS, "Content-Type": "application/octet-stream"},
         )
-        assert resp.status == 400
+        assert resp.status == 200
     finally:
         await ta.close()
 

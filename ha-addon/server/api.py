@@ -436,8 +436,13 @@ async def _handle_firmware_upload(
     job = queue.get(job_id)
     if job is None:
         return _protocol_error("job_not_found", status=404)
-    if not job.download_only:
-        return _protocol_error("job_not_download_only", status=400)
+    # Bug #9 (1.6.1): firmware uploads are accepted for every job kind,
+    # not just ``download_only``. The worker now post-OTA uploads the
+    # compiled binary so the server archives a downloadable artifact
+    # for every successful compile — useful for forensics, rollback,
+    # and hand-flashing devices whose OTA path is broken. Download-only
+    # jobs still have ``has_firmware`` set the same way; the state
+    # check below remains the real gate (only accept while WORKING).
 
     # #24 (1): state check MUST run before any disk write. A stale
     # worker (the one that was abandoned by bug #17's offline
