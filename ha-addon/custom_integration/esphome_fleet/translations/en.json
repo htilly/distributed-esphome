@@ -24,6 +24,14 @@
         "data": {
           "token": "Add-on token"
         }
+      },
+      "reconfigure_confirm": {
+        "title": "Reconfigure ESPHome Fleet",
+        "description": "Update the base URL or token for the ESPHome Fleet add-on currently at {url}.",
+        "data": {
+          "base_url": "Base URL",
+          "token": "Add-on token"
+        }
       }
     },
     "error": {
@@ -35,7 +43,8 @@
       "already_configured": "This server is already configured.",
       "already_in_progress": "Setup is already in progress for this server via Supervisor discovery.",
       "invalid_discovery_info": "The Supervisor discovery record was missing host or port.",
-      "reauth_successful": "The token was updated and the integration reloaded."
+      "reauth_successful": "The token was updated and the integration reloaded.",
+      "reconfigure_successful": "The integration was updated and reloaded."
     }
   },
   "services": {
@@ -50,6 +59,17 @@
     "validate": {
       "name": "Validate",
       "description": "Run ESPHome config validation on a target YAML."
+    }
+  },
+  "system_health": {
+    "info": {
+      "add_on_url": "Add-on URL",
+      "last_update_success": "Last poll",
+      "esphome_version": "ESPHome version",
+      "add_on_version": "Add-on version",
+      "workers": "Workers",
+      "queue_depth": "Queue depth",
+      "status": "Status"
     }
   }
 }

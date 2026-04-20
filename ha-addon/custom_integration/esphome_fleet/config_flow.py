@@ -95,6 +95,11 @@ class EsphomeFleetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # #73: reauth context — the entry being re-authenticated so
     # `async_step_reauth_confirm` can update its data.
     _reauth_entry: config_entries.ConfigEntry | None = None
+    # QS.5 (1.6.1): reconfigure context — the entry being edited via
+    # Settings → Devices & Services → ESPHome Fleet → Configure, so
+    # ``async_step_reconfigure`` can update URL + token without
+    # forcing the user to remove and re-add the integration.
+    _reconfigure_entry: config_entries.ConfigEntry | None = None
 
     async def async_step_reauth(
         self, _entry_data: dict[str, object] | None = None
@@ -137,6 +142,82 @@ class EsphomeFleetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema({vol.Required(CONF_TOKEN): str}),
             description_placeholders={
                 "url": str(self._reauth_entry.data.get(CONF_BASE_URL, "")),
+            },
+            errors=errors,
+        )
+
+    async def async_step_reconfigure(
+        self, _user_input: dict[str, str] | None = None,
+    ) -> FlowResult:
+        """QS.5 (1.6.1): entry point when the user clicks **Configure**
+        on the integration card in Settings → Devices & Services. Lets
+        them edit the base URL + token in place instead of removing
+        and re-adding the integration (the only pre-QS.5 workflow).
+
+        HA 2024.11+ routes the Configure button here automatically
+        when this step exists on the flow. Older HA versions never
+        call this method — they fall back to the reauth flow or the
+        options flow, neither of which the integration exposes.
+        """
+        self._reconfigure_entry = self.hass.config_entries.async_get_entry(
+            self.context["entry_id"]
+        )
+        return await self.async_step_reconfigure_confirm()
+
+    async def async_step_reconfigure_confirm(
+        self, user_input: dict[str, str] | None = None,
+    ) -> FlowResult:
+        """Edit an existing entry's base URL + token."""
+        errors: dict[str, str] = {}
+        assert self._reconfigure_entry is not None
+
+        if user_input is not None:
+            candidate = user_input.get(CONF_BASE_URL, "")
+            token = (user_input.get(CONF_TOKEN) or "").strip()
+            try:
+                base_url = _normalize_base_url(candidate)
+            except ValueError:
+                errors["base"] = "invalid_url"
+            else:
+                if not token:
+                    errors[CONF_TOKEN] = "token_required"
+                elif not await _probe_server(self.hass, base_url):
+                    errors["base"] = "cannot_connect"
+                else:
+                    # Preserve unique_id when the URL didn't change;
+                    # update it when it did so the flow's uniqueness
+                    # invariant stays intact. ``async_update_reload_and_abort``
+                    # does the reload+abort dance HA expects from
+                    # reconfigure — on HA versions before it existed,
+                    # fall back to update_entry + reload + async_abort.
+                    update = {CONF_BASE_URL: base_url, CONF_TOKEN: token}
+                    updater = getattr(
+                        self, "async_update_reload_and_abort", None,
+                    )
+                    if updater is not None:
+                        return await updater(
+                            self._reconfigure_entry,
+                            data={**self._reconfigure_entry.data, **update},
+                            reason="reconfigure_successful",
+                        )
+                    # HA <2024.11 fallback — safe on the integration's
+                    # declared `homeassistant: "2024.1.0"` minimum.
+                    self.hass.config_entries.async_update_entry(
+                        self._reconfigure_entry,
+                        data={**self._reconfigure_entry.data, **update},
+                    )
+                    await self.hass.config_entries.async_reload(
+                        self._reconfigure_entry.entry_id,
+                    )
+                    return self.async_abort(reason="reconfigure_successful")
+
+        return self.async_show_form(
+            step_id="reconfigure_confirm",
+            data_schema=_url_schema(
+                default_url=str(self._reconfigure_entry.data.get(CONF_BASE_URL, "")),
+            ),
+            description_placeholders={
+                "url": str(self._reconfigure_entry.data.get(CONF_BASE_URL, "")),
             },
             errors=errors,
         )
