@@ -120,6 +120,18 @@ cosign verify-attestation \
   > esphome-dist-client.sbom.json
 ```
 
+## Why this add-on requests these permissions
+
+Home Assistant's add-on store shows each add-on's "stars" — a score based on how little Supervisor privilege it asks for. ESPHome Fleet will never be a five-star add-on because managing a fleet of ESPHome devices genuinely requires a handful of elevated permissions. This section documents each one so the lower score is understood rather than mysterious.
+
+- **`host_network: true`** — mDNS device discovery needs to see the LAN's `_esphomelib._tcp` broadcasts, which the default bridge network on a Supervisor add-on doesn't expose. Without host networking, Fleet wouldn't automatically discover ESPHome devices on your network; you'd have to hand-enter each IP. This is the single biggest "why not five stars" item, and it's load-bearing.
+- **`hassio_api: true`** — used to query the Supervisor for the currently-installed ESPHome add-on version (so Fleet's default compile version tracks whatever you have installed), to post `/discovery` entries so the HA integration auto-pairs, and to clear the add-on's cached options after the in-app Settings migration. Read + narrow-scoped writes only.
+- **`homeassistant_api: true`** — reads entity states from HA Core to wire each managed ESPHome device to its matching HA device page (the Devices tab's "HA" column is the result). Read-only — Fleet never writes back into HA.
+- **`auth_api: true`** — used to validate Home Assistant long-lived access tokens on the direct-port API (`:8765`) so scripts and `curl` can authenticate with per-user credentials instead of the shared server token. The browser UI doesn't need this — it comes in through Ingress, which is already HA-authenticated.
+- **`map: [config:rw]`** — Fleet's whole premise is editing `/config/esphome/`. Read access finds the YAML targets; write access is needed by the inline editor, the auto-versioning layer's `git init` / auto-commits, rename/delete operations, and the archive/restore flow. Scoped to `/config` — Fleet has no way to reach other parts of your HA configuration.
+
+Everything else stays at Supervisor's defaults. The `options` / `schema` blocks are intentionally empty because every user-facing setting lives in the in-app Settings drawer (editable without an add-on restart); see the Add-on configuration section above.
+
 ## Support
 
 If this add-on has saved you time or frustration, you can support continued development:

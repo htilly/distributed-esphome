@@ -5,7 +5,7 @@ Roadmap and bug tracking for ESPHome Fleet, organized by release.
 ## Active files
 
 - **[WORKITEMS-1.6.1.md](WORKITEMS-1.6.1.md)** — **Current release.** HA gold-standard polish: AppArmor, signed image, integration Bronze→Gold, branding, repo hygiene. Carries #111 / #112 forward from 1.6.
-- **[WORKITEMS-1.7.md](WORKITEMS-1.7.md)** — Planned: Fleet operator tools + LLM assistance (device tags, disk budgets, worker constraints, file tree editor, AI editor, release breaking-change analyzer)
+- **[WORKITEMS-1.7.md](WORKITEMS-1.7.md)** — Planned: LLM assistance (AI editor, ESPHome release breaking-change analyzer)
 - **[WORKITEMS-1.8.md](WORKITEMS-1.8.md)** — Planned: Dashboard parity (create device, web serial, log tail, adoption, remote compilation)
 - **[WORKITEMS-future.md](WORKITEMS-future.md)** — Backlog without committed scope
 - **[SECURITY_AUDIT.md](SECURITY_AUDIT.md)** — Security audit findings (refer when making security-relevant changes)
