@@ -244,6 +244,38 @@ Two long-lived branches: `develop` and `main`.
 
 This is deliberately simple for a single-developer project. If parallel lines of work ever need isolation, introduce short-lived feature branches off `develop` — don't complicate the trunk model preemptively.
 
+## PR Review Loop
+
+When a PR has review comments (Copilot bot, human reviewer, or both), the working pattern is:
+
+1. **Address every comment in the same push.** Fix the code, update tests, land a workitem entry if the reviewer is pointing at future work. Don't leave comments hanging across pushes — a later reader can't tell which comment drove which commit.
+2. **Resolve the review thread on GitHub.** After the fix lands, mark the comment conversation as **Resolved** in the PR UI (or via the GraphQL `resolveReviewThread` mutation below). An unresolved thread looks like an open concern even when the underlying code is already fixed, and it clutters the PR sidebar until merge. This is as important as the fix itself.
+3. **Exception — intentionally-deferred items.** If the comment points at work that's legitimately out of scope for this PR, file it in `dev-plans/WORKITEMS-*.md` first, reply to the comment with a pointer to the new workitem ID, *then* resolve the thread. The workitem is the record of the deferral; the thread should close because the next step (fix in a future PR) is now tracked elsewhere.
+
+Resolve threads with:
+
+```bash
+# List unresolved threads on a PR:
+gh api graphql -f query='
+  query($owner:String!,$repo:String!,$pr:Int!) {
+    repository(owner:$owner, name:$repo) {
+      pullRequest(number:$pr) {
+        reviewThreads(first:50) {
+          nodes { id isResolved comments(first:1) { nodes { body } } }
+        }
+      }
+    }
+  }' -F owner=weirded -F repo=distributed-esphome -F pr=64
+
+# Resolve one by its thread id (from the query above):
+gh api graphql -f query='
+  mutation($id:ID!) {
+    resolveReviewThread(input:{threadId:$id}) { thread { isResolved } }
+  }' -F id=PRT_kwDO...
+```
+
+End-of-turn rule when a PR has review feedback: **before the commit + push, enumerate every thread that was touched and resolve it.** "Fix and leave the thread open" is not finished work.
+
 ## Deployment
 
 `hass-4` is the local Home Assistant instance. `./push-to-hass-4.sh` deploys the add-on, waits for the new version to report ready, and runs the full `e2e-hass-4` Playwright suite (real compile + OTA to `cyd-office-info`). Run after every turn.
