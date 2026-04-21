@@ -50,12 +50,13 @@ The goal here is **what isn't automated**. Anything covered by CI, the pre-push 
     magick -background none ha-addon/ui/src/assets/esphome-logo.svg -resize 128x128 ha-addon/icon.png
     cp ha-addon/ui/src/assets/esphome-logo.svg ha-addon/icon.svg
 
-    # Add-on + integration logo.png: 192×192 shield from the SVG source.
-    # Supervisor and HA's Integrations card both render a compact square,
-    # and a wordmark at that size ends up illegible. 1.6.1 PR #80 tried
-    # a landscape wordmark here and it rendered cramped — reverted to
-    # the 1.6.0 shape (same glyph as icon.png but 192×192).
-    magick -background none ha-addon/ui/src/assets/esphome-logo.svg -resize 192x192 ha-addon/logo.png
+    # Add-on + integration logo.png: 512×512 shield from the SVG source.
+    # 1.6.1 PR #80 tried a landscape wordmark here and it rendered
+    # cramped; reverted to the 1.6.0 shield shape. Rendered at 512×512
+    # (not the 192×192 that 1.6.0 shipped with) because Supervisor's
+    # add-on info-panel logo slot is wider than 192px and a small
+    # source renders small at native size instead of filling the slot.
+    magick -background none ha-addon/ui/src/assets/esphome-logo.svg -resize 512x512 ha-addon/logo.png
     cp ha-addon/logo.png ha-addon/custom_integration/esphome_fleet/logo.png
 
     # home-assistant/brands submission. Icons are the square glyph; the
