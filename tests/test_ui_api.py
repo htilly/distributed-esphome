@@ -1029,7 +1029,7 @@ async def test_get_settings_returns_defaults_on_fresh_boot(tmp_path, _settings_i
             "ota_timeout": 120,
             "worker_offline_threshold": 30,
             "device_poll_interval": 60,
-            "require_ha_auth": True,
+            "require_ha_auth": False,
             "time_format": "auto",
         }
     finally:
