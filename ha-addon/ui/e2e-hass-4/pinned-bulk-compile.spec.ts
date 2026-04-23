@@ -17,7 +17,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * actual compile cycle.
  */
 
-const TARGET_FILENAME = process.env.HASS4_TARGET || 'cyd-office-info.yaml';
+const TARGET_FILENAME = process.env.FLEET_TARGET || process.env.HASS4_TARGET || 'cyd-office-info.yaml';
 
 const EXPECTED_VERSION =
   process.env.EXPECTED_VERSION ||

@@ -1,21 +1,39 @@
 import { defineConfig } from '@playwright/test';
 
 /**
- * Playwright config for smoke tests against the author's hass-4 instance.
+ * Playwright config for smoke tests against any deployed Fleet instance:
+ * hass-4, a HAOS VM, or a standalone Docker container. The same suite runs
+ * against all three — targets that don't have HA skip `@requires-ha` specs
+ * via `--grep-invert=@requires-ha`.
  *
  * Run with:
  *   npm run test:e2e:hass-4
  *
- * Defaults to http://192.168.225.112:8765. Override with:
- *   HASS4_URL=http://other-host:8765 npm run test:e2e:hass-4
+ * Env (FLEET_* takes precedence; HASS4_* kept as BC fallback so
+ * push-to-hass-4.sh and push-to-haos.sh keep working unchanged):
  *
- * AU.7: when HASS4_ADDON_TOKEN is set (push-to-hass-4.sh reads it
- * from the hass-4 host and exports it), every test automatically
- * authenticates — both the `request` fixture (`extraHTTPHeaders`) and
- * the browser page (sessionStorage injected via `addInitScript` in
- * the global setup below, picked up by the UI's apiFetch helper).
+ *   FLEET_URL / HASS4_URL       — base URL of the add-on's HTTP port
+ *                                 (default http://192.168.225.112:8765).
+ *   FLEET_TOKEN / HASS4_ADDON_TOKEN
+ *                               — add-on's shared Bearer token. Required
+ *                                 when `require_ha_auth=true` (the default
+ *                                 on 1.5+). Attached to every fetch/XHR
+ *                                 the browser makes AND to the `request`
+ *                                 fixture via `extraHTTPHeaders` below.
  */
-const hass4AddonToken = process.env.HASS4_ADDON_TOKEN || '';
+const fleetToken = process.env.FLEET_TOKEN || process.env.HASS4_ADDON_TOKEN || '';
+
+// scripts/test-matrix.py collates three parallel runs via per-target JSON
+// reports. When PLAYWRIGHT_JSON_OUTPUT_NAME is set, add the json reporter
+// alongside list+html. The json reporter writes to that env-var path.
+type ReporterEntry = string | [string] | [string, Record<string, unknown>];
+const reporters: ReporterEntry[] = [
+  ['list'],
+  ['html', { outputFolder: 'playwright-report', open: 'never' }],
+];
+if (process.env.PLAYWRIGHT_JSON_OUTPUT_NAME) {
+  reporters.push(['json']);
+}
 
 export default defineConfig({
   testDir: '.',
@@ -26,9 +44,9 @@ export default defineConfig({
   // Run serially — they touch real state, so don't parallelize
   workers: 1,
   fullyParallel: false,
-  reporter: [['list'], ['html', { outputFolder: 'playwright-report', open: 'never' }]],
+  reporter: reporters,
   use: {
-    baseURL: process.env.HASS4_URL || 'http://192.168.225.112:8765',
+    baseURL: process.env.FLEET_URL || process.env.HASS4_URL || 'http://192.168.225.112:8765',
     headless: true,
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
@@ -40,8 +58,8 @@ export default defineConfig({
     // `extraHTTPHeaders` applies to the `request` fixture AND to every
     // fetch/XHR the browser page makes (including SWR polls) — both the
     // Playwright APIRequestContext and the BrowserContext pick it up.
-    extraHTTPHeaders: hass4AddonToken
-      ? { Authorization: `Bearer ${hass4AddonToken}` }
+    extraHTTPHeaders: fleetToken
+      ? { Authorization: `Bearer ${fleetToken}` }
       : {},
   },
 });

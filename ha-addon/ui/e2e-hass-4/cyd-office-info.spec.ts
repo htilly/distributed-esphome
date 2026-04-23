@@ -17,14 +17,15 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  *   6. Open Live Logs from the device row and verify the device API stream
  *
  * The target device defaults to `cyd-office-info.yaml` and can be overridden
- * with the HASS4_TARGET env var. The base URL is set in playwright.config.ts
- * via HASS4_URL (default http://192.168.225.112:8765).
+ * with the FLEET_TARGET env var (HASS4_TARGET also accepted). The base URL
+ * is set in playwright.config.ts via FLEET_URL / HASS4_URL (default
+ * http://192.168.225.112:8765).
  *
  * Run with:
  *   npm run test:e2e:hass-4
  */
 
-const TARGET_FILENAME = process.env.HASS4_TARGET || 'cyd-office-info.yaml';
+const TARGET_FILENAME = process.env.FLEET_TARGET || process.env.HASS4_TARGET || 'cyd-office-info.yaml';
 const TARGET_STEM = TARGET_FILENAME.replace(/\.ya?ml$/, '');
 
 // Read the expected add-on version from ha-addon/VERSION at test startup so

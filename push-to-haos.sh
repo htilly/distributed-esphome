@@ -26,6 +26,41 @@
 
 set -euo pipefail
 
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --from-ghcr)
+      INSTALL_MODE=ghcr
+      shift
+      ;;
+    --skip-smoke)
+      SKIP_SMOKE=1
+      shift
+      ;;
+    -h|--help)
+      cat >&2 <<'HELP'
+Usage: push-to-haos.sh [--from-ghcr] [--skip-smoke]
+
+  --from-ghcr   Equivalent to INSTALL_MODE=ghcr — have Supervisor pull the
+                GHCR-published image for the current VERSION instead of
+                local-building. Used by scripts/test-matrix.py, which
+                pushes the image beforehand.
+  --skip-smoke  Skip the Playwright run. Equivalent to SKIP_SMOKE=1.
+
+Required env:
+  HAOS_URL      HA URL of the target VM (e.g. http://192.168.224.17:8123).
+
+See top of file for optional env (HAOS_ADDON_URL, HAOS_TOKEN_FILE, PVE_HOST,
+VMID, SKIP_INSTALL, SKIP_SEED, FLEET_SOURCE_HOST).
+HELP
+      exit 0
+      ;;
+    *)
+      echo "Unknown flag: $1 (try --help)" >&2
+      exit 2
+      ;;
+  esac
+done
+
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$REPO_ROOT"
 
@@ -157,6 +192,13 @@ fi
 if [[ -z "$HAOS_ADDON_TOKEN" || "$HAOS_ADDON_TOKEN" == "null" ]]; then
   echo "    WARNING: couldn't read the add-on token from VM — version probe will 401 under require_ha_auth=true" >&2
   HAOS_ADDON_TOKEN=""
+fi
+# Cache the token so downstream tools (scripts/test-matrix.py) can read
+# it without re-running the pvesh+qga chain.
+if [[ -n "$HAOS_ADDON_TOKEN" ]]; then
+  mkdir -p "$HOME/.config/distributed-esphome"
+  printf '%s\n' "$HAOS_ADDON_TOKEN" > "$HOME/.config/distributed-esphome/haos-addon-token"
+  chmod 600 "$HOME/.config/distributed-esphome/haos-addon-token"
 fi
 
 # ---------------------------------------------------------------------------

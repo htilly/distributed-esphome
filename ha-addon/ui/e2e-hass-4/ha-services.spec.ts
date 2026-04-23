@@ -16,14 +16,14 @@ import { expect, test, type APIRequestContext } from '@playwright/test';
  *
  * HA hostname defaults to `http://hass-4.local:8123`; override with
  * `HASS_URL`. Fleet base URL for the queue-verification step comes
- * from `HASS4_URL` (the same var the rest of this suite uses),
+ * from `FLEET_URL` (with `HASS4_URL` as BC fallback),
  * defaulting to `http://hass-4.local:8765`.
  */
 
 const HASS_URL = (process.env.HASS_URL || 'http://hass-4.local:8123').replace(/\/$/, '');
 const HASS_TOKEN = process.env.HASS_TOKEN || '';
-const FLEET_URL = (process.env.HASS4_URL || 'http://hass-4.local:8765').replace(/\/$/, '');
-const TARGET_FILENAME = process.env.HASS4_TARGET || 'cyd-office-info.yaml';
+const FLEET_URL = (process.env.FLEET_URL || process.env.HASS4_URL || 'http://hass-4.local:8765').replace(/\/$/, '');
+const TARGET_FILENAME = process.env.FLEET_TARGET || process.env.HASS4_TARGET || 'cyd-office-info.yaml';
 
 interface QueueJob {
   id: string;
@@ -53,7 +53,10 @@ async function callHaService(
   });
 }
 
-test.describe('HA services hass-4 smoke (#64)', () => {
+// @requires-ha — calls HA's /api/services/esphome_fleet/* endpoints,
+// so the standalone-Docker target filters these out via
+// --grep-invert=@requires-ha. The hass-4 and HAOS-VM targets run them.
+test.describe('HA services hass-4 smoke (#64)', { tag: ['@requires-ha'] }, () => {
   test.skip(
     !HASS_TOKEN,
     'HASS_TOKEN not set — create a Long-Lived Access Token in HA '

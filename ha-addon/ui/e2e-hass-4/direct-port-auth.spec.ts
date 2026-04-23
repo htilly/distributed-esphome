@@ -25,8 +25,8 @@ import { expect, request as pwRequest, test } from '@playwright/test';
  * into false 200s.
  */
 
-const FLEET_URL = (process.env.HASS4_URL || 'http://hass-4.local:8765').replace(/\/$/, '');
-const ADDON_TOKEN = process.env.HASS4_ADDON_TOKEN || '';
+const FLEET_URL = (process.env.FLEET_URL || process.env.HASS4_URL || 'http://hass-4.local:8765').replace(/\/$/, '');
+const ADDON_TOKEN = process.env.FLEET_TOKEN || process.env.HASS4_ADDON_TOKEN || '';
 
 const PROTECTED_PATHS = ['/', '/index.html', '/ui/api/server-info'] as const;
 
@@ -116,7 +116,7 @@ test.describe('#82 direct-port auth covers the SPA shell', () => {
   test.describe('with a valid system Bearer', () => {
     test.skip(
       !ADDON_TOKEN,
-      'HASS4_ADDON_TOKEN not set — push-to-hass-4.sh exports it; run the suite via that wrapper to exercise the 200-path.',
+      'FLEET_TOKEN / HASS4_ADDON_TOKEN not set — push-to-hass-4.sh / push-to-haos.sh / scripts/test-matrix.py export it; run the suite via one of those wrappers to exercise the 200-path.',
     );
 
     for (const path of PROTECTED_PATHS) {

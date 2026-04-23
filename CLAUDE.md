@@ -221,8 +221,8 @@ Everything lives in `dev-plans/`:
 
 **Turn** = one user prompt → one assistant response cycle. At the end of every turn:
 1. Run `bash scripts/bump-dev.sh` — auto-increments `-dev.N`. Never skip.
-2. Run `./push-to-hass-4.sh` for the prod smoke test.
-3. **Check add-on logs for errors/warnings** after deploy: `ssh root@hass-4.local "ha addons logs local_esphome_dist_server" | grep -iE "ERROR|WARNING|Traceback|DeprecationWarning" | tail -20`. Fix any new issues before moving on. Warnings that existed before this turn can be noted but don't block.
+2. Run `python scripts/test-matrix.py` — builds+pushes the three dev images to GHCR, then deploys + Playwright-smokes all three install paths (hass-4, haos-pve, standalone-pve) in parallel and prints a collated summary with clickable URLs. Targets budget is ≲5 min warm-cache. When iterating on a narrow UI change where the full matrix is overkill, `./push-to-hass-4.sh` remains as a faster single-target loop (source-rebuild, no GHCR round-trip).
+3. **Check add-on logs for errors/warnings** on hass-4 after deploy: `ssh root@hass-4.local "ha addons logs local_esphome_dist_server" | grep -iE "ERROR|WARNING|Traceback|DeprecationWarning" | tail -20`. Fix any new issues before moving on. hass-4 is the primary target for log-watching; `build/test-matrix/<target>/deploy.log` has the per-target capture for the other two if a failure points there. Warnings that existed before this turn can be noted but don't block.
 4. Update `dev-plans/WORKITEMS-X.Y.md` immediately — check the box, add the specific dev.N tag. Don't batch.
 
 **Work item / bug checkbox format:** `- [x] **#NNN** *(X.Y.Z-dev.N)* — description` (the `#NNN` only applies to bugs). Use the exact dev.N, not a generic `dev`. For wontfix/duplicate/stale entries, use `~~**#NNN**~~ WONTFIX —` (strike-through bold ID + label).
@@ -280,6 +280,12 @@ End-of-turn rule when a PR has review feedback: **before the commit + push, enum
 
 ## Deployment
 
-`hass-4` is the local Home Assistant instance. `./push-to-hass-4.sh` deploys the add-on, waits for the new version to report ready, and runs the full `e2e-hass-4` Playwright suite (real compile + OTA to `cyd-office-info`). Run after every turn.
+`hass-4` is one of three machines in the integration-testing home lab that every turn smokes against. See `dev-plans/HOME-LAB.md` for the full host list, the `192.168.224.0/22` flat-network assumption, and the SSH setup all hosts share.
+
+**`python scripts/test-matrix.py`** is the canonical end-of-turn command. It builds+pushes three dev-tagged images to GHCR (addon for hass-4 + haos-pve, standalone server + client for standalone-pve), deploys in parallel via `push-to-hass-4.sh --from-ghcr`, `push-to-haos.sh --from-ghcr`, and `scripts/standalone/deploy.sh`, runs the `e2e-hass-4` Playwright suite against each (standalone filters out `@requires-ha`-tagged specs), and collates results into a pass/fail matrix + URL list. Per-target logs land under `build/test-matrix/<target>/`. `--targets` selects a subset; `--no-build` reuses the last pushed tag for fast iteration on the orchestrator itself.
+
+**`./push-to-hass-4.sh`** is the fast-path single-target loop: source-tarball to hass-4, Supervisor local-build, `e2e-hass-4` Playwright run. Preferred when iterating on a UI-only change and the full matrix is overkill. Flags: `--from-ghcr` (pull instead of rebuild; what the matrix uses) and `--skip-smoke` (deploy only).
+
+**`./push-to-haos.sh`** drives the HAOS VM at `192.168.226.135`. Same two flags.
 
 **HA Core restart when the custom integration changes.** Changes under `ha-addon/custom_integration/` require a full `ha core restart` to take effect — the integration_installer copies new files to `/config/custom_components/` on add-on boot, but HA Core loads Python modules once at startup and doesn't hot-reload them. The add-on restart during deploy does NOT restart HA Core (Supervisor only restarts the add-on container). `push-to-hass-4.sh` hashes the integration directory and compares to a remote stamp file (`/tmp/esphome_fleet_integration.hash`); on a mismatch it runs `ha core restart` before the smoke suite. Skipped when the integration is byte-identical to the last push so non-integration turns don't pay the 30-60s restart cost.
