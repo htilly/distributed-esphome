@@ -14,13 +14,19 @@ Targets (see dev-plans/HOME-LAB.md):
   haos-pve        throwaway HAOS VM on the `pve` Proxmox host
   standalone-pve  plain Docker host `docker-pve` running docker-compose
 
-Image flow: one `docker buildx build --push` per Dockerfile (three total),
-all tagged with dev-<VERSION>. All three targets pull that same tag.
+Image flow: GitHub Actions (publish-addon.yml / publish-server.yml /
+publish-client.yml) already builds and pushes the three GHCR images on
+every develop push — keyed off ha-addon/VERSION, which bump-dev.sh
+changes every turn. This script waits for those tags to appear, then
+deploys. No laptop-side GHCR write auth required.
+
+End-of-turn sequence is therefore:
+  bump-dev.sh → git commit + push → python scripts/test-matrix.py
 
 Usage:
   scripts/test-matrix.py                    # all targets (default)
   scripts/test-matrix.py --targets hass-4   # single target
-  scripts/test-matrix.py --no-build         # reuse last pushed tag
+  scripts/test-matrix.py --no-wait          # skip the GHCR poll
   scripts/test-matrix.py --seq-tests        # serialize Playwright runs
   scripts/test-matrix.py --list             # show targets and exit
 """
@@ -71,35 +77,10 @@ def color(name: str, text: str) -> str:
     return f"{COLORS.get(name, '')}{text}{RESET}"
 
 
-@dataclass
-class BuildImage:
-    """One entry in the buildx fan-out."""
-    name: str           # short label ("addon", "server", "client")
-    image: str          # full ghcr path
-    dockerfile: Path
-    context: Path
-
-
-BUILD_IMAGES = [
-    BuildImage(
-        name="addon",
-        image=IMG_ADDON,
-        dockerfile=REPO_ROOT / "ha-addon" / "Dockerfile",
-        context=REPO_ROOT / "ha-addon",
-    ),
-    BuildImage(
-        name="server",
-        image=IMG_SERVER,
-        dockerfile=REPO_ROOT / "ha-addon" / "Dockerfile.standalone",
-        context=REPO_ROOT / "ha-addon",
-    ),
-    BuildImage(
-        name="client",
-        image=IMG_CLIENT,
-        dockerfile=REPO_ROOT / "ha-addon" / "client" / "Dockerfile",
-        context=REPO_ROOT / "ha-addon" / "client",
-    ),
-]
+# Images the matrix waits for. All three are published by the CI
+# workflows under .github/workflows/publish-*.yml on every develop push
+# whose diff touches ha-addon/VERSION (which bump-dev.sh always does).
+EXPECTED_IMAGES = [IMG_ADDON, IMG_SERVER, IMG_CLIENT]
 
 
 @dataclass
@@ -235,29 +216,17 @@ async def run_streaming(
 # Preflight checks — fail fast with actionable errors.
 # ---------------------------------------------------------------------------
 
-def preflight(skip_build: bool) -> None:
+def preflight(skip_wait: bool) -> None:
     problems: list[str] = []
 
     if not VERSION_FILE.exists():
         problems.append(f"VERSION file missing at {VERSION_FILE}")
 
-    if not skip_build:
-        if shutil.which("docker") is None:
-            problems.append("`docker` not found on PATH")
-        # Confirm GHCR login exists. `docker info` surfaces registry auth
-        # only when a registry is queried; easier is to check the config.
-        cfg = Path.home() / ".docker" / "config.json"
-        if cfg.exists():
-            try:
-                data = json.loads(cfg.read_text())
-                auths = data.get("auths", {})
-                if "ghcr.io" not in auths:
-                    problems.append(
-                        "Not logged in to ghcr.io. Run: "
-                        "`echo $GHCR_TOKEN | docker login ghcr.io -u <user> --password-stdin`"
-                    )
-            except json.JSONDecodeError:
-                pass  # unreadable config — let docker surface the real error
+    if not skip_wait and shutil.which("docker") is None:
+        problems.append(
+            "`docker` not found on PATH (needed for `docker buildx imagetools inspect` "
+            "against GHCR)"
+        )
 
     for script in ("push-to-hass-4.sh", "push-to-haos.sh"):
         if not (REPO_ROOT / script).exists():
@@ -271,59 +240,77 @@ def preflight(skip_build: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Step 1: build + push images.
+# Step 1: wait for CI-published images on GHCR.
 # ---------------------------------------------------------------------------
 
-async def build_and_push_one(img: BuildImage, version: str) -> bool:
-    """Build one image for linux/amd64 and push both the version tag and
-    the buildcache tag. Returns True on success.
+async def _tag_exists(image: str, version: str) -> bool:
+    """Return True iff ghcr.io/<image>:<version> currently resolves.
+
+    Uses `docker buildx imagetools inspect`, which hits the registry API
+    (no pull) and returns exit 0 iff the tag is present.
     """
-    tag_version = f"{img.image}:{version}"
-    tag_cache = f"{img.image}:buildcache"
-
-    cmd = [
-        "docker", "buildx", "build",
-        "--platform", "linux/amd64",
-        "--file", str(img.dockerfile),
-        "--tag", tag_version,
-        "--push",
-        # Registry-based layer cache — makes iterations fast even on a
-        # QEMU-emulated build from an arm64 Mac. --cache-to writes the
-        # cache manifest; --cache-from reads it on the next run.
-        "--cache-from", f"type=registry,ref={tag_cache}",
-        "--cache-to", f"type=registry,ref={tag_cache},mode=max",
-    ]
-    # The HA add-on Dockerfile expects BUILD_ARCH + BUILD_VERSION build
-    # args (mirrors publish-addon.yml).
-    if img.name == "addon":
-        cmd += ["--build-arg", "BUILD_ARCH=amd64",
-                "--build-arg", f"BUILD_VERSION={version}"]
-    cmd.append(str(img.context))
-
-    log_path = LOG_ROOT / "build" / f"{img.name}.log"
-    code = await run_streaming(
-        cmd,
-        prefix=f"build:{img.name}",
-        log_path=log_path,
-        cwd=REPO_ROOT,
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "buildx", "imagetools", "inspect", f"{image}:{version}",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
     )
-    if code != 0:
-        print(color("build", f"[build:{img.name}   ] ✖ buildx exit {code} (log: {log_path})"), flush=True)
-    return code == 0
+    return (await proc.wait()) == 0
 
 
-async def build_all(version: str) -> bool:
-    """Build all images concurrently. Returns True iff all succeeded."""
-    print(color("build", f"==> Building + pushing dev images with tag {version} ..."), flush=True)
+async def wait_for_ghcr_tags(version: str, timeout_s: int = 600) -> bool:
+    """Poll GHCR until all three dev-tagged images are published (CI job
+    output). Returns True on full success, False on timeout.
+    """
+    print(color(
+        "build",
+        f"==> Waiting for CI to publish tag {version} on GHCR "
+        f"(timeout {timeout_s}s) ...",
+    ), flush=True)
     start = time.monotonic()
-    results = await asyncio.gather(
-        *[build_and_push_one(img, version) for img in BUILD_IMAGES],
-    )
-    elapsed = time.monotonic() - start
-    ok = all(results)
-    marker = "✔" if ok else "✖"
-    print(color("build", f"==> Build/push {marker} in {elapsed:.0f}s"), flush=True)
-    return ok
+    published: set[str] = set()
+    last_progress = 0.0
+    while True:
+        # Re-check each still-missing image each round.
+        checks = await asyncio.gather(*[
+            _tag_exists(img, version) for img in EXPECTED_IMAGES if img not in published
+        ])
+        for img, ok in zip([i for i in EXPECTED_IMAGES if i not in published], checks):
+            if ok:
+                published.add(img)
+                short = img.rsplit("/", 1)[-1]
+                print(color(
+                    "build",
+                    f"[ghcr          ] ✔ {short}:{version} ({fmt_duration(time.monotonic() - start)})",
+                ), flush=True)
+
+        if len(published) == len(EXPECTED_IMAGES):
+            return True
+
+        elapsed = time.monotonic() - start
+        if elapsed >= timeout_s:
+            missing = [i.rsplit("/", 1)[-1] for i in EXPECTED_IMAGES if i not in published]
+            print(color(
+                "build",
+                f"[ghcr          ] ✖ timed out after {fmt_duration(elapsed)}; "
+                f"still missing: {', '.join(missing)}",
+            ), flush=True)
+            print(color(
+                "build",
+                "[ghcr          ]   hint: did you `git push` to develop? The publish-*.yml "
+                "workflows only fire on develop pushes that change ha-addon/VERSION.",
+            ), flush=True)
+            return False
+
+        # Status line every 30s so the terminal doesn't look frozen.
+        if elapsed - last_progress >= 30:
+            missing = [i.rsplit("/", 1)[-1] for i in EXPECTED_IMAGES if i not in published]
+            print(color(
+                "build",
+                f"[ghcr          ] ⧗ still waiting on {', '.join(missing)} ({fmt_duration(elapsed)})",
+            ), flush=True)
+            last_progress = elapsed
+
+        await asyncio.sleep(10)
 
 
 # ---------------------------------------------------------------------------
@@ -527,11 +514,13 @@ async def run(args: argparse.Namespace) -> int:
     print(color("build", f"==> test-matrix.py v{version}  targets: {', '.join(names)}"), flush=True)
     LOG_ROOT.mkdir(parents=True, exist_ok=True)
 
-    # -- Build + push images --------------------------------------------
-    if not args.no_build:
-        ok = await build_all(version)
+    # -- Wait for CI-published images ----------------------------------
+    if not args.no_wait:
+        ok = await wait_for_ghcr_tags(version, timeout_s=args.wait_timeout)
         if not ok:
-            sys.stderr.write("Build/push failed — skipping all target deploys.\n")
+            sys.stderr.write(
+                "GHCR tags not available — skipping all target deploys.\n"
+            )
             return 1
 
     # -- Run target chains ----------------------------------------------
@@ -565,9 +554,16 @@ def main() -> int:
         help="Comma-separated target names (default: all). See --list.",
     )
     parser.add_argument(
-        "--no-build",
+        "--no-wait",
         action="store_true",
-        help="Skip the buildx+push step and reuse the last pushed dev-<VERSION> tag.",
+        help="Skip the GHCR-tag wait and go straight to deploy. Useful when "
+             "you know the CI publish workflows have already finished.",
+    )
+    parser.add_argument(
+        "--wait-timeout",
+        type=int,
+        default=600,
+        help="Seconds to wait for GHCR tags to appear (default: 600 = 10min).",
     )
     parser.add_argument(
         "--seq-tests",
@@ -581,7 +577,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    preflight(skip_build=args.no_build or args.list)
+    preflight(skip_wait=args.no_wait or args.list)
 
     try:
         return asyncio.run(run(args))
