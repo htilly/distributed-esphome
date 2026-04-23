@@ -328,13 +328,36 @@ def create_bundle(config_dir: str, target: str) -> bytes:
     until the YAML is fixed. Far better than silently shipping the
     full config directory.
 
+    The whole validate + bundle sequence runs under ``_validator_lock``
+    because ``ConfigBundleCreator`` reads ``CORE.config_dir`` /
+    ``CORE.config_path`` and re-parses YAML to discover includes —
+    all of which would race with a concurrent validation on another
+    executor thread. Validating inside the lock and bundling inside
+    the same acquisition is the only way to guarantee the bundler
+    sees the CORE state the validator just set.
+
     Returns raw bytes (caller base64-encodes if needed).
     """
     from esphome.bundle import ConfigBundleCreator  # noqa: PLC0415
+    from esphome.core import CORE  # noqa: PLC0415
+    from esphome.yaml_util import load_yaml  # noqa: PLC0415
+    from esphome.config import validate_config  # noqa: PLC0415
 
     path = Path(config_dir) / target
-    config = _full_validate_config(path)
-    result = ConfigBundleCreator(config).create_bundle()
+    with _validator_lock:
+        CORE.reset()
+        CORE.config_path = path
+        config = load_yaml(path)
+        if not isinstance(config, dict):
+            raise ValueError(f"YAML root of {path.name} is not a mapping")
+        validated = validate_config(config, None, skip_external_update=True)
+        if validated.errors:
+            first = validated.errors[0]
+            msg = getattr(first, "msg", None) or str(first)
+            raise RuntimeError(
+                f"validation errors ({len(validated.errors)} total): {msg}"
+            )
+        result = ConfigBundleCreator(validated).create_bundle()
     logger.info(
         "Bundle for %s: %d files, %d bytes (has_secrets=%s)",
         target, len(result.files), len(result.data),
@@ -716,6 +739,22 @@ def write_device_meta(config_dir: str, target: str, meta: dict) -> None:
         logger.debug("event_bus broadcast failed", exc_info=True)
 
 
+# ESPHome's CORE is a process-global singleton. validate_config()
+# mutates many of its fields (unique_ids, loaded_integrations,
+# component_ids, the pin-schema registry, raw_config, target_platform,
+# ...) and is not thread-safe. The server runs validation in executor
+# threads — from config_scanner (30s rescan), bundle creation on job
+# claim, and the /ui/api/validate endpoint — so two concurrent
+# validations against different targets race on CORE and produce
+# phantom "Duplicate entity" errors for targets that validate cleanly
+# in isolation. Serialize every entry into the ESPHome validator
+# through this lock. The lock is held for the duration of each
+# validation (typically 100-500ms); throughput is not a concern on a
+# home-lab fleet of ~60 targets and serializing is strictly safer than
+# trying to make CORE reentrant.
+_validator_lock = threading.Lock()
+
+
 def _full_validate_config(path: Path) -> dict:
     """Run ESPHome's full validator against the YAML at *path*.
 
@@ -732,36 +771,37 @@ def _full_validate_config(path: Path) -> dict:
     typos elsewhere in the file). Returns the validated config dict on
     success.
 
-    ``CORE.reset()`` is called before every validation. ESPHome's CORE
-    is a process-global singleton that accumulates state across calls —
-    ``unique_ids`` (entity name-uniqueness registry),
-    ``loaded_integrations``, ``component_ids``, the pin-schema registry,
-    etc. Without the reset, validating N targets in a row can produce
-    false "Duplicate <X> entity with name 'Y' found" errors where a
-    later target sees entities registered by an earlier one. ESPHome's
-    own ``esphome compile`` CLI runs one target per process so never
-    hits this — we run many sequentially, so we must mimic the
-    fresh-process contract explicitly.
+    Serialized via ``_validator_lock`` and prefixed with ``CORE.reset()``:
+    ESPHome's CORE is process-global and non-reentrant; without the
+    lock, concurrent executor threads interleave CORE mutations and
+    produce phantom "Duplicate entity" errors on targets that validate
+    cleanly in isolation. Without the reset, even serialized calls leak
+    state (``unique_ids``, ``loaded_integrations``, ``component_ids``,
+    ``PIN_SCHEMA_REGISTRY``) across validations. ESPHome's own
+    ``esphome compile`` CLI runs one target per process so needs
+    neither — we run many sequentially + concurrently, so we must
+    mimic the fresh-process contract explicitly.
     """
     from esphome.core import CORE  # noqa: PLC0415
     from esphome.yaml_util import load_yaml  # noqa: PLC0415
     from esphome.config import validate_config  # noqa: PLC0415
 
-    CORE.reset()
-    CORE.config_path = path
-    config = load_yaml(path)
-    if not isinstance(config, dict):
-        raise ValueError(f"YAML root of {path.name} is not a mapping")
-    # skip_external_update=True reuses any previously-cloned external
-    # component sources; the first validation per external-components
-    # entry still clones. Same caching shape we've always used for
-    # do_packages_pass.
-    result = validate_config(config, None, skip_external_update=True)
-    if result.errors:
-        first = result.errors[0]
-        msg = getattr(first, "msg", None) or str(first)
-        raise RuntimeError(f"validation errors ({len(result.errors)} total): {msg}")
-    return result
+    with _validator_lock:
+        CORE.reset()
+        CORE.config_path = path
+        config = load_yaml(path)
+        if not isinstance(config, dict):
+            raise ValueError(f"YAML root of {path.name} is not a mapping")
+        # skip_external_update=True reuses any previously-cloned external
+        # component sources; the first validation per external-components
+        # entry still clones. Same caching shape we've always used for
+        # do_packages_pass.
+        result = validate_config(config, None, skip_external_update=True)
+        if result.errors:
+            first = result.errors[0]
+            msg = getattr(first, "msg", None) or str(first)
+            raise RuntimeError(f"validation errors ({len(result.errors)} total): {msg}")
+        return result
 
 
 def _resolve_esphome_config(config_dir: str, target: str) -> Optional[dict]:
