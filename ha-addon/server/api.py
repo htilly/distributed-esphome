@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from functools import lru_cache
@@ -361,14 +362,34 @@ async def get_next_job(request: web.Request) -> web.Response:
     if job is None:
         return web.Response(status=204)
 
-    # Generate bundle on demand
+    # Generate bundle on demand. BD — ships only the target's
+    # referenced files (no `.git/`, no cross-device secrets) via
+    # ESPHome's ConfigBundleCreator. Runs off the event loop because
+    # bundling re-parses YAML and runs the full validator — same
+    # rationale as reseed_device_poller_from_config in main.py.
     try:
-        bundle_bytes = create_bundle(cfg.config_dir)
+        loop = asyncio.get_running_loop()
+        bundle_bytes = await loop.run_in_executor(
+            None, create_bundle, cfg.config_dir, job.target,
+        )
         bundle_b64 = base64.b64encode(bundle_bytes).decode("ascii")
-    except Exception:
+    except Exception as exc:
+        # BD.1: bundle creation wraps the full ESPHome validator; most
+        # failures here are real YAML-schema problems the user needs to
+        # fix (e.g. "Duplicate entity", "Only one binary sensor of
+        # type 'motion' allowed"). Surface the error on the job itself
+        # — status FAILED + exception message as the log — so the
+        # Queue-tab row shows the validation message directly. Cancel
+        # would leave the user staring at a greyed-out row with no
+        # explanation.
         logger.exception("Failed to create bundle for job %s", job.id)
-        # Release job back to pending
-        await queue.cancel([job.id])
+        err_msg = (
+            f"Bundle creation failed for {job.target}: "
+            f"{type(exc).__name__}: {exc}\n\n"
+            "ESPHome Fleet validates the target config before dispatching "
+            "it to a worker (BD). Fix the YAML error above and re-queue."
+        )
+        await queue.submit_result(job.id, "failed", log=err_msg)
         return web.json_response({"error": "Bundle creation failed"}, status=500)
 
     registry.set_job(client_id, job.id)

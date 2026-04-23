@@ -20,3 +20,13 @@ SECRETS_YAML = "secrets.yaml"
 # Bump this when a change in the client Dockerfile requires workers to rebuild
 # their image (e.g. adding a new system dep or Python library).
 MIN_IMAGE_VERSION = "7"
+
+# Minimum ESPHome version the server is willing to lazy-install into its
+# per-version venv (BD.2 — WORKITEMS-1.6.2). Landing below this floor is
+# refused with an explicit UI error rather than hanging on "installing…":
+# ``ConfigBundleCreator`` lives in ``esphome.bundle`` (landed ESPHome
+# 2026.4), and ``scanner.create_bundle`` delegates to it with no
+# fallback — older ESPHome versions cannot bundle and therefore cannot
+# dispatch jobs. The same guard applies to per-device ``pin_version``
+# so users can't downgrade past the floor via the Devices-tab pin UI.
+MIN_ESPHOME_VERSION = "2026.4.0"

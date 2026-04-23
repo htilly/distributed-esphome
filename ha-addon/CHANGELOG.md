@@ -9,6 +9,11 @@ A hardening release on top of 1.6.1.
 - Add-on install no longer fails with `Image docker.io/library/docker:<version>-cli does not exist` when Docker Hub is rate-limiting or briefly unreachable. The add-on now ships as a prebuilt multi-architecture image on GitHub Container Registry, so fresh installs pull in seconds instead of building locally through the Docker-in-Docker builder image that was the source of the failure.
 - Direct-port access to the web UI works out of the box again on standalone Docker Compose installs. 1.6 defaulted "Require Home Assistant auth on direct port" to on, which made sense for add-on installs (the Home Assistant tunnel always works) but trapped standalone users at a bare-JSON 401 with no way forward. The default is off for fresh installs now; turn it on in Settings → Authentication if the direct port is reachable from an untrusted network.
 - When direct-port auth is on and a browser lands on `:8765` without a token, you now see a styled Authentication required page that explains both recovery paths (provide a token, or disable the flag via the Home Assistant tunnel), instead of a raw JSON error body.
+- OTA targets honour `wifi.domain` / `ethernet.domain` / `openthread.domain` again. If your devices live on a non-`.local` mDNS domain, the worker now uses the correct `<name><domain>` address ESPHome itself would use — previously the compile succeeded but the OTA step hung at "Error resolving IP address" because the server was handing the worker `<name>.local` regardless of the `domain:` field.
+
+**Smaller changes.**
+
+- Remote workers now receive only the files needed for the target being compiled, not the entire `/config/esphome/` tree. `.git/` (with remote URLs and any push credentials), every other device's YAML, unrelated packages, and any in-place PlatformIO cache no longer ship with the job. `secrets.yaml` is filtered down to just the `!secret` keys the bundled target actually references. Requires ESPHome 2026.4 or newer; pinning a device to an older version is refused with a clear error.
 
 **Under the hood.**
 

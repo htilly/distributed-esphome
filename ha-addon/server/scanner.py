@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import io
 import logging
 import subprocess
 import sys
-import tarfile
 import threading
 from pathlib import Path
 from typing import Optional
 
-from constants import SECRETS_YAML
+from constants import MIN_ESPHOME_VERSION, SECRETS_YAML
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +82,27 @@ def _activate_esphome_venv(venv_path: Path) -> bool:
     return True
 
 
+def _version_tuple(version: str) -> tuple[int, ...]:
+    """Parse a dotted version string into a tuple of ints for ordering.
+
+    Unknown / unparseable suffixes (`.dev0`, `-rc1`) are dropped after the
+    numeric prefix — enough for the ESPHome-floor comparison in BD.2
+    without pulling in ``packaging.version``.
+    """
+    parts: list[int] = []
+    for chunk in version.split("."):
+        n = ""
+        for ch in chunk:
+            if ch.isdigit():
+                n += ch
+            else:
+                break
+        if not n:
+            break
+        parts.append(int(n))
+    return tuple(parts)
+
+
 def ensure_esphome_installed(
     version: str,
     *,
@@ -99,9 +118,28 @@ def ensure_esphome_installed(
 
     Idempotent: a second call for the same version is a fast cache hit
     inside VersionManager and just re-activates the venv on sys.path.
+
+    Refuses to install any ESPHome older than ``MIN_ESPHOME_VERSION``
+    (BD.2 — WORKITEMS-1.6.2). ``scanner.create_bundle`` delegates to
+    ``esphome.bundle.ConfigBundleCreator`` which landed in ESPHome
+    2026.4; older versions would fail on import and leave every job
+    un-dispatchable. Surfacing the refusal here gives the UI a clear
+    banner instead of a cascade of silent bundle failures.
     """
     global _server_esphome_venv, _server_esphome_bin, _esphome_install_failed
     global _esphome_version_cache
+
+    if _version_tuple(version) < _version_tuple(MIN_ESPHOME_VERSION):
+        logger.error(
+            "Refusing to install ESPHome %s: version too old. "
+            "ESPHome Fleet 1.6.2+ requires %s or newer "
+            "(bundle creation uses esphome.bundle, which landed in "
+            "ESPHome 2026.4). Pin a newer version via the UI or the "
+            "HA ESPHome add-on.",
+            version, MIN_ESPHOME_VERSION,
+        )
+        _esphome_install_failed = True
+        return
 
     # VersionManager lives in the bundled client code. In production the
     # Dockerfile copies client/ to /app/client; locally the test harness
@@ -264,29 +302,45 @@ def scan_configs(config_dir: str) -> list[str]:
     return results
 
 
-def create_bundle(config_dir: str) -> bytes:
+def create_bundle(config_dir: str, target: str) -> bytes:
+    """Create a self-contained bundle for *target* under *config_dir*.
+
+    BD — Bundle discipline (WORKITEMS-1.6.2). Delegates to ESPHome's
+    ``ConfigBundleCreator`` (``esphome/bundle.py``, ESPHome 2026.4+)
+    so the bundle walks the target's validated config tree and ships
+    only the files the target actually references — secrets.yaml is
+    filtered to just the keys this target uses, `.git/` and unrelated
+    device YAMLs don't ship by construction, and ``.esphome`` /
+    ``.pioenvs`` / ``.pio`` build caches are ignored.
+
+    Pre-1.6.2 shipped the entire ``/config/esphome/`` tree to every
+    claiming worker (``base.rglob("*")`` with only macOS ``._*`` /
+    ``.DS_Store`` filters), which was a latent secret-exfiltration
+    vector — a worker on a friend's Docker host received every device's
+    Wi-Fi PSK, API noise keys, the fleet's git remote URL, and any
+    in-place ``esphome compile`` PlatformIO cache. Cleaned up here.
+
+    Runs under the full ESPHome validator (same ``_full_validate_config``
+    used by ``_resolve_esphome_config`` for #84). Validation failures
+    are surfaced as exceptions so the caller can fail the job cleanly
+    — this is an intentional behavior change: targets that don't
+    validate under the server's ESPHome version can't be dispatched
+    until the YAML is fixed. Far better than silently shipping the
+    full config directory.
+
+    Returns raw bytes (caller base64-encodes if needed).
     """
-    Create a tar.gz archive of the entire *config_dir* tree, including
-    ``secrets.yaml``.
+    from esphome.bundle import ConfigBundleCreator  # noqa: PLC0415
 
-    Returns raw bytes (the caller is responsible for base64-encoding if needed).
-    """
-    base = Path(config_dir)
-    buf = io.BytesIO()
-
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for path in sorted(base.rglob("*")):
-            if not path.is_file():
-                continue
-            # Skip macOS resource fork files and metadata noise
-            if path.name.startswith("._") or path.name == ".DS_Store":
-                logger.debug("Skipping resource fork file: %s", path)
-                continue
-            arcname = str(path.relative_to(base))
-            tar.add(str(path), arcname=arcname)
-            logger.debug("Added %s to bundle", arcname)
-
-    return buf.getvalue()
+    path = Path(config_dir) / target
+    config = _full_validate_config(path)
+    result = ConfigBundleCreator(config).create_bundle()
+    logger.info(
+        "Bundle for %s: %d files, %d bytes (has_secrets=%s)",
+        target, len(result.files), len(result.data),
+        result.manifest.get("has_secrets"),
+    )
+    return result.data
 
 
 # Cache resolved configs by (target, mtime) to avoid repeated git clones
@@ -677,11 +731,23 @@ def _full_validate_config(path: Path) -> dict:
     hand-rolled waterfall for targets that don't fully validate (e.g.
     typos elsewhere in the file). Returns the validated config dict on
     success.
+
+    ``CORE.reset()`` is called before every validation. ESPHome's CORE
+    is a process-global singleton that accumulates state across calls —
+    ``unique_ids`` (entity name-uniqueness registry),
+    ``loaded_integrations``, ``component_ids``, the pin-schema registry,
+    etc. Without the reset, validating N targets in a row can produce
+    false "Duplicate <X> entity with name 'Y' found" errors where a
+    later target sees entities registered by an earlier one. ESPHome's
+    own ``esphome compile`` CLI runs one target per process so never
+    hits this — we run many sequentially, so we must mimic the
+    fresh-process contract explicitly.
     """
     from esphome.core import CORE  # noqa: PLC0415
     from esphome.yaml_util import load_yaml  # noqa: PLC0415
     from esphome.config import validate_config  # noqa: PLC0415
 
+    CORE.reset()
     CORE.config_path = path
     config = load_yaml(path)
     if not isinstance(config, dict):

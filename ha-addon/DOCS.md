@@ -8,6 +8,8 @@ Start the add-on, then open the web UI via the **ESPHome Fleet** entry in the HA
 
 From 1.6.2, installing this add-on pulls a prebuilt image from GitHub Container Registry instead of building locally on your Home Assistant host. Installs now finish in a few seconds instead of a few minutes, and no longer fail when Docker Hub is rate-limiting or briefly unreachable.
 
+**ESPHome 2026.4 or newer is required.** The add-on uses ESPHome's built-in bundle format to ship only each device's own YAML + referenced secrets to the compiling worker — older ESPHome versions don't have that API. Pinning a device to an ESPHome version older than 2026.4 is refused; the UI will surface a clear "version too old" error rather than hang.
+
 ### First steps
 
 1. Your existing ESPHome configs in `/config/esphome/` are picked up automatically — you should see them on the **Devices** tab.
