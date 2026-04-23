@@ -662,15 +662,63 @@ def write_device_meta(config_dir: str, target: str, meta: dict) -> None:
         logger.debug("event_bus broadcast failed", exc_info=True)
 
 
+def _full_validate_config(path: Path) -> dict:
+    """Run ESPHome's full validator against the YAML at *path*.
+
+    This is the authoritative resolver — it does everything
+    ``esphome compile`` does up to schema validation: packages, substitutions,
+    `!extend`/`!remove`, external components, AND per-component voluptuous
+    schemas. Crucially, component validators inject canonical fields that
+    the substitution-only pass doesn't — most notably
+    ``wifi.use_address = CORE.name + config[CONF_DOMAIN]`` (honors
+    ``wifi.domain`` and static IPs uniformly; bug #84).
+
+    Raises on any validation error so callers can fall back to the
+    hand-rolled waterfall for targets that don't fully validate (e.g.
+    typos elsewhere in the file). Returns the validated config dict on
+    success.
+    """
+    from esphome.core import CORE  # noqa: PLC0415
+    from esphome.yaml_util import load_yaml  # noqa: PLC0415
+    from esphome.config import validate_config  # noqa: PLC0415
+
+    CORE.config_path = path
+    config = load_yaml(path)
+    if not isinstance(config, dict):
+        raise ValueError(f"YAML root of {path.name} is not a mapping")
+    # skip_external_update=True reuses any previously-cloned external
+    # component sources; the first validation per external-components
+    # entry still clones. Same caching shape we've always used for
+    # do_packages_pass.
+    result = validate_config(config, None, skip_external_update=True)
+    if result.errors:
+        first = result.errors[0]
+        msg = getattr(first, "msg", None) or str(first)
+        raise RuntimeError(f"validation errors ({len(result.errors)} total): {msg}")
+    return result
+
+
 def _resolve_esphome_config(config_dir: str, target: str) -> Optional[dict]:
-    """Fully resolve an ESPHome YAML config including packages and substitutions.
+    """Fully resolve an ESPHome YAML config.
 
     Uses ESPHome's own resolution pipeline so that ``packages:``, ``!include``,
-    and ``${substitutions}`` are all handled identically to ``esphome compile``.
+    ``${substitutions}``, and per-component injected fields (e.g.
+    ``wifi.use_address`` populated from ``name + domain``) are all handled
+    identically to ``esphome compile``.
 
-    Results are cached by file mtime — only re-resolved when the file changes.
+    Two-stage strategy (bug #84 + EH.2 in WORKITEMS-1.6.2):
+    1. **Full validation** via ``esphome.config.validate_config`` — gives
+       us ESPHome-native addressing (``wifi.use_address`` domain-aware,
+       static IPs promoted into ``use_address``), plus every field the
+       component schemas compute.
+    2. **Fallback** to the substitution-only pipeline when full validation
+       raises — typos elsewhere in the file (e.g.
+       ``sensor: - platform: dht112``) resolve-but-don't-validate, and
+       we still want metadata for the Devices tab. The fallback matches
+       the legacy behavior exactly.
 
-    Returns the resolved config dict, or None on error.
+    Results are cached by file mtime — only re-resolved when the file
+    changes. Returns the resolved config dict, or None on error.
     """
     try:
         path = Path(config_dir) / target
@@ -699,6 +747,24 @@ def _resolve_esphome_config(config_dir: str, target: str) -> Optional[dict]:
                 )
                 return None
 
+        # Stage 1 — full validation. Catches domain-aware addressing and
+        # every other schema-level field ESPHome injects.
+        try:
+            config = _full_validate_config(path)
+            _config_cache[target] = (mtime, config)
+            return config
+        except Exception as exc:
+            logger.warning(
+                "Full validation of %s failed (%s: %s) — falling back to "
+                "substitution-only pass. UI metadata will still populate "
+                "but domain-aware OTA addressing will not.",
+                target, type(exc).__name__, exc,
+            )
+            logger.debug("Full validation traceback for %s:", target, exc_info=True)
+
+        # Stage 2 — substitution-only fallback (legacy path). Preserves
+        # behavior for configs that don't fully validate so device
+        # discovery still works and the Devices tab keeps rendering.
         from esphome.yaml_util import load_yaml  # noqa: PLC0415
         from esphome.components.substitutions import do_substitution_pass  # noqa: PLC0415
         from esphome.components.packages import do_packages_pass, merge_packages  # noqa: PLC0415
@@ -1021,6 +1087,16 @@ def get_device_address(config: dict, device_name: str) -> tuple[str, str]:
     any later mDNS discovery creates a duplicate row instead of merging into
     the YAML-derived one (bug #179).
 
+    When the input is a fully-validated config (i.e. came from
+    ``_full_validate_config`` — bug #84), ``use_address`` is always
+    populated — ESPHome's wifi/ethernet validators inject it from
+    ``CORE.name + domain`` or promote the static IP. We then derive the
+    source label by comparing ``use_address`` to ``manual_ip.static_ip``:
+    a match means this was really a static-IP config (keep the existing
+    ``_static_ip`` label for UI tooltip continuity); otherwise the
+    validator picked an explicit-or-domain ``use_address`` and we keep
+    the ``_use_address`` label.
+
     Returns ``(address, source)`` where source is one of:
       - ``"wifi_use_address"``, ``"ethernet_use_address"``, ``"openthread_use_address"``
       - ``"wifi_static_ip"``, ``"ethernet_static_ip"``
@@ -1039,12 +1115,33 @@ def get_device_address(config: dict, device_name: str) -> tuple[str, str]:
         if not isinstance(block, dict):
             continue
 
-        # 1. Explicit use_address always wins
+        # 1. use_address — post-validation this is always set; pre-validation
+        #    it's only set when explicitly present in the YAML.
         use_addr = block.get("use_address")
         if use_addr:
+            # The wifi/ethernet/openthread validators inject
+            # `use_address = f"{CORE.name}.local"` when the user supplied
+            # nothing (no domain override, no static IP, no explicit
+            # use_address). That's semantically the mDNS default — keep
+            # the UI tooltip accurate by labeling it as such rather than
+            # misleading the user into thinking they configured a
+            # use_address when they didn't.
+            if str(use_addr) == f"{device_name}.local":
+                return (str(use_addr), "mdns_default")
+
+            # Preserve the `_static_ip` source label when the validator
+            # promoted manual_ip.static_ip into use_address (so the UI
+            # tooltip still reads "wifi static_ip" rather than
+            # "wifi.use_address" for static configs).
+            manual_ip = block.get("manual_ip")
+            if isinstance(manual_ip, dict):
+                static_ip = manual_ip.get("static_ip")
+                if static_ip and str(static_ip) == str(use_addr):
+                    return (str(use_addr), f"{block_name}_static_ip")
             return (str(use_addr), f"{block_name}_use_address")
 
-        # 2. manual_ip.static_ip is the second choice
+        # 2. manual_ip.static_ip is the second choice (pre-validation path;
+        #    post-validation it'd have been promoted into use_address above).
         manual_ip = block.get("manual_ip")
         if isinstance(manual_ip, dict):
             static_ip = manual_ip.get("static_ip")

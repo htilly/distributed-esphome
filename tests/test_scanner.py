@@ -502,6 +502,82 @@ def test_static_ip_fixture_metadata():
 
 
 # ---------------------------------------------------------------------------
+# #84: wifi.domain is honored because we run ESPHome's full validator
+# (which injects `wifi.use_address = CORE.name + config[CONF_DOMAIN]`).
+# Before this fix, the substitution-only pipeline left use_address unset and
+# our waterfall fell through to `{name}.local` regardless of `domain:`.
+# ---------------------------------------------------------------------------
+
+def test_wifi_domain_fixture_resolves_address():
+    """Fixture: tests/fixtures/esphome_configs/wifi_domain.yaml
+
+    Device declares ``wifi.domain: .example.internal`` but no ``use_address``.
+    After full validation, ``wifi.use_address`` is injected as
+    ``wifi-domain-device.example.internal`` — that must propagate to
+    ``address_overrides`` so the worker OTAs to the right host, not
+    ``wifi-domain-device.local``.
+    """
+    _, _, overrides, sources = build_name_to_target_map(
+        str(FIXTURES), ["wifi_domain.yaml"],
+    )
+    assert overrides.get("wifi-domain-device") == "wifi-domain-device.example.internal"
+    # Source is `wifi_use_address` (not `mdns_default` — the pre-fix bug)
+    # because the validator set `use_address`, not `manual_ip.static_ip`.
+    assert sources.get("wifi-domain-device") == "wifi_use_address"
+
+
+def test_static_ip_fixture_keeps_static_ip_source_label():
+    """After full validation, a static-IP config keeps its `_static_ip` source.
+
+    The wifi validator promotes ``manual_ip.static_ip`` into ``use_address``
+    (so ESPHome itself connects to the static IP). Our ``get_device_address``
+    detects that match and keeps the legacy source label so the Devices-tab
+    tooltip still reads "wifi static_ip" rather than "wifi.use_address".
+    Regression guard alongside the #84 fix.
+    """
+    _, _, overrides, sources = build_name_to_target_map(
+        str(FIXTURES), ["static_ip_device.yaml"],
+    )
+    assert overrides.get("static-ip-device") == "192.168.1.99"
+    assert sources.get("static-ip-device") == "wifi_static_ip"
+
+
+def test_get_device_address_validated_use_address_from_static_ip():
+    """Direct unit-level check for the source-label heuristic.
+
+    When both ``use_address`` and ``manual_ip.static_ip`` are present and
+    equal, source is ``_static_ip`` (the pattern ``validate_config``
+    produces when it promotes a static IP). When they differ, source is
+    ``_use_address`` (explicit override or domain-injection).
+    """
+    # validator-produced shape for a static-IP config
+    config = {
+        "wifi": {
+            "use_address": "10.0.0.5",
+            "manual_ip": {"static_ip": "10.0.0.5"},
+        }
+    }
+    assert get_device_address(config, "dev") == ("10.0.0.5", "wifi_static_ip")
+
+    # validator-produced shape for a domain config — use_address is
+    # `{name}{domain}`, manual_ip absent
+    config = {
+        "wifi": {"use_address": "dev.example.com"},
+    }
+    assert get_device_address(config, "dev") == ("dev.example.com", "wifi_use_address")
+
+    # explicit override with unrelated static_ip (edge case but spec-level
+    # correct: explicit use_address wins, source is use_address)
+    config = {
+        "wifi": {
+            "use_address": "10.0.0.99",  # explicit, differs from static
+            "manual_ip": {"static_ip": "10.0.0.5"},
+        }
+    }
+    assert get_device_address(config, "dev") == ("10.0.0.99", "wifi_use_address")
+
+
+# ---------------------------------------------------------------------------
 # Per-device metadata comment block (read_device_meta / write_device_meta)
 # ---------------------------------------------------------------------------
 
