@@ -66,6 +66,7 @@ if [[ "$INSTALL_MODE" != "local" && "$INSTALL_MODE" != "ghcr" ]]; then
 fi
 
 if [[ -z "$PVE_NODE" ]]; then
+  # Use a plain ssh here — SSH_OPTS is set up below, after argument validation.
   PVE_NODE=$(ssh "$PVE_HOST" "pvesh get /nodes --output-format json" \
     | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['node'])" 2>/dev/null) \
     || { echo "Couldn't auto-detect PVE_NODE; set PVE_NODE explicitly" >&2; exit 3; }
@@ -78,7 +79,29 @@ GUEST_TARGET="/mnt/data/supervisor/addons/local/${ADDON_SLUG}"
 [[ -d "$ADDON_DIR" ]] || { echo "Add-on source dir $ADDON_DIR not found (REPO_ROOT=$REPO_ROOT)" >&2; exit 1; }
 command -v python3 >/dev/null || { echo "python3 required locally (for parsing pvesh JSON)" >&2; exit 2; }
 
+# SSH connection multiplexing. An install run fires 15+ ssh/scp invocations
+# (one per ha_cli call + scp + chunk push + guest_exec pairs). When ssh-agent
+# offers many identities, sshd's MaxAuthTries trips partway through and the
+# rest of the run fails with "Too many authentication failures". The
+# ControlMaster below opens one TCP+auth session up front; every subsequent
+# ssh/scp reuses it with no reauth. ControlPersist keeps it warm across
+# helper functions; the EXIT trap tears it down cleanly so we don't leak
+# sockets in $TMPDIR.
+SSH_CTRL="$(mktemp -u -t pve-ssh.XXXXXX)"
+SSH_OPTS=(-o ControlMaster=auto -o ControlPath="$SSH_CTRL" -o ControlPersist=60s)
+cleanup_ssh() {
+  ssh "${SSH_OPTS[@]}" -O exit "$PVE_HOST" 2>/dev/null || true
+  rm -f "$SSH_CTRL"
+}
+trap cleanup_ssh EXIT
+
+pve_ssh() { ssh "${SSH_OPTS[@]}" "$@"; }
+pve_scp() { scp "${SSH_OPTS[@]}" "$@"; }
+
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
+
+# Prime the multiplexed connection so later calls don't race on master setup.
+pve_ssh "$PVE_HOST" true
 
 # Run a shell command inside the HAOS guest via qemu-guest-agent and wait
 # for completion. Prints guest stdout on 1, guest stderr on 2; returns the
@@ -90,11 +113,11 @@ guest_exec() {
 
   # Upload the script text to a temp file on pve.
   local remote_script
-  remote_script=$(ssh "$PVE_HOST" mktemp -t guest_exec.XXXXXX)
-  printf '%s' "$script" | ssh "$PVE_HOST" "cat > $remote_script"
+  remote_script=$(pve_ssh "$PVE_HOST" mktemp -t guest_exec.XXXXXX)
+  printf '%s' "$script" | pve_ssh "$PVE_HOST" "cat > $remote_script"
 
   # Orchestrator runs on pve: reads the script, fires guest-exec, polls.
-  ssh "$PVE_HOST" "PVE_NODE=$PVE_NODE VMID=$VMID TIMEOUT_S=$timeout_s SCRIPT_FILE=$remote_script bash -s" <<'REMOTE'
+  pve_ssh "$PVE_HOST" "PVE_NODE=$PVE_NODE VMID=$VMID TIMEOUT_S=$timeout_s SCRIPT_FILE=$remote_script bash -s" <<'REMOTE'
 set -euo pipefail
 TMPJSON=$(mktemp)
 trap 'rm -f "$TMPJSON" "$SCRIPT_FILE"' EXIT
@@ -154,11 +177,16 @@ log "Tarball size: $(du -h "$TARBALL" | awk '{print $1}')"
 
 log "Copying tarball to $PVE_HOST"
 REMOTE_STAGE="/tmp/distributed_esphome_addon-$$.tar"
-scp -q "$TARBALL" "$PVE_HOST:$REMOTE_STAGE"
+pve_scp -q "$TARBALL" "$PVE_HOST:$REMOTE_STAGE"
 
 CHUNK_PREFIX="deaddon"
+log "Clearing any stale chunks on the guest from a previous run"
+# If the previous tar had more chunks than the new one, stale tail chunks
+# would concatenate onto the new tar and corrupt it. Wipe first.
+guest_exec "rm -f /tmp/${CHUNK_PREFIX}.*" 30 >/dev/null
+
 log "Pushing tarball to VM $VMID via qga file-write (chunked)"
-ssh "$PVE_HOST" bash -s "$PVE_NODE" "$VMID" "$REMOTE_STAGE" "$CHUNK_PREFIX" <<'REMOTE'
+pve_ssh "$PVE_HOST" bash -s "$PVE_NODE" "$VMID" "$REMOTE_STAGE" "$CHUNK_PREFIX" <<'REMOTE'
 set -euo pipefail
 PVE_NODE="$1"
 VMID="$2"
@@ -242,7 +270,9 @@ if [[ "$SKIP_HA_RESTART" == "1" ]]; then
   log "SKIP_HA_RESTART=1 — add-on running, but HA Core NOT restarted"
 else
   log "Restarting HA Core (~30s before it's responsive again)"
-  ha_cli "core restart" 120 >/dev/null
+  # ha_cli takes a single positional and reads timeout from HA_CLI_TIMEOUT.
+  # Passing `120` as $2 would concat onto the command line; use the env var.
+  HA_CLI_TIMEOUT=120 ha_cli "core restart" >/dev/null
 fi
 
 # --- 6. Report --------------------------------------------------------------

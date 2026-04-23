@@ -87,16 +87,25 @@ HAOS_HA_TOKEN=$(cat "$HAOS_TOKEN_FILE")
 # server inside HAOS).
 echo ""
 echo "==> Fetching add-on token from VM ..."
+# See install-addon.sh for why ControlMaster is mandatory: a single
+# `ssh` invocation with many agent-loaded identities burns through sshd's
+# MaxAuthTries / fail2ban budget in seconds. One auth up front, all
+# subsequent ops multiplex over the same socket.
+SSH_CTRL="$(mktemp -u -t pve-ssh.XXXXXX)"
+SSH_OPTS=(-o ControlMaster=auto -o ControlPath="$SSH_CTRL" -o ControlPersist=60s)
+trap 'ssh "${SSH_OPTS[@]}" -O exit "$PVE_HOST" 2>/dev/null || true; rm -f "$SSH_CTRL"' EXIT
+pve_ssh() { ssh "${SSH_OPTS[@]}" "$@"; }
+
 PVE_NODE="${PVE_NODE:-}"
 if [[ -z "$PVE_NODE" ]]; then
-  PVE_NODE=$(ssh "$PVE_HOST" "pvesh get /nodes --output-format json" \
+  PVE_NODE=$(pve_ssh "$PVE_HOST" "pvesh get /nodes --output-format json" \
     | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['node'])" 2>/dev/null) \
     || { echo "Couldn't auto-detect PVE_NODE; set PVE_NODE explicitly" >&2; exit 3; }
 fi
 
 # Run a one-shot guest-exec; block up to 30s for the container to be ready.
 guest_read_settings() {
-  ssh "$PVE_HOST" "PVE_NODE=$PVE_NODE VMID=$VMID bash -s" <<'REMOTE'
+  pve_ssh "$PVE_HOST" "PVE_NODE=$PVE_NODE VMID=$VMID bash -s" <<'REMOTE'
 set -euo pipefail
 TMPJSON=$(mktemp); trap 'rm -f "$TMPJSON"' EXIT
 pvesh create "/nodes/$PVE_NODE/qemu/$VMID/agent/exec" \
