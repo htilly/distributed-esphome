@@ -67,6 +67,22 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 1.5. Seed a minimal ESPHome fixture fleet so the e2e-hass-4 Playwright
+#      suite has targets to compile against. HT.13a. Files pulled live
+#      from FLEET_SOURCE_HOST (default hass-4) — the single source of truth
+#      for our dev fleet.
+# ---------------------------------------------------------------------------
+if [[ "${SKIP_SEED:-0}" != "1" ]]; then
+  echo ""
+  echo "==> Seeding fixture fleet from ${FLEET_SOURCE_HOST:-hass-4} ..."
+  PVE_HOST="$PVE_HOST" VMID="$VMID" \
+    FLEET_SOURCE_HOST="${FLEET_SOURCE_HOST:-hass-4}" \
+    "$REPO_ROOT/scripts/haos/seed-fleet.sh"
+else
+  echo "==> SKIP_SEED=1 — skipping fleet seed"
+fi
+
+# ---------------------------------------------------------------------------
 # 2. Read the add-on's auth token from the VM for the HTTP smoke suite.
 #    Same `/data/settings.json` lookup as push-to-hass-4.sh; falls back to
 #    Supervisor API / filesystem scan for pre-1.6 installs.
@@ -178,5 +194,11 @@ fi
 
 echo ""
 echo "==> Running e2e-hass-4 smoke suite against HAOS VM ..."
+# HASS4_TARGET defaults to cyd-world-clock.yaml — the "other CYD" (seeded by
+# scripts/haos/seed-fleet.sh). cyd-office-info stays reserved for hass-4's
+# own smoke so the two runs don't collide on the same physical device.
 cd "$REPO_ROOT/ha-addon/ui"
-HASS4_URL="$HAOS_ADDON_URL" HASS4_ADDON_TOKEN="$HAOS_ADDON_TOKEN" npm run test:e2e:hass-4
+HASS4_URL="$HAOS_ADDON_URL" \
+HASS4_ADDON_TOKEN="$HAOS_ADDON_TOKEN" \
+HASS4_TARGET="${HASS4_TARGET:-cyd-world-clock.yaml}" \
+  npm run test:e2e:hass-4
