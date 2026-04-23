@@ -64,6 +64,67 @@ def test_scan_nonexistent_dir():
     assert targets == []
 
 
+def test_scan_missing_dir_logs_info_once(tmp_path, caplog):
+    """Bug #86: a missing config dir is a config state (no ESPHome
+    builder add-on, or user hasn't created the dir yet), not a crash
+    condition. Log it once at INFO, then DEBUG on every subsequent
+    scan so the log doesn't flood every poll tick.
+    """
+    import logging
+    import scanner as scanner_module
+
+    missing = tmp_path / "does_not_exist"
+    scanner_module._missing_config_dirs_logged.discard(str(missing))
+
+    try:
+        with caplog.at_level(logging.DEBUG, logger="scanner"):
+            scan_configs(str(missing))
+            scan_configs(str(missing))
+            scan_configs(str(missing))
+
+        info_lines = [r for r in caplog.records if r.levelno == logging.INFO and "does not exist yet" in r.message]
+        debug_lines = [r for r in caplog.records if r.levelno == logging.DEBUG and "still missing" in r.message]
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "does not exist or is not a directory" in r.message]
+
+        # Exactly one INFO line total, regardless of how many scans.
+        assert len(info_lines) == 1, f"Expected 1 INFO line, got {len(info_lines)}"
+        # Subsequent scans log DEBUG.
+        assert len(debug_lines) == 2, f"Expected 2 DEBUG lines, got {len(debug_lines)}"
+        # No WARNING — the old flood-prone log level is gone.
+        assert warnings == []
+    finally:
+        scanner_module._missing_config_dirs_logged.discard(str(missing))
+
+
+def test_scan_resurfaced_dir_resets_suppression(tmp_path, caplog):
+    """When the missing dir reappears, log an INFO that scans have
+    resumed — and if it disappears again later, the 'missing' INFO
+    should fire again (suppression state must reset).
+    """
+    import logging
+    import scanner as scanner_module
+
+    d = tmp_path / "esphome"
+    scanner_module._missing_config_dirs_logged.discard(str(d))
+
+    try:
+        with caplog.at_level(logging.INFO, logger="scanner"):
+            scan_configs(str(d))  # missing → INFO
+            d.mkdir()
+            scan_configs(str(d))  # present → INFO "resuming"
+            import shutil
+            shutil.rmtree(d)
+            scan_configs(str(d))  # missing again → INFO
+
+        messages = [r.message for r in caplog.records if r.name == "scanner"]
+        missing_count = sum(1 for m in messages if "does not exist yet" in m)
+        resumed_count = sum(1 for m in messages if "now available" in m)
+        assert missing_count == 2
+        assert resumed_count == 1
+    finally:
+        scanner_module._missing_config_dirs_logged.discard(str(d))
+
+
 def test_scan_returns_sorted_list():
     targets = scan_configs(str(FIXTURES))
     assert targets == sorted(targets)

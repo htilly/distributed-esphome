@@ -279,16 +279,41 @@ def _get_installed_esphome_version() -> str:
         return "unknown"
 
 
+_missing_config_dirs_logged: set[str] = set()
+
+
 def scan_configs(config_dir: str) -> list[str]:
     """
     Scan *config_dir* for top-level ESPHome YAML config files.
 
     Returns a list of filenames (not full paths), excluding ``secrets.yaml``.
+
+    Bug #86: on installs without the HA ESPHome builder add-on,
+    ``/config/esphome`` doesn't exist. That's not an error — it's a
+    configuration state the user can resolve by installing the builder
+    or creating the directory. Log it once at INFO with a hint, then
+    DEBUG on every subsequent scan so the log doesn't flood. When the
+    directory appears, drop the "missing" marker so a future removal is
+    surfaced again.
     """
     base = Path(config_dir)
     if not base.is_dir():
-        logger.warning("Config dir %s does not exist or is not a directory", config_dir)
+        if config_dir not in _missing_config_dirs_logged:
+            logger.info(
+                "Config dir %s does not exist yet — create it or install the "
+                "Home Assistant ESPHome builder add-on. No targets will be "
+                "scanned until then. (#86)", config_dir,
+            )
+            _missing_config_dirs_logged.add(config_dir)
+        else:
+            logger.debug(
+                "Config dir %s still missing — skipping scan", config_dir,
+            )
         return []
+
+    if config_dir in _missing_config_dirs_logged:
+        logger.info("Config dir %s is now available; resuming scans", config_dir)
+        _missing_config_dirs_logged.discard(config_dir)
 
     results: list[str] = []
     for p in sorted(base.glob("*.yaml")):

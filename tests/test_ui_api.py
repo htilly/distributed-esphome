@@ -1444,3 +1444,60 @@ async def test_editor_save_skips_commit_when_toggle_off(tmp_path, _settings_init
     finally:
         gv._reset_for_tests()
         await ta.close()
+
+
+# ---------------------------------------------------------------------------
+# POST /ui/api/esphome-version — bug #105
+# ---------------------------------------------------------------------------
+
+async def test_set_esphome_version_schedules_install(tmp_path):
+    """Picking a version in the UI must schedule the install, not just
+    record the selection. Previously this handler only updated the
+    in-memory selected version; on a fresh HAOS box with no bundled
+    ESPHome the user had no way to unblock the "Installing ESPHome…"
+    banner (bug #105)."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        scheduled: list[str] = []
+
+        def fake_ensure(ver: str) -> None:
+            scheduled.append(ver)
+
+        import scanner as scanner_module
+        with (
+            patch.object(scanner_module, "ensure_esphome_installed", fake_ensure),
+            patch.object(scanner_module, "set_esphome_version", lambda v: None),
+        ):
+            resp = await ta.post(
+                "/ui/api/esphome-version",
+                json={"version": "2026.3.3"},
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert body == {"ok": True, "version": "2026.3.3"}
+
+        # Give the executor a tick to run.
+        import asyncio
+        for _ in range(50):
+            if scheduled:
+                break
+            await asyncio.sleep(0.01)
+
+        assert scheduled == ["2026.3.3"], (
+            "POST /ui/api/esphome-version did not schedule ensure_esphome_installed — "
+            "this is the #105 UI-recovery path"
+        )
+    finally:
+        await ta.close()
+
+
+async def test_set_esphome_version_rejects_missing_version(tmp_path):
+    """Empty body or missing version returns 400."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        resp = await ta.post("/ui/api/esphome-version", json={})
+        assert resp.status == 400
+        resp = await ta.post("/ui/api/esphome-version", json={"version": ""})
+        assert resp.status == 400
+    finally:
+        await ta.close()

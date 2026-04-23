@@ -1456,7 +1456,17 @@ async def set_esphome_version_handler(request: web.Request) -> web.Response:
     """Set the active ESPHome version for new compile jobs.
 
     Body: { "version": "2026.3.1" }
+
+    Bug #105: also schedules `ensure_esphome_installed` so the version
+    picker is a recovery path for a stuck install. Previously this
+    handler updated the selected version without scheduling the install,
+    which meant a user on a fresh HAOS box with no bundled ESPHome and
+    no builder add-on had no way to unblock the "Installing ESPHome…"
+    banner from the UI.
     """
+    import asyncio as _asyncio  # noqa: PLC0415
+    import scanner as _scanner  # noqa: PLC0415
+
     try:
         body = await request.json()
     except Exception:
@@ -1467,7 +1477,12 @@ async def set_esphome_version_handler(request: web.Request) -> web.Response:
         return web.json_response({"error": "version is required"}, status=400)
 
     set_esphome_version(version)
-    logger.info("ESPHome version changed to %s via UI", version)
+    _scanner._esphome_install_failed = False
+    _scanner._esphome_ready.clear()
+
+    loop = _asyncio.get_running_loop()
+    loop.run_in_executor(None, _scanner.ensure_esphome_installed, version)
+    logger.info("ESPHome version changed to %s via UI; install scheduled", version)
     return web.json_response({"ok": True, "version": version})
 
 

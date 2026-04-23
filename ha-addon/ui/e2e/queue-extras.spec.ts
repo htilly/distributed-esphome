@@ -62,3 +62,35 @@ test('Clear Succeeded sends the success-only state filter', async ({ page }) => 
   await expect.poll(() => states).toEqual(['success']);
   expect(states).not.toContain('cancelled');
 });
+
+// Bug #85: "Clear Selected" menu entry in the Clear dropdown removes
+// whatever rows the user has checked, via POST /ui/api/queue/remove.
+test('Clear Selected sends the selected row ids to /queue/remove', async ({ page }) => {
+  let removedIds: string[] = [];
+  await page.route('**/ui/api/queue/remove', async route => {
+    try {
+      const body = JSON.parse(route.request().postData() ?? '{}');
+      removedIds = body.ids ?? [];
+    } catch { /* ignore */ }
+    route.fulfill({ json: { removed: removedIds.length } });
+  });
+
+  // Open the Clear dropdown with no selection → "Clear Selected" is disabled.
+  await page.locator('#tab-queue .actions').getByRole('button', { name: /Clear/i }).click();
+  const clearSelected = page.getByRole('menuitem', { name: /Clear Selected/i });
+  await expect(clearSelected).toBeVisible();
+  await expect(clearSelected).toHaveAttribute('aria-disabled', 'true');
+  // Close the dropdown.
+  await page.keyboard.press('Escape');
+
+  // Select the first two rows via their checkboxes.
+  const checkboxes = page.locator('#tab-queue tbody tr input[type="checkbox"]');
+  await checkboxes.nth(0).check();
+  await checkboxes.nth(1).check();
+
+  // Re-open the Clear dropdown and invoke Clear Selected.
+  await page.locator('#tab-queue .actions').getByRole('button', { name: /Clear/i }).click();
+  await page.getByRole('menuitem', { name: /Clear Selected/i }).click();
+
+  await expect.poll(() => removedIds.length).toBe(2);
+});

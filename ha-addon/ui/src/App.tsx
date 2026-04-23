@@ -478,6 +478,9 @@ export default function App() {
   async function handleClearJobs(ids: string[]) {
     try {
       await removeJobs(ids);
+      if (ids.length > 1) {
+        addToast(`Cleared ${ids.length} jobs`, 'success');
+      }
       mutateQueue();
     } catch {
       addToast('Clear failed', 'error');
