@@ -55,16 +55,18 @@ profile esphome_dist_server flags=(attach_disconnected,mediate_deleted) {
   # - read or write arbitrary processes' memory via `/proc/<pid>/mem`;
   # - tamper with kernel sysctls via /proc/sys writes.
   #
-  # ``ptrace`` is scoped: allowed only between processes already inside
-  # this profile (server + local worker + pip/esphome subprocesses), so
-  # ``py-spy dump --pid 1`` works for on-demand thread dumps during
-  # triage (#108). Cross-profile ptrace — escaping this container to
-  # inspect another add-on or Supervisor — remains denied by the
-  # implicit default once the unqualified ``ptrace,`` above is absent.
+  # ``ptrace,`` is also scoped — without this carve-out, the
+  # unqualified ``ptrace,`` above would allow arbitrary process
+  # tracing across the add-on's container namespace. We don't need
+  # ptrace in normal operation; deny it outright so an attacker
+  # can't use it to jump between compile subprocesses. (#108's
+  # ``py-spy`` works via ``scripts/threaddump-addon.sh`` — a sidecar
+  # container with its own cap-add + apparmor=unconfined — so the
+  # add-on image itself doesn't need the privilege.)
   deny /etc/shadow* rw,
   deny /etc/gshadow* rw,
   deny /run/secrets/** rw,
   deny /proc/*/mem rw,
   deny /proc/sys/kernel/** w,
-  ptrace peer=esphome_dist_server,
+  deny ptrace,
 }
