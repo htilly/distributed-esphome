@@ -79,6 +79,18 @@ BOLD = "\033[1m"
 DIM = "\033[2m"
 
 
+def _read_text(p: Path) -> str:
+    """Read ``p`` stripped, or empty string if missing/unreadable. Used
+    to pull per-target HA long-lived tokens out of
+    ``~/.config/distributed-esphome/*-ha-token`` so ``@requires-ha``
+    Playwright specs can run without needing the user to export
+    ``HASS_TOKEN`` every shell."""
+    try:
+        return p.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def color(name: str, text: str) -> str:
     if not sys.stdout.isatty():
         return text
@@ -227,7 +239,17 @@ def make_targets(version: str) -> dict[str, Target]:
             token_cache=home / ".config" / "distributed-esphome" / "hass4-token",
             playwright_env={
                 "HASS_URL": "http://hass-4.local:8123",
-                "HASS_TOKEN": os.environ.get("HASS_TOKEN", ""),
+                # HA long-lived token for the /api/services calls in
+                # ha-services.spec.ts. Prefer an on-disk token (created
+                # once in HA Profile → Security → Long-Lived Access
+                # Tokens, saved to ~/.config/distributed-esphome/
+                # hass4-ha-token) so the full @requires-ha set runs.
+                # Falls back to $HASS_TOKEN from the shell, else empty
+                # → ha-services.spec.ts self-skips with a clear
+                # remediation message.
+                "HASS_TOKEN": _read_text(
+                    home / ".config" / "distributed-esphome" / "hass4-ha-token"
+                ) or os.environ.get("HASS_TOKEN", ""),
                 "FLEET_TARGET": "cyd-office-info.yaml",
             },
         ),
@@ -239,13 +261,19 @@ def make_targets(version: str) -> dict[str, Target]:
             deploy_env={"HAOS_URL": "http://192.168.226.135:8123"},
             token_cache=home / ".config" / "distributed-esphome" / "haos-addon-token",
             playwright_env={
-                # The throwaway VM doesn't have the esphome_fleet HA service
-                # set up, so @requires-ha specs would skip themselves on the
-                # HASS_TOKEN guard anyway. Filter them out explicitly so the
-                # summary row shows pass/5 not pass/6-with-skip.
+                # HA long-lived token (already exists on disk; used by
+                # push-to-haos.sh for its own install calls). Passed
+                # through so @requires-ha specs — including ha-services
+                # and direct-port-auth — run end-to-end against the
+                # throwaway VM's HA. The integration installer runs at
+                # add-on boot, so the ``esphome_fleet`` service IS
+                # registered by the time Playwright hits HA.
+                "HASS_URL": "http://192.168.226.135:8123",
+                "HASS_TOKEN": _read_text(
+                    home / ".config" / "distributed-esphome" / "haos-token"
+                ) or os.environ.get("HASS_TOKEN", ""),
                 "FLEET_TARGET": "cyd-world-clock.yaml",
             },
-            playwright_args=["--grep-invert=@requires-ha"],
         ),
         "standalone-pve": Target(
             name="standalone-pve",
