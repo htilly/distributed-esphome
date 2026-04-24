@@ -433,8 +433,15 @@ def create_bundle(config_dir: str, target: str) -> bytes:
     if not path.is_file():
         raise FileNotFoundError(f"Target not found: {path}")
 
+    # PY-2: log the command line before the subprocess runs so a failure
+    # triage has the actual invocation visible in the add-on log (the
+    # `-c <inline-script>` shape means argv in any crash message shows
+    # up as `-c`, not a readable path — the readable info is this line).
+    cmd = [_venv_python(), "-c", _BUNDLE_SUBPROCESS_SCRIPT, str(path)]
+    logger.debug("Running bundle subprocess: %s %s -c <script> %s",
+                 cmd[0], cmd[1], cmd[3])
     proc = subprocess.run(
-        [_venv_python(), "-c", _BUNDLE_SUBPROCESS_SCRIPT, str(path)],
+        cmd,
         capture_output=True,
         check=False,
         timeout=120,  # validation+bundle is fast; 2 min is paranoid

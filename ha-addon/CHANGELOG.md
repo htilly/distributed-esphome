@@ -22,15 +22,16 @@ A hardening release on top of 1.6.1.
 - Startup logs no longer flood with a `WARNING` line every scan cycle when `/config/esphome/` doesn't exist. A single informational line now explains what the state means (install the Home Assistant ESPHome builder add-on, or create the directory yourself).
 - **Add Device** now works on a truly-empty first install, even when `/config/esphome/` doesn't exist yet (i.e. you installed Fleet without ever installing the Home Assistant ESPHome builder add-on). The directory is created the moment you create your first device instead of failing with a `No such file or directory` error.
 - The **Connect Worker** modal's **Bash** and **PowerShell** snippets now include `--network host`, matching the **Docker Compose** snippet that already had `network_mode: host`. Without it, a worker started from the copy-pasted command landed on Docker's default bridge network and could not reach ESP devices on the host's LAN, so every OTA failed.
+- Fixes a hang where the add-on pegged at 100 % CPU and the UI stopped responding on fleets with large `/config/esphome/` trees (many top-level YAMLs plus a `common/` package tree and/or external-components directory). Root cause was the per-job config bundling synchronously tar+gzipping the whole directory on the event loop for every claimed job — now bundles are built off-thread and scoped to just the files the target being compiled references (see **Remote workers stop shipping the whole config directory** above).
+- Reconfigure and Reauth flows no longer crash with `TypeError: object dict can't be used in 'await' expression` on Home Assistant 2024.11 and newer — the handler was incorrectly awaiting a synchronous helper. Was a shipped regression in 1.6.1; every Reconfigure click logged the traceback.
 
 **Smaller changes.**
 
 - New **Request diagnostics** action. Click it in the Workers tab's per-worker Actions menu (online workers only) to pull a live Python thread dump from any remote worker, or in Settings → Advanced → Diagnostics to capture one from the add-on's own server process. The dump downloads as a timestamped `.txt` file you can attach to a bug report. Useful when a compile hangs or a worker pegs at 100 % CPU — the dump shows exactly which line each thread is sitting on. Works on every install variant out of the box — Home Assistant add-on, HAOS, Supervised, and standalone Docker — with no special container capabilities or shell access required on your part.
-- Remote workers now receive only the files needed for the target being compiled, not the entire `/config/esphome/` tree. `.git/` (with remote URLs and any push credentials), every other device's YAML, unrelated packages, and any in-place PlatformIO cache no longer ship with the job. `secrets.yaml` is filtered down to just the `!secret` keys the bundled target actually references. Requires ESPHome 2026.4 or newer; pinning a device to an older version is refused with a clear error.
 
 **Under the hood.**
 
-- Integration config-flow hardening: the Reconfigure and Reauth flows have gained end-to-end tests against a real Home Assistant fixture. The new tests caught a latent bug where a successful reconfigure would raise `TypeError: object dict can't be used in 'await' expression` on Home Assistant 2024.11+, now fixed.
+- Integration config-flow hardening: the Reconfigure and Reauth flows have gained end-to-end tests against a real Home Assistant fixture. The same test pass is what caught the Reconfigure `TypeError` in 1.6.1 covered under Bug fixes above.
 
 ## 1.6.1
 
