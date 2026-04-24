@@ -47,6 +47,7 @@ refresh() {
         docker run -d \\
             --name "\$CONTAINER" \\
             --restart unless-stopped \\
+            --network host \\
             --hostname "\$HOSTNAME_VAL" \\
             -e SERVER_URL="\$SERVER_URL" \\
             -e SERVER_TOKEN="\$SERVER_TOKEN" \\

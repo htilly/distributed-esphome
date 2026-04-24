@@ -10,9 +10,12 @@ push-to-hass-4.sh around as a fast-path single-target loop for UI-only
 iteration (no GHCR round-trip).
 
 Targets (see dev-plans/HOME-LAB.md):
-  hass-4          always-on HAOS box at 192.168.225.112
-  haos-pve        throwaway HAOS VM on the `pve` Proxmox host
-  standalone-pve  plain Docker host `docker-pve` running docker-compose
+  hass-4               always-on HAOS box at 192.168.225.112
+  haos-pve             throwaway HAOS VM on the `pve` Proxmox host
+  standalone-pve       plain Docker host `docker-pve` running docker-compose
+  standalone-optiplex  plain Docker host `docker-optiplex-5` (second
+                       standalone — keeps the secondary homelab worker
+                       from freezing on a stale `:develop` digest)
 
 Image flow: GitHub Actions (publish-addon.yml / publish-server.yml /
 publish-client.yml) already builds and pushes the three GHCR images on
@@ -44,6 +47,8 @@ import shutil
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -66,10 +71,13 @@ IMG_CLIENT = f"ghcr.io/{GHCR_OWNER}/esphome-dist-client"
 # ANSI colors for per-target prefixes. Falls back to plain text when stdout
 # isn't a TTY (pipes, CI logs). 38;5;N = 256-color.
 COLORS = {
-    "hass-4":         "\033[38;5;42m",   # green
-    "haos-pve":       "\033[38;5;39m",   # blue
-    "standalone-pve": "\033[38;5;170m",  # magenta
-    "build":          "\033[38;5;214m",  # orange
+    "hass-4":              "\033[38;5;42m",   # green
+    "haos-pve":            "\033[38;5;39m",   # blue
+    "standalone-pve":      "\033[38;5;170m",  # magenta
+    "standalone-optiplex": "\033[38;5;141m",  # purple — close to magenta so
+                                              # the eye groups the two
+                                              # standalone targets together
+    "build":               "\033[38;5;214m",  # orange
 }
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -140,6 +148,7 @@ def _clear_state_dir() -> None:
     for d in LOG_ROOT.iterdir():
         if d.is_dir():
             (d / "state.json").unlink(missing_ok=True)
+            (d / "version.json").unlink(missing_ok=True)
 
 
 # Images the matrix waits for. All three are published by the CI
@@ -237,6 +246,37 @@ def make_targets(version: str) -> dict[str, Target]:
             deploy_cmd=["bash", "scripts/standalone/deploy.sh"],
             deploy_env={"TAG": tag, "STANDALONE_HOST": "docker-pve"},
             token_cache=home / ".config" / "distributed-esphome" / "standalone-token",
+            playwright_env={
+                "FLEET_TARGET": "cyd-world-clock.yaml",
+            },
+            playwright_args=["--grep-invert=@requires-ha"],
+        ),
+        # Second standalone host, same install path as standalone-pve.
+        # Not a coverage win — this is the *same* docker-compose flow —
+        # but without a regular deploy the box drifts: docker-compose
+        # pulls a floating ``:develop`` tag at first bring-up and then
+        # freezes the container on that image digest forever. 1.6.2 hit
+        # this: docker-optiplex-5's worker stayed on dev.19 for 11 hours
+        # of turns while every other target ran current code. Parallel
+        # slot, so adding this costs ~0 wall-clock.
+        "standalone-optiplex": Target(
+            name="standalone-optiplex",
+            # IP, not the ``docker-optiplex-5`` ssh alias — Playwright's
+            # Node client doesn't read ~/.ssh/config. See the same
+            # comment on standalone-pve's base_url.
+            base_url="http://192.168.225.193:8765",
+            deploy_cmd=["bash", "scripts/standalone/deploy.sh"],
+            # ``STANDALONE_TOKEN_FILE`` must differ from standalone-pve's
+            # or the two parallel deploys race on the same cache file
+            # and the second-to-finish overwrites the first's token.
+            deploy_env={
+                "TAG": tag,
+                "STANDALONE_HOST": "docker-optiplex-5",
+                "STANDALONE_TOKEN_FILE": str(
+                    home / ".config" / "distributed-esphome" / "standalone-optiplex-token"
+                ),
+            },
+            token_cache=home / ".config" / "distributed-esphome" / "standalone-optiplex-token",
             playwright_env={
                 "FLEET_TARGET": "cyd-world-clock.yaml",
             },
@@ -522,6 +562,54 @@ async def wait_for_ghcr_tags(version: str, timeout_s: int = 600) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Background: poll each target's /ui/api/server-info for the currently
+# running addon_version. Written to <target>/version.json; the --web UI
+# merges it into the target row so you can watch the version roll over
+# mid-deploy. Uses the per-target token_cache (same file Playwright
+# reads) — on hit-direct-port requests the ha_auth_middleware still
+# enforces Bearer, so there's no "unauth" path here.
+# ---------------------------------------------------------------------------
+
+VERSION_POLL_INTERVAL_S = 5.0
+VERSION_POLL_TIMEOUT_S = 3.0
+
+
+def _fetch_addon_version(base_url: str, token: str) -> str | None:
+    """Blocking /ui/api/server-info fetch. Returns addon_version or None."""
+    req = urllib.request.Request(f"{base_url}/ui/api/server-info")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=VERSION_POLL_TIMEOUT_S) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return None
+    v = data.get("addon_version") if isinstance(data, dict) else None
+    return v if isinstance(v, str) and v else None
+
+
+async def poll_target_version(target: Target) -> None:
+    """Forever-loop background poller. Cancelled by the caller at teardown."""
+    vf = LOG_ROOT / target.name / "version.json"
+    vf.parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        token = ""
+        if target.token_cache.exists():
+            try:
+                token = target.token_cache.read_text().strip()
+            except OSError:
+                pass
+        version = await asyncio.to_thread(
+            _fetch_addon_version, target.base_url, token,
+        )
+        _write_state(vf, {
+            "current_version": version,
+            "checked_at": time.time(),
+        })
+        await asyncio.sleep(VERSION_POLL_INTERVAL_S)
+
+
+# ---------------------------------------------------------------------------
 # Step 2: per-target chain — deploy → read token → playwright.
 # ---------------------------------------------------------------------------
 
@@ -736,9 +824,18 @@ def _read_target_states() -> list[dict[str, Any]]:
         if not sf.exists():
             continue
         try:
-            states.append(json.loads(sf.read_text()))
+            state = json.loads(sf.read_text())
         except (OSError, json.JSONDecodeError):
-            pass
+            continue
+        vf = d / "version.json"
+        if vf.exists():
+            try:
+                vdata = json.loads(vf.read_text())
+            except (OSError, json.JSONDecodeError):
+                vdata = {}
+            state["current_version"] = vdata.get("current_version")
+            state["version_checked_at"] = vdata.get("checked_at")
+        states.append(state)
     return states
 
 
@@ -822,7 +919,7 @@ _HTML_PAGE = """<!DOCTYPE html>
   <div class="card">
     <h2>Targets</h2>
     <table>
-      <thead><tr><th>Target</th><th>Phase</th><th>Deploy</th><th>Tests</th><th>Elapsed</th><th>URL</th></tr></thead>
+      <thead><tr><th>Target</th><th>Phase</th><th>Version</th><th>Deploy</th><th>Tests</th><th>Elapsed</th><th>URL</th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
   </div>
@@ -904,6 +1001,14 @@ _HTML_PAGE = """<!DOCTYPE html>
     }
     return '<span class="dim">&mdash;</span>';
   };
+  const versionCell = (t, deploying) => {
+    const v = t.current_version;
+    if (!v) return '<span class="dim">&mdash;</span>';
+    // Green when the running addon_version matches the VERSION this
+    // matrix run is deploying; dim otherwise (pre-deploy or lagging).
+    if (deploying && v === deploying) return '<span class="ok">' + v + '</span>';
+    return '<span class="dim">' + v + '</span>';
+  };
 
   async function tick() {
     try {
@@ -973,13 +1078,14 @@ _HTML_PAGE = """<!DOCTYPE html>
         return '<tr>' +
           '<td class="name">' + t.name + '</td>' +
           '<td><span class="phase phase-' + phase + '">' + phase + '</span></td>' +
+          '<td>' + versionCell(t, b.version) + '</td>' +
           '<td>' + deployCell(t) + '</td>' +
           '<td>' + testsCell(t) + '</td>' +
           '<td>' + fmtDur(t.total_elapsed) + '</td>' +
           '<td class="url">' + (t.url ? '<a href="' + t.url + '" target="_blank">' + t.url + '</a>' : '') + '</td>' +
         '</tr>';
       }).join('');
-      document.getElementById('rows').innerHTML = rows || '<tr><td colspan="6" class="dim">no targets yet</td></tr>';
+      document.getElementById('rows').innerHTML = rows || '<tr><td colspan="7" class="dim">no targets yet</td></tr>';
 
       renderTabs(s.targets || []);
       renderOutput(s.output || []);
@@ -1079,33 +1185,48 @@ async def run(args: argparse.Namespace) -> int:
             "phase": "pending",
         })
 
-    # -- Wait for CI-published images ----------------------------------
-    if not args.no_wait:
-        ok = await wait_for_ghcr_tags(version, timeout_s=args.wait_timeout)
-        if not ok:
-            sys.stderr.write(
-                "GHCR tags not available — skipping all target deploys.\n"
-            )
-            return 1
+    # Start background version pollers before the GHCR wait so the web
+    # UI can show each target's currently-running addon_version right
+    # away (and the user can watch it roll over once deploys land).
+    version_pollers = [
+        asyncio.create_task(poll_target_version(t))
+        for t in selected.values()
+    ]
 
-    # -- Run target chains ----------------------------------------------
-    # Deploy always parallel. Playwright parallel by default; --seq-tests
-    # serializes Playwright to one target at a time (escape hatch for
-    # memory pressure). Implemented via a shared semaphore that only the
-    # Playwright step inside each chain acquires.
-    test_sem = asyncio.Semaphore(1) if args.seq_tests else None
+    try:
+        # -- Wait for CI-published images ----------------------------------
+        if not args.no_wait:
+            ok = await wait_for_ghcr_tags(version, timeout_s=args.wait_timeout)
+            if not ok:
+                sys.stderr.write(
+                    "GHCR tags not available — skipping all target deploys.\n"
+                )
+                return 1
 
-    start = time.monotonic()
-    results = await asyncio.gather(
-        *[run_target_chain(t, test_sem) for t in selected.values()],
-    )
-    print(color("build", f"==> All targets done in {fmt_duration(time.monotonic() - start)}"), flush=True)
+        # -- Run target chains ----------------------------------------------
+        # Deploy always parallel. Playwright parallel by default; --seq-tests
+        # serializes Playwright to one target at a time (escape hatch for
+        # memory pressure). Implemented via a shared semaphore that only the
+        # Playwright step inside each chain acquires.
+        test_sem = asyncio.Semaphore(1) if args.seq_tests else None
 
-    # -- Summary --------------------------------------------------------
-    print_summary(results, selected)
+        start = time.monotonic()
+        results = await asyncio.gather(
+            *[run_target_chain(t, test_sem) for t in selected.values()],
+        )
+        print(color("build", f"==> All targets done in {fmt_duration(time.monotonic() - start)}"), flush=True)
 
-    # Exit code = non-zero if ANY target failed.
-    return 0 if all(r.deploy_ok and r.tests_ok for r in results) else 1
+        # -- Summary --------------------------------------------------------
+        print_summary(results, selected)
+
+        # Exit code = non-zero if ANY target failed.
+        return 0 if all(r.deploy_ok and r.tests_ok for r in results) else 1
+    finally:
+        for p in version_pollers:
+            p.cancel()
+        # Drain cancellations so we don't leave "Task was destroyed but
+        # it is pending" warnings on the console at interpreter shutdown.
+        await asyncio.gather(*version_pollers, return_exceptions=True)
 
 
 def main() -> int:
