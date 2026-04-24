@@ -251,8 +251,14 @@ This is deliberately simple for a single-developer project. If parallel lines of
 When a PR has review comments (Copilot bot, human reviewer, or both), the working pattern is:
 
 1. **Address every comment in the same push.** Fix the code, update tests, land a workitem entry if the reviewer is pointing at future work. Don't leave comments hanging across pushes — a later reader can't tell which comment drove which commit.
-2. **Resolve the review thread on GitHub.** After the fix lands, mark the comment conversation as **Resolved** in the PR UI (or via the GraphQL `resolveReviewThread` mutation below). An unresolved thread looks like an open concern even when the underlying code is already fixed, and it clutters the PR sidebar until merge. This is as important as the fix itself.
+2. **Resolve the review thread on GitHub in the same turn the fix lands.** Automatic — don't wait for a reminder. After `git push` succeeds:
+    - Re-query the PR's unresolved threads (snippet below).
+    - For every thread that the push just addressed, **post a reply** citing the commit SHA (e.g. `"Fixed in <SHA> — <one-line what-changed>"`) so a later reader can cross-reference thread ↔ commit without diffing the push.
+    - **Then** call `resolveReviewThread` with that thread's id.
+    - Re-query to confirm the thread flipped to `isResolved: true`.
+   An unresolved thread looks like an open concern even when the underlying code is already fixed, and it clutters the PR sidebar until merge. This is as important as the fix itself.
 3. **Exception — intentionally-deferred items.** If the comment points at work that's legitimately out of scope for this PR, file it in `dev-plans/WORKITEMS-*.md` first, reply to the comment with a pointer to the new workitem ID, *then* resolve the thread. The workitem is the record of the deferral; the thread should close because the next step (fix in a future PR) is now tracked elsewhere.
+4. **Exception — disagreed with / false-alarm comments.** Reply with the reasoning (link to the `dev-plans/` entry or design doc that makes the decision, e.g. a WONTFIX finding in `SECURITY_AUDIT.md`), then resolve. A resolved thread with a reply is readable later; an ignored thread is a perpetual "maybe there's a bug here" sidebar row.
 
 Resolve threads with:
 
@@ -269,14 +275,23 @@ gh api graphql -f query='
     }
   }' -F owner=weirded -F repo=distributed-esphome -F pr=64
 
+# Post a reply to a thread (cite the commit SHA that addressed it so
+# the cross-reference is readable later). Needs the *first* comment's
+# databaseId, which you fetch from the thread node — API lets you POST
+# "replies" off the first comment:
+CID=$(gh api graphql -f query='query($id:ID!){node(id:$id){... on PullRequestReviewThread{comments(first:1){nodes{databaseId}}}}}' \
+      -F id=PRRT_kwDO... --jq .data.node.comments.nodes[0].databaseId)
+gh api "repos/weirded/distributed-esphome/pulls/<PR>/comments/$CID/replies" \
+  -X POST -f body='Fixed in <SHA> — <one-line what-changed>.'
+
 # Resolve one by its thread id (from the query above):
 gh api graphql -f query='
   mutation($id:ID!) {
     resolveReviewThread(input:{threadId:$id}) { thread { isResolved } }
-  }' -F id=PRT_kwDO...
+  }' -F id=PRRT_kwDO...
 ```
 
-End-of-turn rule when a PR has review feedback: **before the commit + push, enumerate every thread that was touched and resolve it.** "Fix and leave the thread open" is not finished work.
+End-of-turn rule when a PR has review feedback: **before marking the turn done, re-query unresolved threads and close every one the push addressed.** "Fix and leave the thread open" is not finished work — the fix is half-shipped until the thread is closed. Same rule for automated reviewers (Copilot) as for human reviewers.
 
 ## Deployment
 
