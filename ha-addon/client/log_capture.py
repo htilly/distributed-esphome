@@ -65,7 +65,9 @@ class LogCaptureHandler(logging.Handler):
         everything still in the buffer is returned. The server's
         restart-detection handles the offset-went-backwards case.
 
-        If there's nothing new, returns ``("", since_offset)``.
+        If there's nothing new, the cursor is advanced to the current
+        ``_next_offset`` and ``("")`` is returned so the caller's next
+        poll skips re-scanning already-seen lines.
         """
         with self._lock:
             if not self._lines:

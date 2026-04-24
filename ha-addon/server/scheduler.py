@@ -52,9 +52,12 @@ async def _fire_recurring(target: str) -> None:
     ota_address = None
     if device_poller:
         for dev in device_poller.get_devices():
-            if dev.compile_target == target and dev.ip_address:
+            if dev.compile_target == target:
                 # Bug #18 (1.6.1): shared best-address helper — picks
                 # a real IP over a stale ``.local`` fallback.
+                # Don't gate on dev.ip_address: resolve_ota_address
+                # provides a .local fallback even when mDNS hasn't
+                # reported an IP yet.
                 ota_address = device_poller.resolve_ota_address(dev.name)
                 break
 
@@ -96,9 +99,12 @@ async def _fire_once(target: str) -> None:
     ota_address = None
     if device_poller:
         for dev in device_poller.get_devices():
-            if dev.compile_target == target and dev.ip_address:
+            if dev.compile_target == target:
                 # Bug #18 (1.6.1): shared best-address helper — picks
                 # a real IP over a stale ``.local`` fallback.
+                # Don't gate on dev.ip_address: resolve_ota_address
+                # provides a .local fallback even when mDNS hasn't
+                # reported an IP yet.
                 ota_address = device_poller.resolve_ota_address(dev.name)
                 break
 
