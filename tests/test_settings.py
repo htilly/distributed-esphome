@@ -188,12 +188,28 @@ def test_preexisting_repo_starts_on(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def _stub_supervisor_options(monkeypatch) -> None:
+    """Prevent ``settings._read_supervisor_options`` from hitting the
+    real ``http://supervisor/addons/self/info`` endpoint during tests.
+
+    Any test that sets ``SUPERVISOR_TOKEN`` triggers ``init_settings →
+    _seed_from_options → _read_supervisor_options``, which fires a
+    ``urllib.request.urlopen`` with a 5-second timeout. There's no
+    Supervisor in CI (or a dev laptop), so the test hangs for 5 s and
+    then emits a WARNING log line on first failure. Stub the function
+    to return an empty dict so the "no Supervisor-side options"
+    semantics still hold but no HTTP goes out.
+    """
+    monkeypatch.setattr(settings_mod, "_read_supervisor_options", lambda: {})
+
+
 def test_fresh_install_defaults_require_ha_auth_true_on_haos(tmp_path: Path, monkeypatch):
     """Bug #87: on HAOS fresh install (SUPERVISOR_TOKEN present, no
     explicit require_ha_auth in options), direct port 8765 must 401
     by default. The runtime default flips to True so opening
     http://homeassistant.local:8765 requires auth."""
     monkeypatch.setenv("SUPERVISOR_TOKEN", "fake-supervisor")
+    _stub_supervisor_options(monkeypatch)
     settings_file = tmp_path / "settings.json"
     options_file = tmp_path / "options.json"
     # No options file at all — pure fresh install.
@@ -226,6 +242,7 @@ def test_explicit_false_in_options_overrides_haos_default(tmp_path: Path, monkey
     require_ha_auth: false in options.json, that wins over the #87
     HAOS default."""
     monkeypatch.setenv("SUPERVISOR_TOKEN", "fake-supervisor")
+    _stub_supervisor_options(monkeypatch)
     settings_file = tmp_path / "settings.json"
     options_file = tmp_path / "options.json"
     options_file.write_text(json.dumps({"require_ha_auth": False}))
