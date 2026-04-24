@@ -1,3 +1,8 @@
 requests>=2.31
 psutil>=5.9
 pydantic>=2
+# #108: py-spy gives us `docker exec <container> py-spy dump --pid 1` for
+# thread dumps of a running worker, and `py-spy top` / `py-spy record` for
+# live sampling. ~5 MB, pre-built wheel, no Python-side overhead until
+# invoked.
+py-spy>=0.3

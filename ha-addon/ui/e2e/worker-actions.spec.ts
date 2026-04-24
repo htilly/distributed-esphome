@@ -105,3 +105,23 @@ test('Connect Worker button opens the modal', async ({ page }) => {
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole('heading', { name: /Connect a Build Worker/i })).toBeVisible();
 });
+
+// TR.4 regression guard: the bash + powershell branches must include
+// `--network host`, otherwise a user pasting the command onto a LAN
+// docker host gets a worker on the default bridge that can't OTA to
+// ESP devices. The compose branch already had `network_mode: host`.
+test('Connect Worker docker command includes --network host on every format', async ({ page }) => {
+  await page.getByRole('button', { name: /connect worker/i }).click();
+  const dialog = page.getByRole('dialog');
+
+  // Bash is the default — assert first.
+  await expect(dialog.locator('.docker-cmd')).toContainText('--network host');
+
+  // PowerShell branch uses the same `--network host` shape.
+  await dialog.getByRole('button', { name: 'PowerShell' }).click();
+  await expect(dialog.locator('.docker-cmd')).toContainText('--network host');
+
+  // Docker Compose branch uses `network_mode: host` instead.
+  await dialog.getByRole('button', { name: 'Docker Compose' }).click();
+  await expect(dialog.locator('.docker-cmd')).toContainText('network_mode: host');
+});

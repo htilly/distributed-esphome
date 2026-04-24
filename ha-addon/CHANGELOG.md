@@ -13,6 +13,7 @@ A hardening release on top of 1.6.1.
 - OTA targets honour `wifi.domain` / `ethernet.domain` / `openthread.domain` again. If your devices live on a non-`.local` mDNS domain, the worker now uses the correct `<name><domain>` address ESPHome itself would use — previously the compile succeeded but the OTA step hung at "Error resolving IP address" because the server was handing the worker `<name>.local` regardless of the `domain:` field.
 - Queue page: the **Clear** dropdown has a new **Clear Selected** option, so you can check a few rows and remove just those. The existing "Clear Succeeded", "Clear All Finished", and "Clear Entire Queue" entries are unchanged.
 - Startup logs no longer flood with a `WARNING` line every scan cycle when `/config/esphome/` doesn't exist. A single informational line now explains what the state means (install the Home Assistant ESPHome builder add-on, or create the directory yourself).
+- The **Connect Worker** modal's **Bash** and **PowerShell** snippets now include `--network host`, matching the **Docker Compose** snippet that already had `network_mode: host`. Without it, a worker started from the copy-pasted command landed on Docker's default bridge network and could not reach ESP devices on the host's LAN, so every OTA failed.
 
 **Smaller changes.**
 
@@ -21,6 +22,9 @@ A hardening release on top of 1.6.1.
 **Under the hood.**
 
 - Integration config-flow hardening: the Reconfigure and Reauth flows have gained end-to-end tests against a real Home Assistant fixture. The new tests caught a latent bug where a successful reconfigure would raise `TypeError: object dict can't be used in 'await' expression` on Home Assistant 2024.11+, now fixed.
+- Both the add-on and the standalone worker image now ship `py-spy`, so triage of a hung or runaway Python process is a single `docker exec <container> py-spy dump --pid 1` away. ~5 MB overhead, no cost when not in use.
+
+**Note for standalone worker users.** The worker Docker image bumped from version 7 to 8 (adds `py-spy`). Old-image workers are flagged in the Workers tab — run `docker pull ghcr.io/weirded/esphome-dist-client:latest && docker restart <name>` to refresh.
 
 ## 1.6.1
 
