@@ -50,6 +50,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -88,6 +89,24 @@ def color(name: str, text: str) -> str:
     if not sys.stdout.isatty():
         return text
     return f"{COLORS.get(name, '')}{text}{RESET}"
+
+
+def ts() -> str:
+    """Local-time ``HH:MM:SS`` stamp used as a line prefix in every
+    piece of streamed output. Minute-level granularity would lose us
+    per-step timing on a typical 2-minute deploy; the matrix never
+    outpaces one line per second, so subseconds would be noise.
+    """
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def tprint(text: str = "", **kwargs: Any) -> None:
+    """``print`` with a leading wall-clock timestamp. Wrapping every
+    top-level status line (``==> Deploying …``, ``==> All done …``)
+    so they sort cleanly next to the subprocess output that already
+    carries its own stamp via :func:`run_streaming`.
+    """
+    print(f"{ts()} {text}", **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +315,10 @@ class TargetResult:
     total_elapsed: float = 0.0
     report_dir: Path = Path()
     error: str = ""
+    # Wall-clock epoch seconds when the target chain started. Used by the
+    # terminal summary and the --web dashboard so readers can correlate
+    # live console output (also timestamped) with the table.
+    started_at_wall: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +341,7 @@ async def run_streaming(
     # Mark the start of this command in the log so post-mortems can tell
     # where each phase begins.
     with log_path.open("a") as log:
-        log.write(f"\n===== $ {' '.join(cmd)} =====\n")
+        log.write(f"\n===== {ts()} $ {' '.join(cmd)} =====\n")
 
     full_env = os.environ.copy()
     if env:
@@ -344,9 +367,14 @@ async def run_streaming(
             if not raw:
                 break
             line = raw.decode("utf-8", errors="replace").rstrip("\n")
-            log.write(line + "\n")
+            # Each line in the per-target log gets its own stamp (same
+            # HH:MM:SS format as console) so the file reads like a
+            # timestamped tail — post-mortem on which step stalled is
+            # a grep+sort away.
+            stamp = ts()
+            log.write(f"{stamp} {line}\n")
             log.flush()
-            print(f"{tag} {line}", flush=True)
+            print(f"{stamp} {tag} {line}", flush=True)
 
     return await proc.wait()
 
@@ -458,7 +486,7 @@ async def wait_for_ghcr_tags(version: str, timeout_s: int = 600) -> bool:
     failure short-circuits the wait so we don't sit out the full timeout.
     """
     head_sha = _head_sha()
-    print(color(
+    tprint(color(
         "build",
         f"==> Waiting for CI build (commit {head_sha[:7] or '?'}, tag {version}, "
         f"timeout {timeout_s}s) ...",
@@ -499,7 +527,7 @@ async def wait_for_ghcr_tags(version: str, timeout_s: int = 600) -> bool:
             if ok:
                 published.add(img)
                 short = img.rsplit("/", 1)[-1]
-                print(color(
+                tprint(color(
                     "build",
                     f"[ghcr          ] ✔ {short}:{version} ({fmt_duration(time.monotonic() - start)})",
                 ), flush=True)
@@ -515,7 +543,7 @@ async def wait_for_ghcr_tags(version: str, timeout_s: int = 600) -> bool:
             if w.get("status") == "completed" and w.get("conclusion") not in (None, "success")
         ]
         if failed:
-            print(color(
+            tprint(color(
                 "build",
                 f"[ghcr          ] ✖ workflow(s) failed: {', '.join(failed)} — aborting wait",
             ), flush=True)
@@ -525,12 +553,12 @@ async def wait_for_ghcr_tags(version: str, timeout_s: int = 600) -> bool:
         elapsed = time.monotonic() - start
         if elapsed >= timeout_s:
             missing = [i.rsplit("/", 1)[-1] for i in EXPECTED_IMAGES if i not in published]
-            print(color(
+            tprint(color(
                 "build",
                 f"[ghcr          ] ✖ timed out after {fmt_duration(elapsed)}; "
                 f"still missing: {', '.join(missing)}",
             ), flush=True)
-            print(color(
+            tprint(color(
                 "build",
                 "[ghcr          ]   hint: did you `git push` to develop? The publish-*.yml "
                 "workflows only fire on develop pushes that change ha-addon/VERSION.",
@@ -552,7 +580,7 @@ async def wait_for_ghcr_tags(version: str, timeout_s: int = 600) -> bool:
                     concl = w.get("conclusion")
                     label = f"{status}" if not concl else f"{status}/{concl}"
                     parts.append(f"{n}:{label}")
-            print(color(
+            tprint(color(
                 "build",
                 f"[ghcr          ] ⧗ {'  '.join(parts)} ({fmt_duration(elapsed)})",
             ), flush=True)
@@ -623,6 +651,7 @@ async def run_target_chain(target: Target, sem: asyncio.Semaphore | None) -> Tar
     state_file = target_dir / "state.json"
 
     target_start = time.monotonic()
+    result.started_at_wall = time.time()
 
     def snapshot(**overrides: Any) -> None:
         """Persist current target state for the --web UI."""
@@ -630,6 +659,9 @@ async def run_target_chain(target: Target, sem: asyncio.Semaphore | None) -> Tar
             "name": target.name,
             "url": target.get_open_url(),
             "started_at": target_start,
+            # Wall-clock seconds-since-epoch so the --web UI can render
+            # a local-time "Started HH:MM:SS" column.
+            "started_at_wall": result.started_at_wall,
             "deploy_ok": result.deploy_ok,
             "deploy_elapsed": result.deploy_elapsed or None,
             "tests_passed": result.tests_passed,
@@ -666,7 +698,7 @@ async def run_target_chain(target: Target, sem: asyncio.Semaphore | None) -> Tar
     if not token:
         # Warn but don't abort — the suite can still exercise unauthed
         # paths. Any Bearer-gated test will surface its own failure.
-        print(color(
+        tprint(color(
             target.name,
             f"[{target.name:<14}] ⚠ no token at {target.token_cache} — Bearer-gated tests will 401",
         ), flush=True)
@@ -764,16 +796,21 @@ def print_summary(results: list[TargetResult], targets: dict[str, Target]) -> No
                 tests_cell = f"✖ {r.tests_passed}/{r.tests_total}"
             else:
                 tests_cell = "✖"
+        started_cell = (
+            datetime.fromtimestamp(r.started_at_wall).strftime("%H:%M:%S")
+            if r.started_at_wall else "—"
+        )
         rows.append((
             r.target,
+            started_cell,
             deploy_cell,
             tests_cell,
             fmt_duration(r.total_elapsed),
             str(r.report_dir.relative_to(REPO_ROOT)) if r.report_dir else "",
         ))
 
-    headers = ("Target", "Deploy", "Tests", "Elapsed", "Report")
-    widths = [max(len(str(row[i])) for row in (rows + [headers])) for i in range(5)]
+    headers = ("Target", "Started", "Deploy", "Tests", "Elapsed", "Report")
+    widths = [max(len(str(row[i])) for row in (rows + [headers])) for i in range(len(headers))]
 
     def line(cells: tuple[str, ...]) -> str:
         return "  ".join(str(c).ljust(widths[i]) for i, c in enumerate(cells))
@@ -919,7 +956,7 @@ _HTML_PAGE = """<!DOCTYPE html>
   <div class="card">
     <h2>Targets</h2>
     <table>
-      <thead><tr><th>Target</th><th>Phase</th><th>Version</th><th>Deploy</th><th>Tests</th><th>Elapsed</th><th>URL</th></tr></thead>
+      <thead><tr><th>Target</th><th>Started</th><th>Phase</th><th>Version</th><th>Deploy</th><th>Tests</th><th>Elapsed</th><th>URL</th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
   </div>
@@ -1075,8 +1112,14 @@ _HTML_PAGE = """<!DOCTYPE html>
 
       const rows = (s.targets || []).map(t => {
         const phase = phaseLabel(t.phase);
+        // Started column: epoch seconds → local HH:MM:SS. Dim when the
+        // field isn't set yet (pre-chain targets show "pending").
+        const startedCell = t.started_at_wall
+          ? new Date(t.started_at_wall * 1000).toLocaleTimeString('en-GB', { hour12: false })
+          : '<span class="dim">&mdash;</span>';
         return '<tr>' +
           '<td class="name">' + t.name + '</td>' +
+          '<td>' + startedCell + '</td>' +
           '<td><span class="phase phase-' + phase + '">' + phase + '</span></td>' +
           '<td>' + versionCell(t, b.version) + '</td>' +
           '<td>' + deployCell(t) + '</td>' +
@@ -1085,7 +1128,7 @@ _HTML_PAGE = """<!DOCTYPE html>
           '<td class="url">' + (t.url ? '<a href="' + t.url + '" target="_blank">' + t.url + '</a>' : '') + '</td>' +
         '</tr>';
       }).join('');
-      document.getElementById('rows').innerHTML = rows || '<tr><td colspan="7" class="dim">no targets yet</td></tr>';
+      document.getElementById('rows').innerHTML = rows || '<tr><td colspan="8" class="dim">no targets yet</td></tr>';
 
       renderTabs(s.targets || []);
       renderOutput(s.output || []);
@@ -1141,7 +1184,7 @@ def start_web_server(port: int) -> None:
     server = http.server.ThreadingHTTPServer(("127.0.0.1", port), _StatusHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    print(color("build", f"==> Web UI: http://localhost:{port}/"), flush=True)
+    tprint(color("build", f"==> Web UI: http://localhost:{port}/"), flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1170,7 +1213,7 @@ async def run(args: argparse.Namespace) -> int:
 
     selected = {n: all_targets[n] for n in names}
 
-    print(color("build", f"==> test-matrix.py v{version}  targets: {', '.join(names)}"), flush=True)
+    tprint(color("build", f"==> test-matrix.py v{version}  targets: {', '.join(names)}"), flush=True)
     LOG_ROOT.mkdir(parents=True, exist_ok=True)
 
     # Pre-populate per-target state.json as "pending" so the --web UI
@@ -1214,7 +1257,7 @@ async def run(args: argparse.Namespace) -> int:
         results = await asyncio.gather(
             *[run_target_chain(t, test_sem) for t in selected.values()],
         )
-        print(color("build", f"==> All targets done in {fmt_duration(time.monotonic() - start)}"), flush=True)
+        tprint(color("build", f"==> All targets done in {fmt_duration(time.monotonic() - start)}"), flush=True)
 
         # -- Summary --------------------------------------------------------
         print_summary(results, selected)
@@ -1294,7 +1337,7 @@ def main() -> int:
         return 130
 
     if args.web and not args.list:
-        print(color("build", f"==> Web UI still at http://localhost:{args.web_port}/  (Ctrl-C to exit)"), flush=True)
+        tprint(color("build", f"==> Web UI still at http://localhost:{args.web_port}/  (Ctrl-C to exit)"), flush=True)
         try:
             while True:
                 time.sleep(3600)

@@ -90,7 +90,7 @@ Every rule below either (i) still reads `todo` in `quality_scale.yaml`, (ii) rea
 
 ## HT — Honest testing (close TEST-AUDIT-1.6.1's remaining blind spots)
 
-1.6.2 landed HT.1 / HT.7 / HT.11 (real-flow tests wired to the TR.* fixes) and the HT.13 family + HT.14 (install-path regression guards). The remaining TEST-AUDIT blind spots land here.
+1.6.2 landed HT.1 / HT.7 / HT.11 (real-flow tests wired to the TR.* fixes) and HT.14 (standalone-Docker install regression guard). The HT.13 family (HAOS install regression guard) is partway there — HT.13 scripts + HT.13a seed mechanism + HT.13b's user-visible root cause (via bug #105's server-side PyPI fallback) landed, but HT.13c's scrubbed repo-committed fleet fixture has not. The remaining TEST-AUDIT blind spots land here alongside HT.13c.
 
 - [ ] **HT.2 Reseed-consumer invariant (`check-invariants.sh` new rule).** The class of bug behind **#11 (1.6.1)** (encryption-key race on fresh boot) and **#18 (1.6.1)** (static-IP OTA regression) is the same: `_resolve_esphome_config` returns `None` during the ESPHome lazy-install window, leaving `_encryption_keys` / `_address_overrides` / `_name_map` unseeded. Fix landed as `main.reseed_device_poller_from_config`. New invariant: grep for every module-level read of those three dicts; for each hit, require the same module references `reseed_device_poller_from_config` OR is `main.py` itself. Fails CI if a future consumer lands without the reseed wire-up. **This is the durable close on the bug class — don't skip it in favour of yet another narrow test.**
 
@@ -114,7 +114,7 @@ Every rule below either (i) still reads `todo` in `quality_scale.yaml`, (ii) rea
 
 ## CI — Automate the catches
 
-1.6.2 landed CI.1 (Dockerfile buildx smoke) and CI.2 (AppArmor profile syntax + load smoke, paired with TP.2). The remaining four items land here.
+CI.1 (Dockerfile buildx smoke) and CI.2 (AppArmor profile syntax + load smoke, paired with TP.2) were scoped to 1.6.2 but didn't land — they stayed in `WORKITEMS-1.6.2.md` as open items. CI.3–CI.6 below are the additional four items originally scheduled for 1.6.3.
 
 - [ ] **CI.3 `compile-test.yml` ESPHome version matrix.** Current: `ESPHOME_VERSION: "2026.4.2"` hardcoded. Matrix it on `{pinned_old: 2026.4.0, latest_stable: <bumped per release>}`. Upstream API regressions (the "2026.4.0 reshaped the API" class of bug from 1.5) land as a CI red on the `latest_stable` axis while the pinned axis anchors reproducibility. ~6–8 min extra in parallel.
 
