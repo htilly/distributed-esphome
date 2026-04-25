@@ -1,8 +1,8 @@
-# Work Items — 1.6.3
+# Work Items — 1.7.0
 
-Theme: **Honest Gold.** 1.6.2 started under this theme and pivoted mid-cycle to install-path unblocks when real-user bugs surfaced (#82, #83, #84). The Gold work didn't go away — it re-homed here. 1.6.3 walks the remaining Bronze+Silver+Gold quality-scale rules to `done` or honestly-justified `exempt`, closes the TEST-AUDIT-1.6.1 blind spots that stayed open, delegates the remaining hand-rolled ESPHome logic to ESPHome's own code, polishes the UX debt carried from the 1.6.1 review, and flips the `quality_scale: gold` claim in `manifest.json` to one hassfest actually validates.
+Theme: **Honest Gold + heffneil-inspired device-management polish.** Carries the Gold-tier-flip work that 1.6.2 pivoted away from (rules to `done`/`exempt`, TEST-AUDIT-1.6.1 blind spots, ESPHome-delegation) and adds four pieces of per-device UX inspired by `heffneil/esphome-enhanced-dashboard` (`dev-plans/EXTERNAL_REVIEW_heffneil_enhanced_dashboard.md`): sidecar-JSON tagging that doesn't churn user YAML, mark-inactive to skip polling on known-offline devices, ping diagnostic, and install-to-specific-address for recovery flows. Renamed from 1.6.3 to 1.7.0 because the heffneil scope crosses the patch/minor line — these are user-visible features, not hardening.
 
-Read first, in order: `dev-plans/TEST-AUDIT-1.6.1.md` (the authoritative blind-spot list), `ha-addon/custom_integration/esphome_fleet/quality_scale.yaml` (current per-rule status — the header + `runtime-data` hedge got fixed in 1.6.2's TP.3; the rule statuses still need to walk), `dev-plans/archive/WORKITEMS-1.6.2.md` once it's archived at `v1.6.2` tag (so you can see what the pivot landed before this release picked up).
+Read first, in order: `dev-plans/TEST-AUDIT-1.6.1.md` (the authoritative blind-spot list), `ha-addon/custom_integration/esphome_fleet/quality_scale.yaml` (current per-rule status — the header + `runtime-data` hedge got fixed in 1.6.2's TP.3; the rule statuses still need to walk), `dev-plans/archive/WORKITEMS-1.6.2.md` (so you can see what the pivot landed before this release picked up), `dev-plans/EXTERNAL_REVIEW_heffneil_enhanced_dashboard.md` (the source of the four DM.* items below).
 
 Scope rule: every workitem either (a) closes a TEST-AUDIT blind spot, (b) lifts a quality-scale rule from `todo`/missing to `done`/`exempt`, (c) delegates more hand-rolled code to ESPHome, or (d) polishes UX debt. Gold-equivalence or bust — there is no partial credit here.
 
@@ -60,7 +60,7 @@ Every rule below either (i) still reads `todo` in `quality_scale.yaml`, (ii) rea
   5. Verify in the HA UI: entity names render identically to today; *Customize* dialog shows the English names as defaults and exposes them for localization.
   6. Flip `entity-translations` to `done` in `quality_scale.yaml`.
 
-- [ ] **QS.G6 `runtime-data` — migrate from `hass.data[DOMAIN][entry.entry_id]` to `entry.runtime_data`.** The `quality_scale.yaml:109–115` comment hedged "migration planned when HA minimum is bumped past 2024.11" — we're well past (today is 2026-04). 1.6.2's TP.3 restated the hedge honestly; 1.6.3 actually migrates. Concretely:
+- [ ] **QS.G6 `runtime-data` — migrate from `hass.data[DOMAIN][entry.entry_id]` to `entry.runtime_data`.** The `quality_scale.yaml:109–115` comment hedged "migration planned when HA minimum is bumped past 2024.11" — we're well past (today is 2026-04). 1.6.2's TP.3 restated the hedge honestly; 1.7.0 actually migrates. Concretely:
   1. Replace `hass.data[DOMAIN][entry.entry_id] = coordinator` in `__init__.py` with `entry.runtime_data = coordinator`.
   2. Update every platform read: `sensor.py:56`, `binary_sensor.py`, `button.py`, `number.py`, `update.py` — replace `hass.data[DOMAIN][entry.entry_id]` with `entry.runtime_data`.
   3. Introduce a typed `ConfigEntry` alias: `type EsphomeFleetConfigEntry = ConfigEntry[EsphomeFleetCoordinator]` in `const.py` or a new `types.py`; annotate `async_setup_entry` / `async_unload_entry` / platform setups / diagnostics / config_flow `async_get_options_flow` to use it. (This also pre-pays for Platinum's `strict-typing` rule, whose `runtime-data` validator adds typed-alias checks when `strict-typing` is `done`.)
@@ -116,7 +116,7 @@ Every rule below either (i) still reads `todo` in `quality_scale.yaml`, (ii) rea
 
 ## CI — Automate the catches
 
-CI.1 (Dockerfile buildx smoke) and CI.2 (AppArmor profile syntax + load smoke, paired with TP.2) were scoped to 1.6.2 but didn't land — they stayed in `WORKITEMS-1.6.2.md` as open items. CI.3–CI.6 below are the additional four items originally scheduled for 1.6.3.
+CI.1 (Dockerfile buildx smoke) and CI.2 (AppArmor profile syntax + load smoke, paired with TP.2) were scoped to 1.6.2 but didn't land — they stayed in `WORKITEMS-1.6.2.md` as open items. CI.3–CI.6 below are the additional four items originally scheduled for 1.7.0.
 
 - [ ] **CI.3 `compile-test.yml` ESPHome version matrix.** Current: `ESPHOME_VERSION: "2026.4.2"` hardcoded. Matrix it on `{pinned_old: 2026.4.0, latest_stable: <bumped per release>}`. Upstream API regressions (the "2026.4.0 reshaped the API" class of bug from 1.5) land as a CI red on the `latest_stable` axis while the pinned axis anchors reproducibility. ~6–8 min extra in parallel.
 
@@ -130,7 +130,7 @@ CI.1 (Dockerfile buildx smoke) and CI.2 (AppArmor profile syntax + load smoke, p
 
 ## UD — UX debt carried from 1.6.1 review (minor polish)
 
-Three items surfaced in `dev-plans/UX_REVIEW-1.6.1.md` §5 as "defer to 1.7." They're small; folding them into 1.6.3 prevents "defer" from becoming "forgotten." Two additional Devices-tab columns join them.
+Three items surfaced in `dev-plans/UX_REVIEW-1.6.1.md` §5 as "defer to 1.7." They're small; folding them into 1.7.0 prevents "defer" from becoming "forgotten." Two additional Devices-tab columns join them.
 
 - [ ] **UD.1** Add `title` tooltip on the "via ARP" label in the Devices tab so hover explains the detection mechanism (per UX_REVIEW-1.6.1 UX.1).
 
@@ -144,18 +144,29 @@ Three items surfaced in `dev-plans/UX_REVIEW-1.6.1.md` §5 as "defer to 1.7." Th
 
 ---
 
+## DM — Device management (heffneil-inspired)
+
+Four items lifted from `dev-plans/EXTERNAL_REVIEW_heffneil_enhanced_dashboard.md` after auditing `heffneil/esphome-enhanced-dashboard` for features we don't have. Each is scoped tight enough to land alongside the Honest-Gold work without crowding it. None of them depend on the side-panel UX rework heffneil uses to surface them — we keep our existing Devices-tab + hamburger affordance and add these as new entries / dialogs. Side-panel is filed for later (`WORKITEMS-1.8.md` or `1.9.md`) since it's a much bigger UX shift.
+
+- [ ] **DM.1 Sidecar-JSON tagging (replace YAML-comment storage).** Today tags live in YAML comments inside each device file (`# distributed-esphome: tags=…`); the parser is regex-based (PY-1 allow-listed) and every tag mutation rewrites the YAML and shows up in `git status`. Heffneil keeps tags in a single `/data/device-tags.json` (shape `{"tags": {<filename>: [<tag>, …]}}`) — no user-YAML churn, no risk of mangling user content, single-dict tag-pool lookup instead of scanning every file. Land a parallel-write phase first: writes go to both YAML comment and the new sidecar JSON so existing automations / git history keep working; reads prefer the JSON, fall back to the YAML parse for first-boot migration. After two stable releases drop the YAML-comment writer (3.0 cycle). Persistence layer mirrors heffneil's `core.py:106, 135-157`: load at boot, save on every mutation; rename / archive paths must keep the JSON in sync (filename is the key — moving a device renames the entry, archiving removes it). Tests: `tests/test_device_tags_storage.py` covers the round-trip, the YAML-fallback migration path, rename / archive sync, concurrent-write safety. Pairs naturally with the heffneil tag-pool UI work (filter pills + the editor's tag-pool panel) which lifts in 1.8 once the storage is JSON-backed and a single-dict union is cheap.
+- [ ] **DM.2 Mark Inactive toggle.** Per-device `Mark inactive` action in the hamburger menu. Inactive devices: render at 40 % opacity in the Devices tab, sort below active rows (above archived), and the device-poller (`ha-addon/server/device_poller.py`) skips them so a known-unplugged battery device doesn't churn the offline-counter or burn poll cycles. Distinct from Archive — config stays, file stays in `/config/esphome/`, ESPHome compile/run still works on demand; this is purely "stop expecting it to be online." Storage: sidecar `/data/inactive-devices.json` (matches DM.1's pattern; same `{"devices": [<filename>, …]}` shape). UI: hamburger menu entry + a small `inactive` badge in the Status column when set; matching `Mark active` entry to flip back. Skip-wire: `device_poller._poll_one` early-returns when the target is in the inactive set; the `last_seen` field freezes at whatever it was when marked inactive so the user can see "was last online 3 weeks ago, then I marked it inactive." Heffneil ref: `core.py:159-181` (storage), `web_server.py:1024-1049` (handler), `status/ping.py:58-71` (skip logic). Tests: storage round-trip + poller-skip integration test that asserts a marked-inactive device produces zero poll calls in a 30-second window.
+- [ ] **DM.3 Ping diagnostic.** Per-device `Ping device` action that opens a modal showing live ping results: `is_alive`, `packets_sent` / `packets_received` / `packet_loss`, `min`/`avg`/`max` RTT, jitter. Resolves the recurring "is it offline, is it on a flaky AP, or is the controller's mDNS stale?" triage step that today requires shelling into the add-on. Backend: new `/ui/api/devices/{filename}/ping` endpoint that runs `icmplib.async_ping(host, count=10, interval=0.2, timeout=2)` against the device's resolved address (uses the same `resolve_ota_address` helper the OTA path uses, so the ping target matches what an OTA would hit). `icmplib` is already in scope on the worker side; bundle on the server side. Output: monospace table-style modal, `Run again` button, `Copy as text` for bug reports. Heffneil ref: `web_server.py:1052-1163` (handler shape), `template:1460-1510` (modal shape). Note: `icmplib` needs `cap_net_raw` or root; the add-on already runs as root inside the container, so no extra capability is required for the HA add-on path. The standalone-Docker container needs `cap_add: NET_RAW` in `docker-compose.yml`; that's a minor compose change, document in `DOCS.md`. Tests: mocked `async_ping` happy-path + offline-host + DNS-failure cases; e2e against `cyd-office-info`'s real IP on hass-4.
+- [ ] **DM.4 Install to Specific Address.** Per-device `Install to address…` action that prompts for an arbitrary IP / hostname (validated against `^[a-zA-Z0-9.\-_:]+$`), then runs `esphome run --device <addr>` against that target instead of whatever YAML / mDNS resolves to. Confirmation prompt when the entered address differs from the known one (so a slip doesn't silently flash the wrong device). Use cases: device moved to a new IP, flashing a spare board with a known config, recovery after a failed rename when the new address doesn't match the YAML yet. Backend: new `address` field on the compile-job protocol model (`ha-addon/server/protocol.py` + `ha-addon/client/protocol.py`, additive + optional per PY-6); when present, the worker passes `--device <addr>` to `esphome run` (replaces, not augments, the YAML's resolved address). UI: modal with the address input + an `Install` button; same enqueue path as the regular Compile button afterward. Heffneil ref: `template:1360-1383`. Tests: protocol round-trip, worker correctly forwards `--device`, e2e where the modal's address override flows end-to-end into the job's `ota_address`.
+
+---
+
 ## SD — Scope discipline
 
-- [ ] **SD.2 Release-blocker gate pre-tag (Gold-grade).** Before tagging `v1.6.3`, every one of the following must be true:
+- [ ] **SD.2 Release-blocker gate pre-tag (Gold-grade).** Before tagging `v1.7.0`, every one of the following must be true:
   1. `dev-plans/RELEASE_CHECKLIST.md`'s security-docs cross-check passes (no stale claims).
   2. `python3 -m script.hassfest --action quality_scale` passes clean at the tier declared in `manifest.json.quality_scale`. If the manifest says `gold`, zero errors; if every Gold rule isn't `done`/`exempt`, the manifest tier drops to whatever is honest (silver or bronze) **before** the release tag — we do not ship a claim hassfest doesn't back.
   3. The TEST-AUDIT-1.6.1 Top-5 blind spots (HT.2–HT.5 here, plus HT.1 which landed in 1.6.2) have landed. Not `in progress`, not `partially`. Landed + merged + CI-green.
   4. `brands` PR at `home-assistant/brands` is either merged (so `brands` can be `done`) or the `quality_scale.yaml:brands` comment carries the open PR URL and tier drops if it was gating Gold.
   5. `scripts/check-invariants.sh` — all rules (PY-1..10, PY-10b from CI.5, HT.2's reseed-consumer rule, UI-1..7, E2E-1) green.
   6. HT.12's coverage number ≥95% for `ha-addon/custom_integration/esphome_fleet/**`.
-  7. `ha-addon/CHANGELOG.md` accurately describes what users see changing from 1.6.2 → 1.6.3 (the tier flip, translated entity names, new Devices-tab columns, etc.).
+  7. `ha-addon/CHANGELOG.md` accurately describes what users see changing from 1.6.2 → 1.7.0 (the tier flip, translated entity names, new Devices-tab columns, etc.).
 
-- [ ] **SD.3 Produce `TEST-AUDIT-1.6.2.md` then `TEST-AUDIT-1.6.3.md` as the last workitems before tag.** Prove each TEST-AUDIT-1.6.1 top blind spot has durable closure (a test exists AND would fail without the fix AND the underlying bug class is structurally prevented, not just patched). For each of items 1–13 in TEST-AUDIT-1.6.1, write one line: "closed via HT.X" or "re-deferred — here's why and here's the owning workitem in 1.7." If even one entry reads "we ran out of time," treat that as a signal to cut non-blocking scope and land the test. Audit the audit.
+- [ ] **SD.3 Produce `TEST-AUDIT-1.6.2.md` then `TEST-AUDIT-1.7.0.md` as the last workitems before tag.** Prove each TEST-AUDIT-1.6.1 top blind spot has durable closure (a test exists AND would fail without the fix AND the underlying bug class is structurally prevented, not just patched). For each of items 1–13 in TEST-AUDIT-1.6.1, write one line: "closed via HT.X" or "re-deferred — here's why and here's the owning workitem in 1.7." If even one entry reads "we ran out of time," treat that as a signal to cut non-blocking scope and land the test. Audit the audit.
 
 ---
 
@@ -165,7 +176,7 @@ Three items surfaced in `dev-plans/UX_REVIEW-1.6.1.md` §5 as "defer to 1.7." Th
 
 *(Any post-tag regression against `v1.6.2` lands here as a numbered bug once 1.6.2 ships.)*
 
-### New in 1.6.3
+### New in 1.7.0
 
 - [ ] 1 in the modal for restoring from archive, the time that says how long ago it was archived has way too many digits. Let's prune that. 
 

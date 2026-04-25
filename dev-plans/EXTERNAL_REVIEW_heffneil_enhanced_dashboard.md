@@ -31,7 +31,7 @@ My initial report listed "ignore device" as a heffneil feature. **It is not.** I
 
 The feature only applies to **importable** devices (mDNS-discovered devices with `package_import_url` and no local YAML). Stock ESPHome Builder 2026.4.x renders the ignore control only when at least one importable device is present — so a fleet with no importable devices never sees the UI control. The visible UI lives in the separate `@esphome/dashboard` frontend repo (https://github.com/esphome/dashboard), not in the Python package.
 
-**Implication for us:** if/when we build device adoption (WORKITEMS-1.8 §2.4), we get `ignored_devices` essentially for free by calling the upstream handlers. Don't reinvent.
+**Implication for us:** if/when we build device adoption (`WORKITEMS-1.9.md` — was 1.8 before the 1.7.0 rename), we get `ignored_devices` essentially for free by calling the upstream handlers. Don't reinvent.
 
 ---
 
@@ -85,10 +85,10 @@ Two-step dialog: name → platform list (ESP32 / C3 / C6 / S2 / S3 / 8266 / RP20
 **Source:** `web_server.py:803-890` (`WizardRequestHandler`); `template:1241-1358`.
 **Our equivalent:** `NewDeviceModal.tsx` — filename-only, no platform, no secrets scaffolding, no encryption key generation. Significantly weaker.
 
-### 6. Device adoption / import (already scheduled in 1.8)
+### 6. Device adoption / import (already scheduled in 1.9)
 ESPHome's `importable` device list — mDNS-discovered devices with `package_import_url` but no local YAML — surfaced as a dedicated section with "Import" and "Ignore" buttons. Import synthesizes local YAML with `!include <url>` + `api.encryption.key`. This is the core "flash-once, adopt-via-mDNS, never-touch-USB-again" ESPHome story.
 **Source:** `web_server.py:893-986` (heffneil's version — but most of it is stock).
-**Our status:** listed in `WORKITEMS-1.8.md:33` as §2.4. **Most of the backend is stock ESPHome** — we mostly need to expose the UI + wire `POST /import-device`, `POST /ignore-device` to the dashboard entries API we already have.
+**Our status:** listed in `WORKITEMS-1.9.md` (was 1.8 before the 1.7.0 rename) as the device-adoption item. **Most of the backend is stock ESPHome** — we mostly need to expose the UI + wire `POST /import-device`, `POST /ignore-device` to the dashboard entries API we already have.
 
 ---
 
@@ -150,15 +150,18 @@ ESPHome's `importable` device list — mDNS-discovered devices with `package_imp
 
 Do not pull any of this into a scheduled release without explicit approval (per CLAUDE.md "Never reshuffle workitems between releases without an explicit ask"). The table below is a **suggestion surface**, not a plan.
 
+**Status update (2026-04-24):** Four items pulled into 1.7.0 as DM.1–DM.4 (sidecar tagging, Mark Inactive, Ping, Install to Specific Address). Workitems are renumbered: old 1.7 → 1.8, old 1.8 → 1.9. Bucket labels in the table below still read "1.8 / 1.9" as conceptual "near-term / longer-term" placeholders, not literal file pointers.
+
 | Candidate | Bucket | Rough effort | Rationale |
 |---|---|---|---|
-| Side panel for per-device actions | 1.8 or 1.9 | L | Changes core UX pattern; unlocks 4–5 other ★★★ items by giving them a home |
-| Install to Specific Address | 1.8 | S | Real recovery workflow; one modal + CLI flag pass-through |
-| Ping Device diagnostic | 1.8 | S | `icmplib` dep + one endpoint + one modal |
-| Mark Inactive | 1.8 | S | Sidecar JSON + one column state + skip in poller |
-| New Device wizard with platforms | 1.8 | M | Wraps `esphome.wizard`; big UX win for onboarding |
-| Device adoption / import | 1.8 | M | Already §2.4 in WORKITEMS-1.8; stock backend, just UI |
-| Tag filter pills + tag pool | 1.9 | S | Copies cleanly into Devices tab |
+| Side panel for per-device actions | 1.9 or future | L | Changes core UX pattern; unlocks 4–5 other ★★★ items by giving them a home |
+| Install to Specific Address | **1.7.0 (DM.4)** ✓ pulled | S | Real recovery workflow; one modal + CLI flag pass-through |
+| Ping Device diagnostic | **1.7.0 (DM.3)** ✓ pulled | S | `icmplib` dep + one endpoint + one modal |
+| Mark Inactive | **1.7.0 (DM.2)** ✓ pulled | S | Sidecar JSON + one column state + skip in poller |
+| Sidecar-JSON tagging (replace YAML comments) | **1.7.0 (DM.1)** ✓ pulled | M | Stops user-YAML churn; unlocks tag-pool UI cleanly |
+| New Device wizard with platforms | 1.9 | M | Wraps `esphome.wizard`; big UX win for onboarding |
+| Device adoption / import | 1.9 | M | Already in WORKITEMS-1.9 (was 1.8 before the rename); stock backend, just UI |
+| Tag filter pills + tag pool | 1.9 | S | Copies cleanly into Devices tab now that DM.1's storage is JSON-backed |
 | Floating batch action bar | 1.9 | S | Upgrade on top of existing bulk-select |
 | Archive reclaims build dir | Bug | XS | One-liner verification; file a bug if missing |
 | `backup_exclude` on add-on config | Bug | XS | Verify current config; file a bug if missing |
