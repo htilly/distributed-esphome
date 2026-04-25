@@ -167,4 +167,12 @@ Three items surfaced in `dev-plans/UX_REVIEW-1.6.1.md` §5 as "defer to 1.7." Th
 
 ### New in 1.6.3
 
-*(empty at the start of the cycle; bugs get numbered as they surface.)*
+- [ ] 1 in the modal for restoring from archive, the time that says how long ago it was archived has way too many digits. Let's prune that. 
+
+- [ ] 2 when I archive the first configuration, the restore from archive button remains grayed out until I reload. We should make that dynamic. 
+
+- [ ] 3 we should make Archive a First-Order Action in the hamburger menu. 
+
+- [ ] 4 probably need to figure out how to handle cache, cleaning cache on the worker while compiles are running, meaning we should either prevent it or queue it up. 
+
+- [ ] 5 in addition to the time format, which should also let the user pick a date format 
