@@ -2,7 +2,8 @@ import { expect, test } from '@playwright/test';
 import { mockApi } from './fixtures';
 
 // QS.25 follow-up — Workers tab actions: clean cache, parallel-jobs slot
-// control, remove offline worker.
+// control, remove offline worker. WL.3 consolidated Clean Cache / Remove
+// and "View logs" into a single per-row "Actions" dropdown menu.
 
 test.beforeEach(async ({ page }) => {
   await mockApi(page);
@@ -16,18 +17,28 @@ function workerRow(page: import('@playwright/test').Page, hostname: string) {
   return page.locator('table tbody tr').filter({ hasText: hostname });
 }
 
-test('online worker shows Clean Cache button, offline shows Remove', async ({ page }) => {
-  const online = workerRow(page, 'build-server-1');
-  await expect(online.getByRole('button', { name: 'Clean Cache' })).toBeVisible();
-  await expect(online.getByRole('button', { name: 'Remove' })).toHaveCount(0);
+async function openActions(page: import('@playwright/test').Page, hostname: string) {
+  await workerRow(page, hostname).getByRole('button', { name: new RegExp(`Actions for ${hostname}`) }).click();
+}
 
-  const offline = workerRow(page, 'build-server-2');
-  await expect(offline.getByRole('button', { name: 'Remove' })).toBeVisible();
-  await expect(offline.getByRole('button', { name: 'Clean Cache' })).toHaveCount(0);
+test('actions dropdown reveals Clean cache for online workers', async ({ page }) => {
+  await openActions(page, 'build-server-1');
+  await expect(page.getByRole('menuitem', { name: 'Clean cache' })).toBeVisible();
+  await expect(page.getByRole('menuitem', { name: 'Remove' })).toHaveCount(0);
 });
 
-test('Clean Cache fires POST /workers/{id}/clean', async ({ page }) => {
+test('actions dropdown reveals Remove for offline workers', async ({ page }) => {
+  await openActions(page, 'build-server-2');
+  await expect(page.getByRole('menuitem', { name: 'Remove' })).toBeVisible();
+  await expect(page.getByRole('menuitem', { name: 'Clean cache' })).toHaveCount(0);
+});
+
+test('Clean cache fires POST /workers/{id}/clean', async ({ page }) => {
   let cleanedFor: string | null = null;
+  // Clear the mockApi fixture's handler for this pattern so ours is
+  // the only one that runs (Playwright's route stack doesn't always
+  // prefer the newest registration when the patterns match identically).
+  await page.unroute('**/ui/api/workers/*/clean');
   await page.route('**/ui/api/workers/*/clean', route => {
     if (route.request().method() === 'POST') {
       const url = route.request().url();
@@ -36,13 +47,17 @@ test('Clean Cache fires POST /workers/{id}/clean', async ({ page }) => {
     route.fulfill({ status: 200, json: {} });
   });
 
-  await workerRow(page, 'build-server-1').getByRole('button', { name: 'Clean Cache' }).click();
+  await openActions(page, 'build-server-1');
+  const cleanItem = page.getByRole('menuitem', { name: 'Clean cache' });
+  await expect(cleanItem).toBeVisible();
+  await cleanItem.click();
 
   await expect.poll(() => cleanedFor).toBe('worker-1');
 });
 
 test('Remove offline worker fires DELETE /workers/{id}', async ({ page }) => {
   let removedFor: string | null = null;
+  await page.unroute('**/ui/api/workers/*');
   await page.route('**/ui/api/workers/*', route => {
     if (route.request().method() === 'DELETE') {
       const url = route.request().url();
@@ -51,7 +66,10 @@ test('Remove offline worker fires DELETE /workers/{id}', async ({ page }) => {
     route.fulfill({ status: 200, json: {} });
   });
 
-  await workerRow(page, 'build-server-2').getByRole('button', { name: 'Remove' }).click();
+  await openActions(page, 'build-server-2');
+  const removeItem = page.getByRole('menuitem', { name: 'Remove' });
+  await expect(removeItem).toBeVisible();
+  await removeItem.click();
 
   await expect.poll(() => removedFor).toBe('worker-2');
 });
@@ -86,4 +104,68 @@ test('Connect Worker button opens the modal', async ({ page }) => {
   const dialog = page.getByRole('dialog');
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole('heading', { name: /Connect a Build Worker/i })).toBeVisible();
+});
+
+// #109 regression guard: the Actions menu exposes "Request diagnostics"
+// for online workers and clicking it hits the round-trip endpoints
+// (request → poll → download). Mocked endpoints here — real py-spy
+// path is covered by the e2e-hass-4 suite.
+test('Actions dropdown shows Request diagnostics for online workers and fires the round-trip', async ({ page }) => {
+  let requestedFor: string | null = null;
+  let polledWith: string | null = null;
+  await page.route(/\/ui\/api\/workers\/([^/]+)\/request-diagnostics$/, async route => {
+    const m = route.request().url().match(/\/workers\/([^/]+)\/request-diagnostics/);
+    requestedFor = m ? m[1] : null;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ request_id: 'req-abc' }),
+    });
+  });
+  await page.route(/\/ui\/api\/workers\/([^/]+)\/diagnostics\/req-abc$/, async route => {
+    const m = route.request().url().match(/\/workers\/([^/]+)\/diagnostics\/req-abc/);
+    polledWith = m ? m[1] : null;
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/plain',
+      headers: {
+        'X-Diagnostics-Ok': '1',
+        'Content-Disposition': 'attachment; filename="worker-diagnostics-build-server-1.txt"',
+      },
+      body: 'Thread 1 (idle): MainThread\n    select (selectors.py:468)\n',
+    });
+  });
+
+  await openActions(page, 'build-server-1');
+  const item = page.getByRole('menuitem', { name: 'Request diagnostics' });
+  await expect(item).toBeVisible();
+  await item.click();
+
+  await expect.poll(() => requestedFor, { timeout: 3_000 }).toBe('worker-1');
+  await expect.poll(() => polledWith, { timeout: 3_000 }).toBe('worker-1');
+});
+
+test('Actions dropdown hides Request diagnostics for offline workers', async ({ page }) => {
+  await openActions(page, 'build-server-2');
+  await expect(page.getByRole('menuitem', { name: 'Request diagnostics' })).toHaveCount(0);
+});
+
+// TR.4 regression guard: the bash + powershell branches must include
+// `--network host`, otherwise a user pasting the command onto a LAN
+// docker host gets a worker on the default bridge that can't OTA to
+// ESP devices. The compose branch already had `network_mode: host`.
+test('Connect Worker docker command includes --network host on every format', async ({ page }) => {
+  await page.getByRole('button', { name: /connect worker/i }).click();
+  const dialog = page.getByRole('dialog');
+
+  // Bash is the default — assert first.
+  await expect(dialog.locator('.docker-cmd')).toContainText('--network host');
+
+  // PowerShell branch uses the same `--network host` shape.
+  await dialog.getByRole('button', { name: 'PowerShell' }).click();
+  await expect(dialog.locator('.docker-cmd')).toContainText('--network host');
+
+  // Docker Compose branch uses `network_mode: host` instead.
+  await dialog.getByRole('button', { name: 'Docker Compose' }).click();
+  await expect(dialog.locator('.docker-cmd')).toContainText('network_mode: host');
 });

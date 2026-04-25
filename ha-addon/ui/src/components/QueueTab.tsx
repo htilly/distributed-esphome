@@ -514,6 +514,10 @@ export function QueueTab({
     if (retryable.length > 0) onRetry(retryable);
   }
 
+  function handleClearSelected() {
+    if (selectedIds.length > 0) onClear(selectedIds);
+  }
+
   // Button state
   const hasFailedJobs = queue.some(j => isJobFailed(j));
   const hasSuccessfulJobs = queue.some(j => isJobSuccessful(j));
@@ -582,6 +586,13 @@ export function QueueTab({
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 <DropdownMenuGroup>
+                  <DropdownMenuItem
+                    onClick={handleClearSelected}
+                    disabled={selectedIds.length === 0}
+                    title={selectedIds.length === 0 ? 'Select one or more rows to clear' : undefined}
+                  >
+                    Clear Selected
+                  </DropdownMenuItem>
                   <DropdownMenuItem
                     onClick={onClearSucceeded}
                     disabled={!hasSuccessfulJobs}

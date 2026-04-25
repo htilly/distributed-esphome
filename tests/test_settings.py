@@ -183,6 +183,77 @@ def test_preexisting_repo_starts_on(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# #87 — require_ha_auth default depends on context (HAOS vs standalone)
+# ---------------------------------------------------------------------------
+
+
+def _stub_supervisor_options(monkeypatch) -> None:
+    """Prevent ``settings._read_supervisor_options`` from hitting the
+    real ``http://supervisor/addons/self/info`` endpoint during tests.
+
+    Any test that sets ``SUPERVISOR_TOKEN`` triggers ``init_settings →
+    _seed_from_options → _read_supervisor_options``, which fires a
+    ``urllib.request.urlopen`` with a 5-second timeout. There's no
+    Supervisor in CI (or a dev laptop), so the test hangs for 5 s and
+    then emits a WARNING log line on first failure. Stub the function
+    to return an empty dict so the "no Supervisor-side options"
+    semantics still hold but no HTTP goes out.
+    """
+    monkeypatch.setattr(settings_mod, "_read_supervisor_options", lambda: {})
+
+
+def test_fresh_install_defaults_require_ha_auth_true_on_haos(tmp_path: Path, monkeypatch):
+    """Bug #87: on HAOS fresh install (SUPERVISOR_TOKEN present, no
+    explicit require_ha_auth in options), direct port 8765 must 401
+    by default. The runtime default flips to True so opening
+    http://homeassistant.local:8765 requires auth."""
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "fake-supervisor")
+    _stub_supervisor_options(monkeypatch)
+    settings_file = tmp_path / "settings.json"
+    options_file = tmp_path / "options.json"
+    # No options file at all — pure fresh install.
+
+    s = init_settings(settings_path=settings_file, options_path=options_file)
+
+    assert s.require_ha_auth is True, (
+        "#87: HAOS fresh install must default require_ha_auth=True so "
+        "direct port 8765 access returns 401"
+    )
+
+
+def test_fresh_install_defaults_require_ha_auth_false_on_standalone(tmp_path: Path, monkeypatch):
+    """Bug #83 preserved: standalone Docker (no SUPERVISOR_TOKEN) must
+    stay accessible on direct port without auth by default — the user
+    has no way to validate HA tokens."""
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
+    settings_file = tmp_path / "settings.json"
+    options_file = tmp_path / "options.json"
+
+    s = init_settings(settings_path=settings_file, options_path=options_file)
+
+    assert s.require_ha_auth is False, (
+        "#83: standalone Docker must keep require_ha_auth=False default"
+    )
+
+
+def test_explicit_false_in_options_overrides_haos_default(tmp_path: Path, monkeypatch):
+    """When the user (or upgrade path) has an explicit
+    require_ha_auth: false in options.json, that wins over the #87
+    HAOS default."""
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "fake-supervisor")
+    _stub_supervisor_options(monkeypatch)
+    settings_file = tmp_path / "settings.json"
+    options_file = tmp_path / "options.json"
+    options_file.write_text(json.dumps({"require_ha_auth": False}))
+
+    s = init_settings(settings_path=settings_file, options_path=options_file)
+
+    assert s.require_ha_auth is False, (
+        "Explicit options.json value must win over #87 HAOS default"
+    )
+
+
 def test_init_imports_job_timeout_and_friends_from_options(tmp_path: Path):
     """SP.8: job/ota timeouts, thresholds, require_ha_auth migrate on first boot."""
     settings_file = tmp_path / "settings.json"
@@ -438,13 +509,15 @@ def test_init_creates_settings_file_when_absent(tmp_path: Path):
         "ota_timeout": 120,
         "worker_offline_threshold": 30,
         "device_poll_interval": 60,
-        "require_ha_auth": True,
+        "require_ha_auth": False,
         "time_format": "auto",
     }
     # Everything else matches the dataclass defaults.
     assert s.auto_commit_on_save is True
     assert s.job_timeout == 600
-    assert s.require_ha_auth is True
+    # #83: default flipped to False in 1.6.2 — standalone Docker
+    # installs must be reachable without a token out of the box.
+    assert s.require_ha_auth is False
     assert s.server_token  # auto-generated, non-empty
 
 
@@ -705,7 +778,7 @@ def test_settings_as_dict_round_trips():
         "ota_timeout": 120,
         "worker_offline_threshold": 30,
         "device_poll_interval": 60,
-        "require_ha_auth": True,
+        "require_ha_auth": False,
         "time_format": "auto",
     }
 

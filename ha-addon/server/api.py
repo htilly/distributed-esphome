@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from functools import lru_cache
@@ -31,6 +32,8 @@ from protocol import (
     ProtocolError,
     RegisterRequest,
     RegisterResponse,
+    WorkerDiagnosticsUpload,
+    WorkerLogAppend,
 )
 from scanner import create_bundle, get_esphome_version
 
@@ -182,6 +185,25 @@ async def _heartbeat_handler(request: web.Request) -> web.Response:
     if worker and worker.pending_clean:
         resp.clean_build_cache = True
         worker.pending_clean = False
+
+    # WL.2: tell the worker to start (or stop) streaming logs based on
+    # whether any UI is currently watching. Explicit True/False — never
+    # leave it as None once the feature is live because the worker uses
+    # the explicit False to tear its pusher thread down.
+    broker = request.app.get("worker_log_broker")
+    if broker is not None:
+        resp.stream_logs = broker.is_watched(msg.client_id)
+
+    # #109: if the UI has asked for a thread dump from this worker,
+    # surface the pending request id. The worker will POST the dump to
+    # /api/v1/workers/{id}/diagnostics and we'll clear the slot once
+    # it arrives (see `receive_worker_diagnostics`).
+    diag = request.app.get("diagnostics_broker")
+    if diag is not None:
+        pending = diag.pending_for_worker(msg.client_id)
+        if pending is not None:
+            resp.diagnostics_request_id = pending
+
     return web.json_response(resp.model_dump(exclude_none=True))
 
 
@@ -361,14 +383,34 @@ async def get_next_job(request: web.Request) -> web.Response:
     if job is None:
         return web.Response(status=204)
 
-    # Generate bundle on demand
+    # Generate bundle on demand. BD — ships only the target's
+    # referenced files (no `.git/`, no cross-device secrets) via
+    # ESPHome's ConfigBundleCreator. Runs off the event loop because
+    # bundling re-parses YAML and runs the full validator — same
+    # rationale as reseed_device_poller_from_config in main.py.
     try:
-        bundle_bytes = create_bundle(cfg.config_dir)
+        loop = asyncio.get_running_loop()
+        bundle_bytes = await loop.run_in_executor(
+            None, create_bundle, cfg.config_dir, job.target,
+        )
         bundle_b64 = base64.b64encode(bundle_bytes).decode("ascii")
-    except Exception:
+    except Exception as exc:
+        # BD.1: bundle creation wraps the full ESPHome validator; most
+        # failures here are real YAML-schema problems the user needs to
+        # fix (e.g. "Duplicate entity", "Only one binary sensor of
+        # type 'motion' allowed"). Surface the error on the job itself
+        # — status FAILED + exception message as the log — so the
+        # Queue-tab row shows the validation message directly. Cancel
+        # would leave the user staring at a greyed-out row with no
+        # explanation.
         logger.exception("Failed to create bundle for job %s", job.id)
-        # Release job back to pending
-        await queue.cancel([job.id])
+        err_msg = (
+            f"Bundle creation failed for {job.target}: "
+            f"{type(exc).__name__}: {exc}\n\n"
+            "ESPHome Fleet validates the target config before dispatching "
+            "it to a worker (BD). Fix the YAML error above and re-queue."
+        )
+        await queue.submit_result(job.id, "failed", log=err_msg)
         return web.json_response({"error": "Bundle creation failed"}, status=500)
 
     registry.set_job(client_id, job.id)
@@ -654,6 +696,106 @@ async def append_job_log(request: web.Request) -> web.Response:
         except Exception:
             subscribers[job_id].discard(sub_ws)
 
+    return web.json_response(OkResponse().model_dump())
+
+
+@routes.get("/api/v1/workers/{id}/control")
+async def get_worker_control(request: web.Request) -> web.Response:
+    """WL.2: fast-path control signal the worker polls at 1 Hz.
+
+    Heartbeat also carries ``stream_logs`` but runs every 10 s, which
+    makes the dialog feel dead for up to 10 s after opening before the
+    first line appears. This endpoint is cheap — just the broker's
+    is_watched() boolean — so the worker can poll it every second
+    without the traffic cost of a full heartbeat. Bearer auth (same
+    middleware as the rest of ``/api/v1/*``).
+    """
+    client_id = request.match_info["id"]
+    broker = request.app.get("worker_log_broker")
+    stream_logs = broker.is_watched(client_id) if broker else False
+    body: dict[str, object] = {"stream_logs": stream_logs}
+    # #109: piggyback any outstanding diagnostics request on the same
+    # 1-Hz poll so the worker reacts within a second of a UI click.
+    diag = request.app.get("diagnostics_broker")
+    if diag is not None:
+        pending = diag.pending_for_worker(client_id)
+        if pending is not None:
+            body["diagnostics_request_id"] = pending
+    return web.json_response(body)
+
+
+@routes.post("/api/v1/workers/{id}/logs")
+async def append_worker_log(request: web.Request) -> web.Response:
+    """WL.2: receive a worker-log push while ``stream_logs`` is on.
+
+    Body-size cap + shape mirror the job-log path (``/api/v1/jobs/{id}/log``)
+    so the two log streams look identical on the wire. The heartbeat
+    handler is what flips ``stream_logs``; this endpoint just trusts
+    the flag and buffers what arrives.
+    """
+    client_id = request.match_info["id"]
+
+    from job_queue import MAX_LOG_BYTES  # noqa: PLC0415
+    max_body = MAX_LOG_BYTES * 4
+    content_length = request.content_length
+    if content_length is not None and content_length > max_body:
+        return _protocol_error(
+            "log_payload_too_large",
+            f"body {content_length} bytes exceeds cap {max_body}",
+            status=413,
+        )
+
+    msg, err = await _parse_body(request, WorkerLogAppend)
+    if err is not None:
+        return err
+    assert msg is not None
+
+    broker = request.app.get("worker_log_broker")
+    if broker is None:
+        # Shouldn't happen in production (main.py instantiates it in
+        # app startup), but guard so tests that wire only the registry
+        # don't crash with a vaguer error.
+        return _protocol_error("worker_log_broker_unavailable", status=500)
+
+    await broker.append_async(client_id, msg.offset, msg.lines)
+    return web.json_response(OkResponse().model_dump())
+
+
+@routes.post("/api/v1/workers/{id}/diagnostics")
+async def receive_worker_diagnostics(request: web.Request) -> web.Response:
+    """#109: receive a py-spy thread dump a worker produced in response
+    to an outstanding diagnostics request.
+
+    The body is the typed :class:`WorkerDiagnosticsUpload` — ``request_id``
+    matches the id the server handed out on heartbeat / control; ``ok``
+    distinguishes a real dump from an error message; ``dump`` carries
+    either. Stored in the diagnostics broker keyed by ``request_id`` so
+    the UI's polling endpoint can hand it back.
+    """
+    client_id = request.match_info["id"]
+
+    # Cap the body size so a misbehaving worker can't push an
+    # unbounded string. py-spy dumps are well under 2 MB in practice.
+    from diagnostics import MAX_UPLOAD_BYTES  # noqa: PLC0415
+    content_length = request.content_length
+    if content_length is not None and content_length > MAX_UPLOAD_BYTES:
+        return _protocol_error(
+            "diagnostics_payload_too_large",
+            f"body {content_length} bytes exceeds cap {MAX_UPLOAD_BYTES}",
+            status=413,
+        )
+
+    msg, err = await _parse_body(request, WorkerDiagnosticsUpload)
+    if err is not None:
+        return err
+    assert msg is not None
+
+    diag = request.app.get("diagnostics_broker")
+    if diag is None:
+        return _protocol_error("diagnostics_broker_unavailable", status=500)
+
+    diag.store_result(msg.request_id, ok=msg.ok, dump=msg.dump)
+    diag.claim_pending(client_id, msg.request_id)
     return web.json_response(OkResponse().model_dump())
 
 

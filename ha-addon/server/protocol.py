@@ -120,6 +120,16 @@ class HeartbeatResponse(_ProtocolMessage):
     min_image_version: Optional[str] = None
     set_max_parallel_jobs: Optional[int] = None
     clean_build_cache: Optional[bool] = None
+    # WL.2: None = "unchanged" (default — older servers never set it).
+    # True = start pushing logs at 1 Hz to /api/v1/workers/{id}/logs.
+    # False = stop pushing and tear down the pusher thread.
+    stream_logs: Optional[bool] = None
+    # #109: when non-empty, the server is asking the worker to produce a
+    # py-spy thread dump of its own process and POST it back to
+    # /api/v1/workers/{id}/diagnostics. The worker is free to dedupe on
+    # the id so repeated heartbeats under one outstanding request don't
+    # trigger multiple dumps.
+    diagnostics_request_id: Optional[str] = None
     protocol_version: int = PROTOCOL_VERSION
 
 
@@ -172,6 +182,49 @@ class JobStatusUpdate(_ProtocolMessage):
 
 class JobLogAppend(_ProtocolMessage):
     lines: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Worker logs — POST /api/v1/workers/{client_id}/logs (WL.2, pull-when-watched)
+# ---------------------------------------------------------------------------
+
+
+class WorkerLogAppend(_ProtocolMessage):
+    """Payload the worker sends while the server's stream_logs flag is on.
+
+    Shape mirrors ``JobLogAppend`` as closely as possible — the same pre-
+    formatted, ANSI-coloured, newline-terminated text xterm renders directly.
+    ``offset`` is the byte-offset of the first byte of ``lines`` since worker
+    process start; the server uses it to dedupe retries and to detect worker
+    restarts (``offset`` going backwards).
+    """
+
+    offset: int = 0
+    lines: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics — POST /api/v1/workers/{client_id}/diagnostics (#109)
+# ---------------------------------------------------------------------------
+
+
+class WorkerDiagnosticsUpload(_ProtocolMessage):
+    """Worker's reply after a server-initiated diagnostics request.
+
+    ``request_id`` matches the token the server handed out via
+    ``HeartbeatResponse.diagnostics_request_id`` / the control endpoint, so
+    a UI client polling for the result can correlate upload to request.
+
+    ``dump`` is the ``py-spy dump --pid <self>`` text output (or, when py-spy
+    attach fails on the worker host — missing binary, dropped SYS_PTRACE —
+    a short human-readable error string the UI surfaces verbatim). ``ok``
+    distinguishes the two so the UI can render a download vs. a failure
+    toast without parsing text.
+    """
+
+    request_id: str
+    ok: bool = True
+    dump: str = ""
 
 
 # ---------------------------------------------------------------------------

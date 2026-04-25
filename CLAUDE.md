@@ -2,6 +2,10 @@
 
 Guidance for Claude Code (claude.ai/code) when working in this repository.
 
+## Concision
+
+Be extremely concise. Sacrifice grammar for the sake of concision.
+
 ## Project Overview
 
 ESPHome Fleet (internally: `distributed-esphome`) manages fleets of ESPHome devices — offloads compilation to remote workers, schedules upgrades, pins versions per device, and organizes devices via tags. Runs as a Home Assistant add-on with a built-in local worker. Additional build workers run in Docker on remote machines, poll the server for jobs, compile firmware using ESPHome, and push firmware via OTA directly to ESP devices.
@@ -206,7 +210,9 @@ Everything lives in `dev-plans/`:
 
 - `dev-plans/README.md` — index.
 - `dev-plans/WORKITEMS-X.Y.md` — one file per release. Feature work items (checkboxes) + bug fixes (numbered). **Bug numbers are global and monotonic across releases** — never reset.
-- `dev-plans/WORKITEMS-1.7.md` — current release (LLM assistance — multi-provider in-editor YAML assistant, fleet-wide tool-calling chat, release breaking-change analyzer).
+- `dev-plans/WORKITEMS-1.6.2.md` — current release (Install paths users can trust — closes #82 fresh-HAOS install, #83 standalone Docker auth, #84 `wifi.domain` OTA; adds install regression guards for both the HAOS and standalone-Docker paths; restates the Gold claim honestly via TP.1/TP.3-docs/TP.4; adds worker log visibility for the first-setup-operational-gap class).
+- `dev-plans/WORKITEMS-1.6.3.md` — next release (Honest Gold — the tier-flip that 1.6.2 pivoted away from: walks every remaining Bronze+Silver+Gold quality-scale rule to done/exempt so the claim is hassfest-backed, closes the TEST-AUDIT-1.6.1 blind spots, finishes the ESPHome-delegation audit, UX polish).
+- `dev-plans/WORKITEMS-1.7.md` — after-next release (LLM assistance — multi-provider in-editor YAML assistant, fleet-wide tool-calling chat, release breaking-change analyzer).
 - `dev-plans/WORKITEMS-future.md` — unscheduled items. Things we may do someday but haven't picked a release for yet.
 - `dev-plans/archive/` — released WORKITEMS files from prior versions. Historical reference; don't edit.
 - `dev-plans/SECURITY_AUDIT.md` — security audit findings.
@@ -219,8 +225,8 @@ Everything lives in `dev-plans/`:
 
 **Turn** = one user prompt → one assistant response cycle. At the end of every turn:
 1. Run `bash scripts/bump-dev.sh` — auto-increments `-dev.N`. Never skip.
-2. Run `./push-to-hass-4.sh` for the prod smoke test.
-3. **Check add-on logs for errors/warnings** after deploy: `ssh root@hass-4.local "ha addons logs local_esphome_dist_server" | grep -iE "ERROR|WARNING|Traceback|DeprecationWarning" | tail -20`. Fix any new issues before moving on. Warnings that existed before this turn can be noted but don't block.
+2. Run `python scripts/test-matrix.py` — builds+pushes the three dev images to GHCR, then deploys + Playwright-smokes all three install paths (hass-4, haos-pve, standalone-pve) in parallel and prints a collated summary with clickable URLs. Targets budget is ≲5 min warm-cache. When iterating on a narrow UI change where the full matrix is overkill, `./push-to-hass-4.sh` remains as a faster single-target loop (source-rebuild, no GHCR round-trip).
+3. **Check add-on logs for errors/warnings** on hass-4 after deploy: `ssh root@hass-4.local "ha addons logs local_esphome_dist_server" | grep -iE "ERROR|WARNING|Traceback|DeprecationWarning" | tail -20`. Fix any new issues before moving on. hass-4 is the primary target for log-watching; `build/test-matrix/<target>/deploy.log` has the per-target capture for the other two if a failure points there. Warnings that existed before this turn can be noted but don't block.
 4. Update `dev-plans/WORKITEMS-X.Y.md` immediately — check the box, add the specific dev.N tag. Don't batch.
 
 **Work item / bug checkbox format:** `- [x] **#NNN** *(X.Y.Z-dev.N)* — description` (the `#NNN` only applies to bugs). Use the exact dev.N, not a generic `dev`. For wontfix/duplicate/stale entries, use `~~**#NNN**~~ WONTFIX —` (strike-through bold ID + label).
@@ -249,8 +255,14 @@ This is deliberately simple for a single-developer project. If parallel lines of
 When a PR has review comments (Copilot bot, human reviewer, or both), the working pattern is:
 
 1. **Address every comment in the same push.** Fix the code, update tests, land a workitem entry if the reviewer is pointing at future work. Don't leave comments hanging across pushes — a later reader can't tell which comment drove which commit.
-2. **Resolve the review thread on GitHub.** After the fix lands, mark the comment conversation as **Resolved** in the PR UI (or via the GraphQL `resolveReviewThread` mutation below). An unresolved thread looks like an open concern even when the underlying code is already fixed, and it clutters the PR sidebar until merge. This is as important as the fix itself.
+2. **Resolve the review thread on GitHub in the same turn the fix lands.** Automatic — don't wait for a reminder. After `git push` succeeds:
+    - Re-query the PR's unresolved threads (snippet below).
+    - For every thread that the push just addressed, **post a reply** citing the commit SHA (e.g. `"Fixed in <SHA> — <one-line what-changed>"`) so a later reader can cross-reference thread ↔ commit without diffing the push.
+    - **Then** call `resolveReviewThread` with that thread's id.
+    - Re-query to confirm the thread flipped to `isResolved: true`.
+   An unresolved thread looks like an open concern even when the underlying code is already fixed, and it clutters the PR sidebar until merge. This is as important as the fix itself.
 3. **Exception — intentionally-deferred items.** If the comment points at work that's legitimately out of scope for this PR, file it in `dev-plans/WORKITEMS-*.md` first, reply to the comment with a pointer to the new workitem ID, *then* resolve the thread. The workitem is the record of the deferral; the thread should close because the next step (fix in a future PR) is now tracked elsewhere.
+4. **Exception — disagreed with / false-alarm comments.** Reply with the reasoning (link to the `dev-plans/` entry or design doc that makes the decision, e.g. a WONTFIX finding in `SECURITY_AUDIT.md`), then resolve. A resolved thread with a reply is readable later; an ignored thread is a perpetual "maybe there's a bug here" sidebar row.
 
 Resolve threads with:
 
@@ -267,17 +279,32 @@ gh api graphql -f query='
     }
   }' -F owner=weirded -F repo=distributed-esphome -F pr=64
 
+# Post a reply to a thread (cite the commit SHA that addressed it so
+# the cross-reference is readable later). Needs the *first* comment's
+# databaseId, which you fetch from the thread node — API lets you POST
+# "replies" off the first comment:
+CID=$(gh api graphql -f query='query($id:ID!){node(id:$id){... on PullRequestReviewThread{comments(first:1){nodes{databaseId}}}}}' \
+      -F id=PRRT_kwDO... --jq .data.node.comments.nodes[0].databaseId)
+gh api "repos/weirded/distributed-esphome/pulls/<PR>/comments/$CID/replies" \
+  -X POST -f body='Fixed in <SHA> — <one-line what-changed>.'
+
 # Resolve one by its thread id (from the query above):
 gh api graphql -f query='
   mutation($id:ID!) {
     resolveReviewThread(input:{threadId:$id}) { thread { isResolved } }
-  }' -F id=PRT_kwDO...
+  }' -F id=PRRT_kwDO...
 ```
 
-End-of-turn rule when a PR has review feedback: **before the commit + push, enumerate every thread that was touched and resolve it.** "Fix and leave the thread open" is not finished work.
+End-of-turn rule when a PR has review feedback: **before marking the turn done, re-query unresolved threads and close every one the push addressed.** "Fix and leave the thread open" is not finished work — the fix is half-shipped until the thread is closed. Same rule for automated reviewers (Copilot) as for human reviewers.
 
 ## Deployment
 
-`hass-4` is the local Home Assistant instance. `./push-to-hass-4.sh` deploys the add-on, waits for the new version to report ready, and runs the full `e2e-hass-4` Playwright suite (real compile + OTA to `cyd-office-info`). Run after every turn.
+`hass-4` is one of three machines in the integration-testing home lab that every turn smokes against. See `dev-plans/HOME-LAB.md` for the full host list, the `192.168.224.0/22` flat-network assumption, and the SSH setup all hosts share.
+
+**`python scripts/test-matrix.py --web`** is the canonical end-of-turn command. **Always pass `--web` and `open http://127.0.0.1:8099` in the default browser** so Stefan can watch progress live — the dashboard streams per-target state, logs, and the final matrix, and it stays up after the run until Ctrl-C. The script builds+pushes three dev-tagged images to GHCR (addon for hass-4 + haos-pve, standalone server + client for standalone-pve), deploys in parallel via `push-to-hass-4.sh --from-ghcr`, `push-to-haos.sh --from-ghcr`, and `scripts/standalone/deploy.sh`, runs the `e2e-hass-4` Playwright suite against each (standalone filters out `@requires-ha`-tagged specs), and collates results into a pass/fail matrix + URL list. Per-target logs land under `build/test-matrix/<target>/`. `--targets` selects a subset; `--no-build` reuses the last pushed tag for fast iteration on the orchestrator itself. `--web-port` overrides the default 8099 if something else has the port.
+
+**`./push-to-hass-4.sh`** is the fast-path single-target loop: source-tarball to hass-4, Supervisor local-build, `e2e-hass-4` Playwright run. Preferred when iterating on a UI-only change and the full matrix is overkill. Flags: `--from-ghcr` (pull instead of rebuild; what the matrix uses) and `--skip-smoke` (deploy only).
+
+**`./push-to-haos.sh`** drives the HAOS VM at `192.168.226.135`. Same two flags.
 
 **HA Core restart when the custom integration changes.** Changes under `ha-addon/custom_integration/` require a full `ha core restart` to take effect — the integration_installer copies new files to `/config/custom_components/` on add-on boot, but HA Core loads Python modules once at startup and doesn't hot-reload them. The add-on restart during deploy does NOT restart HA Core (Supervisor only restarts the add-on container). `push-to-hass-4.sh` hashes the integration directory and compares to a remote stamp file (`/tmp/esphome_fleet_integration.hash`); on a mismatch it runs `ha core restart` before the smoke suite. Skipped when the integration is byte-identical to the last push so non-integration turns don't pay the 30-60s restart cost.

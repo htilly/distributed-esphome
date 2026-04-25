@@ -26,6 +26,8 @@ import {
   setWorkerParallelJobs,
   retryAllFailed,
   retryJobs,
+  requestServerDiagnostics,
+  requestWorkerDiagnostics,
   setEsphomeVersion,
   setInitialAddonVersion,
   validateConfig,
@@ -65,6 +67,7 @@ import {
 import { WorkersTab } from './components/WorkersTab';
 import type { Device, Job, Target, Worker } from './types';
 import { setTimeFormatPref, stripYaml } from './utils';
+import { downloadTextFile } from './utils/terminal';
 import esphomeLogoUrl from './assets/esphome-logo.svg';
 import './theme.css';
 
@@ -272,6 +275,10 @@ export default function App() {
   }, [streamerMode]);
 
   const [logJobId, setLogJobId] = useState<string | null>(null);
+  // WL.3: separate state for the worker-log dialog; both feed the same
+  // `<LogModal>` but only one can be open at a time (they share the
+  // xterm + WS transport).
+  const [logWorkerId, setLogWorkerId] = useState<string | null>(null);
   const [deviceLogTarget, setDeviceLogTarget] = useState<string | null>(null);
   const [editorTarget, setEditorTarget] = useState<string | null>(null);
   const [connectModalOpen, setConnectModalOpen] = useState(false);
@@ -474,6 +481,9 @@ export default function App() {
   async function handleClearJobs(ids: string[]) {
     try {
       await removeJobs(ids);
+      if (ids.length > 1) {
+        addToast(`Cleared ${ids.length} jobs`, 'success');
+      }
       mutateQueue();
     } catch {
       addToast('Clear failed', 'error');
@@ -543,6 +553,41 @@ export default function App() {
       mutateWorkers();
     } catch (err) {
       addToast('Error: ' + (err as Error).message, 'error');
+    }
+  }
+
+  // #109: "Request diagnostics" — fires either the server self-dump
+  // path or the round-trip worker path, downloads the resulting text
+  // file, and surfaces worker-side failures (py-spy denied, etc.)
+  // inline in the toast rather than blowing up the whole action.
+  async function handleRequestWorkerDiagnostics(id: string) {
+    const workerName = workers.find(w => w.client_id === id)?.hostname || id;
+    addToast(`Requesting diagnostics from ${workerName}…`, 'info');
+    try {
+      const { ok, filename, body } = await requestWorkerDiagnostics(id);
+      downloadTextFile(body, filename);
+      if (ok) {
+        addToast(`Diagnostics downloaded from ${workerName}`, 'success');
+      } else {
+        addToast(`Diagnostics request returned an error — see the downloaded file for details`, 'error');
+      }
+    } catch (err) {
+      addToast('Diagnostics failed: ' + (err as Error).message, 'error');
+    }
+  }
+
+  async function handleRequestServerDiagnostics() {
+    addToast('Requesting server diagnostics…', 'info');
+    try {
+      const { ok, filename, body } = await requestServerDiagnostics();
+      downloadTextFile(body, filename);
+      if (ok) {
+        addToast('Server diagnostics downloaded', 'success');
+      } else {
+        addToast('Server diagnostics returned an error — see the downloaded file for details', 'error');
+      }
+    } catch (err) {
+      addToast('Server diagnostics failed: ' + (err as Error).message, 'error');
     }
   }
 
@@ -787,6 +832,8 @@ export default function App() {
             onCleanCache={handleCleanWorkerCache}
             onCleanAllCaches={handleCleanAllCaches}
             onConnectWorker={(preset) => { setConnectModalPreset(preset ?? null); setConnectModalOpen(true); }}
+            onViewLogs={setLogWorkerId}
+            onRequestDiagnostics={handleRequestWorkerDiagnostics}
           />
         )}
         {activeTab === 'schedules' && (
@@ -841,10 +888,10 @@ export default function App() {
       )}
 
       <LogModal
-        jobId={logJobId}
+        source={logJobId ? { kind: 'job', jobId: logJobId } : logWorkerId ? { kind: 'worker', workerId: logWorkerId } : null}
         queue={queue}
         workers={workers}
-        onClose={() => setLogJobId(null)}
+        onClose={() => { setLogJobId(null); setLogWorkerId(null); }}
         onRetry={handleRetryJobs}
         onEdit={(target) => { setLogJobId(null); setEditorTarget(target); }}
         onOpenHistoryDiff={(target, fromHash) => {
@@ -916,6 +963,7 @@ export default function App() {
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
         dirtyTargets={targets.filter(t => t.has_uncommitted_changes).map(t => t.target)}
+        onRequestServerDiagnostics={handleRequestServerDiagnostics}
       />
 
       {/* JH.5: per-device Compile History drawer. Mounted once;

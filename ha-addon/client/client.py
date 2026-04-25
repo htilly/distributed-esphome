@@ -33,6 +33,8 @@ from protocol import (
     RegisterRequest,
     RegisterResponse,
     SystemInfo,
+    WorkerDiagnosticsUpload,
+    WorkerLogAppend,
 )
 from version_manager import VersionManager
 from sysinfo import collect_system_info
@@ -43,7 +45,7 @@ from sysinfo import collect_system_info
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.6.1"
+CLIENT_VERSION = "1.6.2"
 
 
 def _read_image_version() -> Optional[str]:
@@ -95,6 +97,20 @@ logging.basicConfig(
 # Attach the filter to the root handler so it runs for every log record.
 for _h in logging.getLogger().handlers:
     _h.addFilter(_WorkerContextFilter())
+
+# WL.1: capture every formatted record into a bounded ring buffer so
+# the pull-when-watched pusher (WL.2) has a backlog ready whenever the
+# server's ``stream_logs`` flag flips on. Handler is a tee — the
+# existing StreamHandler to stdout is unchanged.
+from log_capture import LogCaptureHandler  # noqa: E402
+
+_log_capture = LogCaptureHandler()
+_log_capture.setFormatter(
+    logging.Formatter(f"%(asctime)s %(levelname)-8s v{CLIENT_VERSION} %(ctx)s%(name)s: %(message)s")
+)
+_log_capture.addFilter(_WorkerContextFilter())
+logging.getLogger().addHandler(_log_capture)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -349,6 +365,224 @@ def _clean_build_cache() -> None:
     logger.info("Build cache clean complete — removed %d version(s)", removed)
 
 
+# ---------------------------------------------------------------------------
+# WL.2: pull-when-watched log pusher
+# ---------------------------------------------------------------------------
+
+# Set by the control-poll / heartbeat loops whenever the server reports
+# ``stream_logs=True``; cleared on False. Read by the pusher thread.
+_stream_logs_event = threading.Event()
+
+# Byte-offset the next pusher push should start from. Module-scoped so
+# it survives the pusher thread exiting when a user closes the dialog —
+# otherwise a close+reopen would respawn the pusher with
+# ``acked_offset=0`` and re-send the whole ring buffer. The server
+# treats that as a worker restart (offset=0 after next_offset>0), emits
+# its "--- worker restarted ---" separator, and the UI sees every line
+# twice.
+_log_push_acked_offset = 0
+_log_push_lock = threading.Lock()
+
+# Guards the check-then-spawn in _update_log_streaming so the control-
+# poll thread and the heartbeat thread can't race into spawning two
+# pushers.
+_streaming_start_lock = threading.Lock()
+
+# #109: id of the diagnostics request currently being serviced (or
+# just handed off to a worker thread). The heartbeat and the 1-Hz
+# control poll both see the same request id for up to 10 s until the
+# server clears the pending slot, so we dedupe on this to avoid
+# running `py-spy dump` three times for one click.
+_diagnostics_in_flight: set[str] = set()
+_diagnostics_in_flight_lock = threading.Lock()
+
+
+def _log_pusher_loop(client_id: str, stop_event: threading.Event) -> None:
+    """Drain the LogCaptureHandler ring and POST chunks to the server.
+
+    Runs while ``_stream_logs_event`` is set. Exits cleanly when either
+    that event clears (server told us to stop) or ``stop_event`` is set
+    (process shutdown).
+
+    Acked offset lives in the module-level ``_log_push_acked_offset``
+    so a dialog close+reopen picks up where the previous pusher left
+    off — no re-sending chunks the server already has.
+
+    Retry policy on transport error: do NOT advance the ack; the next
+    tick will re-send from the same point. Lines never drop on happy
+    + 5xx paths.
+    """
+    global _log_push_acked_offset
+    while _stream_logs_event.is_set() and not stop_event.is_set():
+        with _log_push_lock:
+            acked_offset = _log_push_acked_offset
+        chunk, new_offset = _log_capture.drain_since(acked_offset)
+        if chunk:
+            try:
+                resp = post(
+                    f"/api/v1/workers/{client_id}/logs",
+                    WorkerLogAppend(offset=acked_offset, lines=chunk).model_dump(),
+                    timeout=10,
+                )
+                if resp.ok:
+                    with _log_push_lock:
+                        _log_push_acked_offset = new_offset
+                # else: transient server-side error, retry next tick.
+            except requests.RequestException:
+                # Network hiccup — retry next tick without advancing.
+                pass
+        # 1 Hz push cadence matches the approved design; fast enough
+        # to feel like tail -f without generating much traffic.
+        stop_event.wait(1.0)
+
+
+def _control_poll_loop(client_id: str, stop_event: threading.Event) -> None:
+    """Poll /api/v1/workers/{id}/control at 1 Hz for fast watch-state updates.
+
+    The heartbeat also carries ``stream_logs`` but runs every 10 s — too
+    slow for a "tail -f" UX. This lightweight GET (body is just
+    ``{"stream_logs": bool}``) lets the worker react within ~1 s of a
+    UI user opening or closing the log dialog.
+    """
+    while not stop_event.is_set():
+        try:
+            resp = get(f"/api/v1/workers/{client_id}/control", timeout=5)
+            if resp.ok:
+                data = resp.json()
+                stream_logs = data.get("stream_logs")
+                if isinstance(stream_logs, bool):
+                    _update_log_streaming(client_id, stream_logs, stop_event)
+                # #109: fast-path diagnostics pickup — same request id
+                # rides both the heartbeat (every 10 s) and this 1 Hz
+                # poll, so a "Request diagnostics" click lands a dump
+                # in the UI within a second or two.
+                diag_req = data.get("diagnostics_request_id")
+                if isinstance(diag_req, str) and diag_req:
+                    _maybe_handle_diagnostics_request(client_id, diag_req)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+            # Same reachability dedup as heartbeat — don't spam warnings
+            # when the server is briefly unavailable. Next tick retries.
+            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("control-poll unexpected error: %s", exc)
+        stop_event.wait(1.0)
+
+
+def _maybe_handle_diagnostics_request(client_id: str, request_id: str) -> None:
+    """Fire-and-forget a worker thread that runs ``py-spy dump --pid
+    <self>`` and POSTs the result. Deduplicated on ``request_id`` so
+    the heartbeat + 1-Hz control poll firing the same id don't trigger
+    parallel dumps (#109).
+    """
+    with _diagnostics_in_flight_lock:
+        if request_id in _diagnostics_in_flight:
+            return
+        _diagnostics_in_flight.add(request_id)
+
+    def _runner() -> None:
+        try:
+            ok, dump = _produce_thread_dump()
+            try:
+                payload = WorkerDiagnosticsUpload(
+                    request_id=request_id, ok=ok, dump=dump,
+                ).model_dump(exclude_none=True)
+                resp = post(
+                    f"/api/v1/workers/{client_id}/diagnostics",
+                    payload,
+                    timeout=30,
+                )
+                if not resp.ok:
+                    logger.warning(
+                        "diagnostics upload failed: HTTP %s — %s",
+                        resp.status_code, resp.text[:200],
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("diagnostics upload unexpected error: %s", exc)
+        finally:
+            with _diagnostics_in_flight_lock:
+                _diagnostics_in_flight.discard(request_id)
+
+    threading.Thread(target=_runner, name="diag-upload", daemon=True).start()
+
+
+def _in_process_thread_dump() -> str:
+    """Walk every live Python thread's stack and format the result as
+    plain text. Mirror of ``diagnostics.in_process_thread_dump`` on
+    the server side — duplicated here because the client image
+    doesn't include server-only modules (same reason protocol.py has
+    two byte-identical copies).
+
+    Pure-Python frame walk via :func:`sys._current_frames` and
+    :func:`threading.enumerate`: no ``py-spy``, no subprocess, no
+    ``ptrace``. Works under any container constraints (HA add-on with
+    dropped ``CAP_SYS_PTRACE``, HAOS / Supervised sidecars, etc.) —
+    added in #189, supersedes #108's py-spy-subprocess path.
+    """
+    import platform  # noqa: PLC0415 — lazy import, only on diagnostics path
+    import traceback  # noqa: PLC0415
+
+    frames = sys._current_frames()
+    threads_by_ident = {t.ident: t for t in threading.enumerate()}
+
+    lines: list[str] = [
+        "ESPHome Fleet worker thread dump",
+        f"Process: pid={os.getpid()}  v{CLIENT_VERSION}  image={IMAGE_VERSION}",
+        f"Python {platform.python_version()} on {sys.platform}",
+        f"{len(frames)} thread(s)",
+        "",
+    ]
+    for tid, frame in frames.items():
+        thread = threads_by_ident.get(tid)
+        if thread is not None:
+            name = thread.name
+            daemon = "daemon=True" if thread.daemon else "daemon=False"
+        else:
+            name = "<unknown>"
+            daemon = "daemon=?"
+        lines.append(f'Thread {tid} "{name}" ({daemon}):')
+        for chunk in traceback.format_stack(frame):
+            for subline in chunk.rstrip("\n").splitlines():
+                lines.append(f"  {subline}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _produce_thread_dump() -> tuple[bool, str]:
+    """Capture a thread dump of this worker's own process. Returns
+    ``(ok, text)``; ``ok`` is always True on this code path since the
+    in-process frame walk can't fail under container constraints.
+    The bool is retained in the signature for protocol compatibility
+    with :class:`WorkerDiagnosticsUpload`."""
+    return True, _in_process_thread_dump()
+
+
+def _update_log_streaming(client_id: str, stream_logs: Optional[bool],
+                          stop_event: threading.Event) -> None:
+    """Start or stop the pusher thread on watch-state transitions.
+
+    Called from both the control-poll loop (1 Hz) and the heartbeat
+    loop (10 s). None means "unchanged — default state pre-WL, absent
+    field in response"; only explicit True/False drive state changes.
+
+    Guarded by ``_streaming_start_lock`` so the two callers can't race
+    into spawning two pusher threads for the same transition.
+    """
+    if stream_logs is None:
+        return
+    with _streaming_start_lock:
+        if stream_logs and not _stream_logs_event.is_set():
+            _stream_logs_event.set()
+            t = threading.Thread(
+                target=_log_pusher_loop,
+                args=(client_id, stop_event),
+                name="log-pusher",
+                daemon=True,
+            )
+            t.start()
+        elif not stream_logs and _stream_logs_event.is_set():
+            _stream_logs_event.clear()
+
+
 def heartbeat_loop(client_id: str, stop_event: threading.Event) -> None:
     """Send heartbeats to the server until stop_event is set."""
     global _image_upgrade_logged
@@ -409,6 +643,17 @@ def heartbeat_loop(client_id: str, stop_event: threading.Event) -> None:
                 if data.clean_build_cache:
                     logger.info("Server requested build cache clean — clearing esphome-versions")
                     _clean_build_cache()
+                # WL.2: start/stop the log pusher thread based on the
+                # server's watch state. The heartbeat is the single
+                # signal source; pusher never polls the server for
+                # this flag on its own.
+                _update_log_streaming(client_id, data.stream_logs, stop_event)
+                # #109: the UI asked us for a thread dump. Run py-spy
+                # on our own PID and POST the result. Done off-thread
+                # so a stuck py-spy (or a long dump) doesn't stall
+                # heartbeat cadence.
+                if data.diagnostics_request_id is not None:
+                    _maybe_handle_diagnostics_request(client_id, data.diagnostics_request_id)
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
             _on_server_unreachable(exc)
         except Exception as exc:
@@ -1576,30 +1821,26 @@ def main() -> None:
     # Check for available update before accepting any work
     _initial_version_check(client_id)
 
-    # Start heartbeat thread
-    stop_heartbeat = threading.Event()
-    hb_thread = threading.Thread(
-        target=heartbeat_loop,
-        args=(client_id, stop_heartbeat),
-        daemon=True,
-        name="heartbeat",
-    )
-    hb_thread.start()
+    # Start heartbeat + control-poll threads. Both share one stop event
+    # so re-register / upgrade paths can tear them down together.
+    def _start_bg_threads(cid: str) -> tuple[threading.Event, threading.Thread, threading.Thread]:
+        ev = threading.Event()
+        hb = threading.Thread(target=heartbeat_loop, args=(cid, ev), daemon=True, name="heartbeat")
+        cp = threading.Thread(target=_control_poll_loop, args=(cid, ev), daemon=True, name="control-poll")
+        hb.start()
+        cp.start()
+        return ev, hb, cp
+
+    stop_heartbeat, hb_thread, cp_thread = _start_bg_threads(client_id)
 
     # Apply update immediately if detected (before starting workers)
     if _update_available.is_set():
         stop_heartbeat.set()
         hb_thread.join(timeout=2)
+        cp_thread.join(timeout=2)
         _apply_update(client_id)  # may os.execv — never returns on success
-        # Update failed — restart heartbeat
-        stop_heartbeat = threading.Event()
-        hb_thread = threading.Thread(
-            target=heartbeat_loop,
-            args=(client_id, stop_heartbeat),
-            daemon=True,
-            name="heartbeat",
-        )
-        hb_thread.start()
+        # Update failed — restart both
+        stop_heartbeat, hb_thread, cp_thread = _start_bg_threads(client_id)
 
     logger.info("Starting %d worker(s), polling every %ds", MAX_PARALLEL_JOBS, POLL_INTERVAL)
     worker_stop, worker_threads = _launch_workers(client_id, version_manager)
@@ -1613,17 +1854,11 @@ def main() -> None:
                 _stop_workers(worker_stop, worker_threads)
                 stop_heartbeat.set()
                 hb_thread.join(timeout=2)
+                cp_thread.join(timeout=2)
 
                 client_id = register()
 
-                stop_heartbeat = threading.Event()
-                hb_thread = threading.Thread(
-                    target=heartbeat_loop,
-                    args=(client_id, stop_heartbeat),
-                    daemon=True,
-                    name="heartbeat",
-                )
-                hb_thread.start()
+                stop_heartbeat, hb_thread, cp_thread = _start_bg_threads(client_id)
                 worker_stop, worker_threads = _launch_workers(client_id, version_manager)
 
             # Apply pending update only when all workers are idle
@@ -1631,16 +1866,10 @@ def main() -> None:
                 _stop_workers(worker_stop, worker_threads)
                 stop_heartbeat.set()
                 hb_thread.join(timeout=2)
+                cp_thread.join(timeout=2)
                 _apply_update(client_id)  # may os.execv — never returns on success
-                # Update failed — restart heartbeat and workers
-                stop_heartbeat = threading.Event()
-                hb_thread = threading.Thread(
-                    target=heartbeat_loop,
-                    args=(client_id, stop_heartbeat),
-                    daemon=True,
-                    name="heartbeat",
-                )
-                hb_thread.start()
+                # Update failed — restart heartbeat + control-poll and workers
+                stop_heartbeat, hb_thread, cp_thread = _start_bg_threads(client_id)
                 worker_stop, worker_threads = _launch_workers(client_id, version_manager)
 
             time.sleep(1)
@@ -1650,6 +1879,7 @@ def main() -> None:
         worker_stop.set()
         stop_heartbeat.set()
         hb_thread.join(timeout=2)
+        cp_thread.join(timeout=2)
         deregister(client_id)
 
 

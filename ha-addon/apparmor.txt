@@ -55,11 +55,13 @@ profile esphome_dist_server flags=(attach_disconnected,mediate_deleted) {
   # - read or write arbitrary processes' memory via `/proc/<pid>/mem`;
   # - tamper with kernel sysctls via /proc/sys writes.
   #
-  # ``ptrace,`` is also scoped — without this carve-out, the
-  # unqualified ``ptrace,`` above would allow arbitrary process
-  # tracing across the add-on's container namespace. We don't need
-  # ptrace in normal operation; deny it outright so an attacker
-  # can't use it to jump between compile subprocesses.
+  # ``ptrace`` is denied outright — we don't need it in normal
+  # operation, and allowing it would let an attacker jump between
+  # compile subprocesses or trace arbitrary processes in the
+  # container namespace. (#108's
+  # ``py-spy`` works via ``scripts/threaddump-addon.sh`` — a sidecar
+  # container with its own cap-add + apparmor=unconfined — so the
+  # add-on image itself doesn't need the privilege.)
   deny /etc/shadow* rw,
   deny /etc/gshadow* rw,
   deny /run/secrets/** rw,

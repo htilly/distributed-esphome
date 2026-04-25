@@ -9,7 +9,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import IO, Optional
 
 import aiohttp
 from aiohttp import web
@@ -710,7 +710,7 @@ async def ha_entity_poller(app: web.Application) -> None:
             first_poll = False
 
 
-def reseed_device_poller_from_config(app: web.Application, *, reason: str) -> None:
+async def reseed_device_poller_from_config(app: web.Application, *, reason: str) -> None:
     """Bug #11 (1.6.1): re-run ``build_name_to_target_map`` and re-seed
     the device poller's name_map, encryption_keys, and address overrides.
 
@@ -726,6 +726,14 @@ def reseed_device_poller_from_config(app: web.Application, *, reason: str) -> No
 
     *reason* is a short string logged alongside the reseed so operators
     can trace which trigger fired.
+
+    Runs on a thread executor because ``build_name_to_target_map`` calls
+    ESPHome's full validator per target (#84), which is CPU-bound
+    (voluptuous schemas + component tree) and at ~67 targets blocks the
+    event loop for tens of seconds on a shared-core HAOS box. Long
+    enough to trip Supervisor's healthcheck and trigger a container
+    restart. Keeping the work off the event loop is what makes the
+    server stay reachable during a rescan.
     """
     from scanner import scan_configs, build_name_to_target_map  # noqa: PLC0415
     cfg: AppConfig = app["config"]
@@ -733,9 +741,10 @@ def reseed_device_poller_from_config(app: web.Application, *, reason: str) -> No
     if device_poller is None:
         return
     try:
-        targets = scan_configs(cfg.config_dir)
-        name_map, enc_keys, addr_overrides, addr_sources = build_name_to_target_map(
-            cfg.config_dir, targets,
+        loop = asyncio.get_running_loop()
+        targets = await loop.run_in_executor(None, scan_configs, cfg.config_dir)
+        name_map, enc_keys, addr_overrides, addr_sources = await loop.run_in_executor(
+            None, build_name_to_target_map, cfg.config_dir, targets,
         )
         device_poller.update_compile_targets(
             targets, name_map, enc_keys, addr_overrides, addr_sources,
@@ -749,21 +758,30 @@ def reseed_device_poller_from_config(app: web.Application, *, reason: str) -> No
 
 
 async def config_scanner(app: web.Application) -> None:
-    """Background task: re-scan config dir every 30s and update device poller targets."""
+    """Background task: re-scan config dir every 30s and update device poller targets.
+
+    ``build_name_to_target_map`` runs in an executor because it calls
+    ESPHome's full validator per target (#84), which is CPU-bound and,
+    at ~67 targets, blocks long enough to trip Supervisor's container
+    healthcheck if run on the event loop.
+    """
     from scanner import scan_configs, build_name_to_target_map  # noqa: PLC0415
 
     cfg: AppConfig = app["config"]
     device_poller = app.get("device_poller")
     prev_targets: list[str] = []
+    loop = asyncio.get_running_loop()
 
     while True:
         await asyncio.sleep(30)
         try:
-            targets = scan_configs(cfg.config_dir)
+            targets = await loop.run_in_executor(None, scan_configs, cfg.config_dir)
             if targets != prev_targets:
                 logger.info("Config change detected: %d targets (was %d)", len(targets), len(prev_targets))
                 if device_poller:
-                    name_map, enc_keys, addr_overrides, addr_sources = build_name_to_target_map(cfg.config_dir, targets)
+                    name_map, enc_keys, addr_overrides, addr_sources = await loop.run_in_executor(
+                        None, build_name_to_target_map, cfg.config_dir, targets,
+                    )
                     device_poller.update_compile_targets(targets, name_map, enc_keys, addr_overrides, addr_sources)
                 prev_targets = targets
         except Exception:
@@ -1122,6 +1140,81 @@ def _pick_latest_stable_version(versions: list[str]) -> Optional[str]:
     return None
 
 
+async def _install_esphome_initial(app: web.Application) -> None:
+    """SE.2 + bug #30 + bug #105: one-shot ESPHome lazy install at startup.
+
+    Resolution order when there's no bundled version:
+      1. Bundled package (test harness / pre-SE.1): the caller already
+         set the version via `set_esphome_version`; this function is a
+         no-op because `_get_installed_esphome_version` returns a real
+         version.
+      2. HA Supervisor: if SUPERVISOR_TOKEN is set AND the HA ESPHome
+         builder add-on is installed, pin to its version. The
+         `pypi_version_refresher` loop still picks up later version
+         changes.
+      3. PyPI latest stable: fresh HAOS without the builder add-on, or
+         standalone Docker. Without this, the user is stuck on
+         "Installing ESPHome…" forever (bug #105) because the refresher
+         only fires when the builder add-on is present.
+
+    Runs in an executor so it never blocks aiohttp startup.
+    """
+    from scanner import (  # noqa: PLC0415
+        _get_installed_esphome_version,
+        ensure_esphome_installed,
+        set_esphome_version,
+    )
+
+    target = _get_installed_esphome_version()
+    if target in ("unknown", "installing"):
+        supervisor_version: Optional[str] = None
+        if os.environ.get("SUPERVISOR_TOKEN"):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    supervisor_version = await _fetch_ha_esphome_version(session)
+            except Exception:
+                logger.exception("Bug #105: Supervisor version probe raised")
+        if supervisor_version:
+            target = supervisor_version
+            logger.info(
+                "Installing ESPHome %s from HA Supervisor (ESPHome builder add-on)",
+                target,
+            )
+            set_esphome_version(target)
+        else:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    versions = await _fetch_pypi_versions(session)
+            except Exception:
+                logger.exception("Bug #30: PyPI version fetch raised")
+                versions = []
+            picked = _pick_latest_stable_version(versions)
+            if picked is None:
+                logger.warning(
+                    "No bundled ESPHome, no HA Supervisor version, "
+                    "and PyPI lookup returned no stable versions. "
+                    "UI will keep showing 'Installing ESPHome…'; "
+                    "user must pick a version manually once network "
+                    "access comes back (#105)."
+                )
+                return
+            target = picked
+            logger.info(
+                "Installing latest stable ESPHome from PyPI: %s "
+                "(no bundled version, no HA ESPHome builder add-on detected)",
+                target,
+            )
+            set_esphome_version(target)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, ensure_esphome_installed, target)
+    # Bug #11 (1.6.1): encryption keys / address overrides got built
+    # during the install window and every target whose YAML needs
+    # substitution-pass resolution returned None. Now that the venv is
+    # ready, reseed the poller so live logs + OTA can actually reach
+    # encrypted devices.
+    await reseed_device_poller_from_config(app, reason="esphome install complete")
+
+
 async def pypi_version_refresher(app: web.Application) -> None:
     """Background task: refresh PyPI versions hourly and re-check HA ESPHome add-on every 30s.
 
@@ -1173,7 +1266,7 @@ async def pypi_version_refresher(app: web.Application) -> None:
                                 "SE.4: ensure_esphome_installed(%s) raised", ver,
                             )
                             return
-                        reseed_device_poller_from_config(
+                        await reseed_device_poller_from_config(
                             app, reason=f"esphome version change → {ver}",
                         )
 
@@ -1256,12 +1349,24 @@ def create_app() -> web.Application:
     # default — pre-existing repo → off by default (Pat-with-git),
     # fresh-init → on by default (Pat-no-git). Sync call here is fine;
     # the event loop hasn't started yet.
-    try:
-        from git_versioning import init_repo  # noqa: PLC0415
-        fresh_repo = init_repo(Path(cfg.config_dir))
-    except Exception:
-        logger.exception("git auto-init raised unexpectedly")
-        fresh_repo = None  # "don't override the default"
+    #
+    # #191: if ``/config/esphome`` doesn't exist at all (truly-empty
+    # first install — no HA ESPHome builder add-on, no pre-existing
+    # Fleet data), ``init_repo`` used to return False which
+    # ``init_settings`` read as "pre-existing repo" and logged
+    # accordingly. Gate on directory existence so we pass ``None``
+    # ("don't classify") instead — matches the semantics used by
+    # tests / non-Supervisor harnesses.
+    config_dir_path = Path(cfg.config_dir)
+    if not config_dir_path.is_dir():
+        fresh_repo = None
+    else:
+        try:
+            from git_versioning import init_repo  # noqa: PLC0415
+            fresh_repo = init_repo(config_dir_path)
+        except Exception:
+            logger.exception("git auto-init raised unexpectedly")
+            fresh_repo = None  # "don't override the default"
 
     # SP.1/SP.2: load in-app settings (/data/settings.json) — created on
     # first boot after 1.6 upgrade and seeded from the current options.json
@@ -1349,6 +1454,16 @@ def create_app() -> web.Application:
     app["scanner_config_dir"] = cfg.config_dir
     app["device_poller"] = device_poller
     app["log_subscribers"] = {}
+    # WL.2: per-worker log broker. Independent of the registry so log
+    # transport state doesn't leak into worker liveness/config state.
+    from worker_log_broker import WorkerLogBroker  # noqa: PLC0415
+    app["worker_log_broker"] = WorkerLogBroker()
+
+    # #109: diagnostics broker — holds pending thread-dump requests per
+    # worker + a small cache of uploaded results keyed by request id
+    # so the UI's polling endpoint has somewhere to find them.
+    from diagnostics import DiagnosticsBroker  # noqa: PLC0415
+    app["diagnostics_broker"] = DiagnosticsBroker()
 
     # Register routes
     app.router.add_routes(api_module.routes)
@@ -1387,6 +1502,22 @@ def create_app() -> web.Application:
     async def on_startup(app: web.Application) -> None:
         logger.info("Starting ESPHome Fleet")
         logger.info("Config dir: %s", cfg.config_dir)
+        # SI (WORKITEMS-1.6.2): one-shot deployment-shape banner so
+        # operators grep one line to confirm whether HA coupling is
+        # active, instead of reading the absence/presence of nine
+        # downstream "skipped — no SUPERVISOR_TOKEN" log lines.
+        from helpers import ha_mode  # noqa: PLC0415
+        mode = ha_mode()
+        if mode == "standalone":
+            logger.info(
+                "Running in standalone mode (no HA Supervisor detected). "
+                "HA-coupled features (auto-discovery, entity-driven device "
+                "state, Supervisor-driven ESPHome version) are disabled; "
+                "the rest of the server runs unchanged. See "
+                "dev-plans/HA-COUPLING-AUDIT.md for the full matrix."
+            )
+        else:
+            logger.info("Running as HA add-on (Supervisor detected)")
         from settings import get_settings as _get_settings_startup  # noqa: PLC0415
         logger.info("Token configured: %s", bool(_get_settings_startup().server_token))
 
@@ -1414,7 +1545,6 @@ def create_app() -> web.Application:
         from scanner import (  # noqa: PLC0415
             scan_configs, build_name_to_target_map,
             set_esphome_version, _get_installed_esphome_version,
-            ensure_esphome_installed,
         )
 
         # `_get_installed_esphome_version()` returns the string "installing"
@@ -1436,62 +1566,16 @@ def create_app() -> web.Application:
                 "or PyPI fallback (bug #30)"
             )
 
-        # SE.2 + bug #30: lazy-install ESPHome into the server's venv
-        # cache. Three paths to a version:
-        #   1. Bundled package (test harness / pre-SE.1): `selected` is
-        #      already a real version.
-        #   2. HA add-on: the `pypi_version_refresher` loop picks up the
-        #      Supervisor-reported version within 30s and triggers its
-        #      own `ensure_esphome_installed`. We defer to that path and
-        #      don't pre-install a PyPI default.
-        #   3. Standalone Docker (no `SUPERVISOR_TOKEN`, no bundled
-        #      package): fall back to the latest stable from PyPI so the
-        #      user isn't stuck on the "Installing ESPHome…" banner
-        #      forever (GitHub #63).
-        # Runs in an executor so it never blocks aiohttp startup.
-        async def _install_esphome_background() -> None:
-            target = _get_installed_esphome_version()
-            if target in ("unknown", "installing"):
-                if os.environ.get("SUPERVISOR_TOKEN"):
-                    # Path 2 — the refresher loop will resolve + install
-                    # from the HA ESPHome add-on's version. Nothing to do.
-                    return
-                # Path 3 — fetch latest stable from PyPI.
-                try:
-                    async with aiohttp.ClientSession() as session:
-                        versions = await _fetch_pypi_versions(session)
-                except Exception:
-                    logger.exception("Bug #30: PyPI version fetch raised")
-                    versions = []
-                picked = _pick_latest_stable_version(versions)
-                if picked is None:
-                    logger.warning(
-                        "Bug #30: no bundled ESPHome, no HA Supervisor, "
-                        "and PyPI lookup returned no stable versions. "
-                        "UI will keep showing 'Installing ESPHome…'; "
-                        "user must pick a version manually once network "
-                        "access or Supervisor comes back."
-                    )
-                    return
-                target = picked
-                logger.info(
-                    "Bug #30: no Supervisor and no bundled ESPHome — "
-                    "installing latest stable from PyPI: %s", target,
-                )
-                set_esphome_version(target)
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, ensure_esphome_installed, target)
-            # Bug #11 (1.6.1): encryption keys / address overrides got
-            # built during the install window and every target whose
-            # YAML needs substitution-pass resolution returned None.
-            # Now that the venv is ready, reseed the poller so live
-            # logs + OTA can actually reach encrypted devices.
-            reseed_device_poller_from_config(app, reason="esphome install complete")
-        app["esphome_install_task"] = asyncio.create_task(_install_esphome_background())
+        app["esphome_install_task"] = asyncio.create_task(_install_esphome_initial(app))
 
-        # Update device poller with known targets
+        # Update device poller with known targets. Runs in executor —
+        # see reseed_device_poller_from_config for the rationale (full
+        # ESPHome validation is CPU-bound and blocks the event loop).
+        startup_loop = asyncio.get_running_loop()
         targets = scan_configs(cfg.config_dir)
-        name_map, enc_keys, addr_overrides, addr_sources = build_name_to_target_map(cfg.config_dir, targets)
+        name_map, enc_keys, addr_overrides, addr_sources = await startup_loop.run_in_executor(
+            None, build_name_to_target_map, cfg.config_dir, targets,
+        )
         device_poller.update_compile_targets(targets, name_map, enc_keys, addr_overrides, addr_sources)
 
         # Start device poller
@@ -1574,14 +1658,29 @@ def create_app() -> web.Application:
                 "ESPHOME_VERSIONS_DIR": "/data/esphome-versions",
                 "HOSTNAME": "local-worker",
             }
+            # Capture the embedded worker's stderr to a rotating-ish
+            # tail file under /data so next-time-this-breaks is
+            # diagnosable. #193: previously DEVNULL'd both streams, so
+            # a ModuleNotFoundError at import turned the worker into a
+            # silent zombie and the server logged "Started local worker"
+            # as if everything was fine. stdout stays DEVNULL — the
+            # worker already logs to its own logger via SERVER_URL.
+            local_worker_log = Path("/data/local-worker.stderr.log")
+            stderr_fh: int | IO[bytes]
+            try:
+                local_worker_log.parent.mkdir(parents=True, exist_ok=True)
+                stderr_fh = local_worker_log.open("ab")
+            except OSError:
+                logger.warning("Couldn't open %s for local-worker stderr; falling back to DEVNULL", local_worker_log)
+                stderr_fh = sp.DEVNULL
             proc = sp.Popen(
                 [sys.executable, str(local_worker_script)],
                 env=local_env,
                 stdout=sp.DEVNULL,
-                stderr=sp.DEVNULL,
+                stderr=stderr_fh,
             )
             app["local_worker_proc"] = proc
-            logger.info("Started local worker (PID %d, %s slots)", proc.pid, local_slots)
+            logger.info("Started local worker (PID %d, %s slots); stderr → %s", proc.pid, local_slots, local_worker_log)
 
     async def on_shutdown(app: web.Application) -> None:
         logger.info("Shutting down ESPHome Fleet")

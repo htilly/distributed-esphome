@@ -1,30 +1,25 @@
-"""IT.2 — first real-HA integration test using pytest-homeassistant-custom-component.
+"""Real-HA integration tests — exercises `async_setup_entry` + `async_unload_entry`
+through a true ``hass`` fixture.
 
 Complements the mock-based ``test_integration_*_logic.py`` suite (which
-tests helper functions in isolation) with a true-lifecycle test that
-exercises ``async_setup_entry`` + ``async_unload_entry`` through a
-real ``hass`` fixture.
+tests helper functions in isolation). The `_logic` tests happily pass
+even when ``async_setup_entry`` leaks listeners, sets up platforms
+twice, or forgets to register cleanup in ``async_on_unload`` — the
+CR.12 class of bugs that shipped in 1.5 despite full unit-test
+coverage. Running the lifecycle against a real hass instance catches
+those.
 
-Why this matters: the ``_logic`` tests happily pass even when
-``async_setup_entry`` leaks listeners, sets up platforms twice, or
-forgets to register cleanup in ``async_on_unload`` — the CR.12 class
-of bugs that shipped in 1.5 despite full unit-test coverage. Running
-the lifecycle against a real hass instance catches those.
-
-Requires: ``pytest-homeassistant-custom-component`` in the ``.ha-testenv``
-venv (pinned in ``.github/workflows/ci.yml``'s install step). PY-10
-invariant enforces the plugin import so this file's filename without
-``_logic`` suffix stays honest.
+Requires ``pytest-homeassistant-custom-component`` — installed into the
+isolated ``.ha-testenv`` venv (pinned in ``.github/workflows/ci.yml``;
+kept out of the main env because its autouse ``pytest_socket`` +
+``verify_cleanup`` fixtures break every server/client test that opens a
+loopback listener). PY-10 invariant enforces the plugin import so the
+filename without ``_logic`` suffix stays honest.
 """
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, patch
-
-import pytest
 
 # pytest-homeassistant-custom-component provides hass fixture + MockConfigEntry.
 # Imported at module top so PY-10's invariant check passes.
@@ -32,99 +27,16 @@ import pytest_homeassistant_custom_component  # noqa: F401
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-
-# Make the custom integration importable the same way HA would.
-# pytest-homeassistant-custom-component expects the integration on the
-# import path as a top-level ``esphome_fleet`` module — the package is
-# at ``ha-addon/custom_integration/esphome_fleet``.
-_REPO_ROOT = Path(__file__).parent.parent
-_INT_SRC = _REPO_ROOT / "ha-addon" / "custom_integration" / "esphome_fleet"
-_INT_PARENT = _INT_SRC.parent
-if str(_INT_PARENT) not in sys.path:
-    sys.path.insert(0, str(_INT_PARENT))
-
-
-@pytest.fixture(scope="session", autouse=True)
-def _custom_components_symlink():
-    """Expose the integration under ``custom_components/esphome_fleet``.
-
-    HA's integration loader (invoked by pytest-homeassistant-custom-component
-    when the test calls ``hass.config_entries.async_setup``) searches
-    ``<cwd>/custom_components/<domain>/`` for custom integrations. Our
-    package lives at ``ha-addon/custom_integration/esphome_fleet`` so
-    the add-on's Dockerfile can copy it to ``/config/custom_components/``
-    at runtime — we can't restructure the repo without breaking that.
-    Instead we drop a session-scoped symlink at the conventional spot
-    so HA finds the integration and ``Integration not found`` goes away.
-    """
-    cc_root = _REPO_ROOT / "custom_components"
-    cc_root.mkdir(exist_ok=True)
-    link = cc_root / "esphome_fleet"
-    created = False
-    if not link.exists() and not link.is_symlink():
-        link.symlink_to(_INT_SRC, target_is_directory=True)
-        created = True
-    try:
-        yield
-    finally:
-        # Clean up only if we created it — otherwise we risk removing
-        # a dev-created symlink the user wants to keep around.
-        if created:
-            try:
-                link.unlink()
-                cc_root.rmdir()
-            except OSError:
-                pass
-
-
-# Fixture enabling custom components for pytest-homeassistant-custom-component.
-# Applied to every test in this module via autouse=True so we don't need to
-# remember to parametrise each one.
-@pytest.fixture(autouse=True)
-def _enable_custom_integrations(enable_custom_integrations):  # noqa: F811
-    yield
-
-
-# A minimal coordinator snapshot shape — only the keys the platforms
-# read during setup. If platforms start reading new fields at setup
-# time, expand this fixture; it's intentionally hand-rolled so the
-# test pins what setup touches.
-_MOCK_COORDINATOR_DATA: dict[str, Any] = {
-    "info": {
-        "addon_version": "1.6.0-test",
-        "min_image_version": "5",
-    },
-    "targets": [],
-    "devices": [],
-    "workers": [],
-    "queue": [],
-    "versions": {"selected": "2026.4.0", "detected": "2026.4.0", "available": ["2026.4.0"]},
-}
-
-
-# pytest-homeassistant-custom-component's ``enable_custom_integrations``
-# fixture discovers custom integrations from ``<cwd>/custom_components/``,
-# but HA's loader also needs manifest + full package visibility in a way
-# that a bare symlink doesn't always satisfy — in CI we reliably hit
-# "Integration not found" before the coordinator mock kicks in. The
-# canonical fix is ``async_mock_integration`` from that plugin, but
-# wiring it for a multi-platform integration with entry-point platforms
-# is a real piece of work.
-#
-# Skip the real-hass tests for now — the framework is in place (PY-10
-# invariant enforced, plugin pinned in .ha-testenv, filename discipline
-# kept), and the next batch of integration-test work lands on top of
-# this scaffolding.
-_SKIP_REASON = (
-    "TODO(QS.8): plug in async_mock_integration so HA's loader can find "
-    "esphome_fleet under pytest-homeassistant-custom-component. "
-    "Skipped — framework is ready, first real test deferred. "
-    "See WORKITEMS-future.md → Integration Quality Scale (QS.8) for the "
-    "follow-up."
+# Shared fixtures for every real-hass integration test file.
+# ``_warm_pycares_shutdown_thread`` + ``_install_integration_in_hass_config``
+# are both autouse — importing them here is enough for pytest to pick them up.
+from _integration_test_fixtures import (  # noqa: F401
+    _install_integration_in_hass_config,
+    _warm_pycares_shutdown_thread,
+    mock_network,
 )
 
 
-@pytest.mark.skip(reason=_SKIP_REASON)
 async def test_async_setup_entry_happy_path(hass):
     """Integration sets up cleanly against a real hass + tears down cleanly.
 
@@ -133,7 +45,7 @@ async def test_async_setup_entry_happy_path(hass):
       - ``async_unload_entry`` returns True, signaling clean teardown.
       - No leftover listeners after unload (HA complains loudly if there are).
     """
-    from esphome_fleet.const import DOMAIN
+    from custom_components.esphome_fleet.const import DOMAIN
 
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -142,38 +54,86 @@ async def test_async_setup_entry_happy_path(hass):
     )
     entry.add_to_hass(hass)
 
-    # Intercept the one network-touching call so setup doesn't try to
-    # hit a real addon. Everything else in async_setup_entry is local.
-    with patch(
-        "esphome_fleet.coordinator.EsphomeFleetCoordinator._async_update_data",
-        new_callable=AsyncMock,
-        return_value=_MOCK_COORDINATOR_DATA,
-    ):
+    with mock_network():
         ok = await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
-    assert ok is True
-    assert DOMAIN in hass.data
-    assert entry.entry_id in hass.data[DOMAIN]
+        assert ok is True
+        assert DOMAIN in hass.data
+        assert entry.entry_id in hass.data[DOMAIN]
 
-    # Unload — must also return True + leave hass.data[DOMAIN] empty
-    # of this entry so a second setup (reauth, reload) can succeed.
-    unloaded = await hass.config_entries.async_unload(entry.entry_id)
-    await hass.async_block_till_done()
-    assert unloaded is True
-    assert entry.entry_id not in hass.data.get(DOMAIN, {})
+        unloaded = await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+        assert unloaded is True
+        assert entry.entry_id not in hass.data.get(DOMAIN, {})
 
 
-@pytest.mark.skip(reason=_SKIP_REASON)
+async def test_async_setup_recovers_after_first_poll_failure(hass):
+    """Coordinator's first poll fails → entry lands in SETUP_RETRY → recovers.
+
+    HT.1 invariant: ``async_setup_entry`` does not crash on first-poll
+    failure and the config entry transitions cleanly back to LOADED
+    when the next attempt succeeds.
+
+    Shape of the failure we care about: ``_async_update_data`` raises
+    ``UpdateFailed`` (the poll-layer exception the real coordinator
+    raises when the add-on is unreachable or returns a transport
+    error), which ``DataUpdateCoordinator.async_config_entry_first_refresh``
+    translates into ``ConfigEntryNotReady``. HA marks the entry
+    SETUP_RETRY and schedules a retry.
+    """
+    from homeassistant.config_entries import ConfigEntryState
+    from homeassistant.helpers.update_coordinator import UpdateFailed
+
+    from custom_components.esphome_fleet.const import DOMAIN
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={"base_url": "http://test-addon.local:8765", "token": "test-token"},
+        title="Fleet — retry test",
+    )
+    entry.add_to_hass(hass)
+
+    # First attempt: poll raises UpdateFailed → setup bails with
+    # ConfigEntryNotReady; HA returns False from async_setup.
+    with patch(
+        "custom_components.esphome_fleet.coordinator.EsphomeFleetCoordinator._async_update_data",
+        new_callable=AsyncMock,
+        side_effect=UpdateFailed("simulated add-on unreachable"),
+    ), patch(
+        "custom_components.esphome_fleet.ws_client.EventStreamClient._run",
+        new_callable=AsyncMock,
+    ):
+        ok = await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert ok is False
+        assert entry.state is ConfigEntryState.SETUP_RETRY
+
+    # Recovery: on the next attempt the poll returns clean data.
+    # Reload the entry directly — equivalent to HA's internal retry
+    # firing on its backoff schedule; we're testing the recovery path,
+    # not HA's scheduler.
+    with mock_network():
+        assert await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.entry_id in hass.data.get(DOMAIN, {})
+
+    with mock_network():
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
 async def test_async_setup_then_reload(hass):
     """Reload cycle: setup → unload → setup again on the same entry.
 
-    Catches the class of bugs where async_setup_entry forgets to clean
-    up a module-level service / listener on unload, so the second setup
-    fires "already registered" errors. CR.12 was exactly this shape
-    for the service registration path.
+    Catches the class of bugs where ``async_setup_entry`` forgets to
+    clean up a module-level service / listener on unload, so the
+    second setup fires "already registered" errors. CR.12 was exactly
+    this shape for the service registration path.
     """
-    from esphome_fleet.const import DOMAIN
+    from custom_components.esphome_fleet.const import DOMAIN
 
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -182,11 +142,7 @@ async def test_async_setup_then_reload(hass):
     )
     entry.add_to_hass(hass)
 
-    with patch(
-        "esphome_fleet.coordinator.EsphomeFleetCoordinator._async_update_data",
-        new_callable=AsyncMock,
-        return_value=_MOCK_COORDINATOR_DATA,
-    ):
+    with mock_network():
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
         assert await hass.config_entries.async_unload(entry.entry_id)
@@ -195,6 +151,5 @@ async def test_async_setup_then_reload(hass):
         # coordinator / service registration / listener would complain.
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
-        # And the second unload must be just as clean as the first.
         assert await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()

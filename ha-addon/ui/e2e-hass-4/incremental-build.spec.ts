@@ -2,6 +2,7 @@ import { expect, test, type APIRequestContext } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { retryTransient } from './retry';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -29,7 +30,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * single test by far.
  */
 
-const TARGET_FILENAME = process.env.HASS4_TARGET || 'cyd-office-info.yaml';
+const TARGET_FILENAME = process.env.FLEET_TARGET || process.env.HASS4_TARGET || 'cyd-office-info.yaml';
 
 const EXPECTED_VERSION =
   process.env.EXPECTED_VERSION ||
@@ -61,9 +62,11 @@ function isTerminal(state: string): boolean {
 }
 
 async function getQueue(request: APIRequestContext): Promise<QueueJob[]> {
-  const resp = await request.get('/ui/api/queue');
-  if (!resp.ok()) throw new Error(`/ui/api/queue returned ${resp.status()}`);
-  return resp.json();
+  return retryTransient(async () => {
+    const resp = await request.get('/ui/api/queue');
+    if (!resp.ok()) throw new Error(`/ui/api/queue returned ${resp.status()}`);
+    return resp.json();
+  });
 }
 
 async function getJob(request: APIRequestContext, id: string): Promise<QueueJob | null> {

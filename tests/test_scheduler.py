@@ -248,6 +248,91 @@ async def test_sync_target_uses_schedule_tz(tmp_path):
         scheduler._app = None
 
 
+async def test_fire_recurring_resolves_ota_address_without_ip(tmp_path):
+    """_fire_recurring must resolve OTA address even when dev.ip_address is empty.
+
+    Regression for PR #87 review: the old `and dev.ip_address` guard skipped
+    resolve_ota_address when mDNS hadn't yet reported an IP, so schedules
+    silently never fired for devices with no cached IP.
+    """
+    import scheduler
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    _write_scheduled_device(tmp_path, name="no-ip-device")
+    target = "no-ip-device.yaml"
+
+    # Device whose ip_address is empty — mDNS hasn't observed it yet.
+    fake_dev = MagicMock()
+    fake_dev.compile_target = target
+    fake_dev.ip_address = ""
+    fake_dev.name = "no-ip-device"
+
+    fake_poller = MagicMock()
+    fake_poller.get_devices.return_value = [fake_dev]
+    fake_poller.resolve_ota_address.return_value = "no-ip-device.local"
+
+    fake_queue = MagicMock()
+    fake_queue.enqueue = AsyncMock(return_value=None)
+
+    app = {
+        "config": type("C", (), {"config_dir": str(tmp_path), "job_timeout": 600})(),
+        "queue": fake_queue,
+        "device_poller": fake_poller,
+    }
+    scheduler._app = app
+
+    # Inline imports inside _fire_recurring are patched at the source module.
+    with patch("scanner.get_esphome_version", return_value="2024.1.0"), \
+         patch("git_versioning.get_head", return_value="abc123"), \
+         patch("scanner.read_device_meta", return_value={}), \
+         patch("scanner.write_device_meta"), \
+         patch("scheduler._job_timeout", return_value=600):
+        await scheduler._fire_recurring(target)
+
+    fake_poller.resolve_ota_address.assert_called_once_with("no-ip-device")
+    enqueue_kwargs = fake_queue.enqueue.call_args.kwargs
+    assert enqueue_kwargs["ota_address"] == "no-ip-device.local"
+
+
+async def test_fire_once_resolves_ota_address_without_ip(tmp_path):
+    """_fire_once must also resolve OTA address when dev.ip_address is None."""
+    import scheduler
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    _write_scheduled_device(tmp_path, name="no-ip-once")
+    target = "no-ip-once.yaml"
+
+    fake_dev = MagicMock()
+    fake_dev.compile_target = target
+    fake_dev.ip_address = None
+    fake_dev.name = "no-ip-once"
+
+    fake_poller = MagicMock()
+    fake_poller.get_devices.return_value = [fake_dev]
+    fake_poller.resolve_ota_address.return_value = "no-ip-once.local"
+
+    fake_queue = MagicMock()
+    fake_queue.enqueue = AsyncMock(return_value=None)
+
+    app = {
+        "config": type("C", (), {"config_dir": str(tmp_path), "job_timeout": 600})(),
+        "queue": fake_queue,
+        "device_poller": fake_poller,
+    }
+    scheduler._app = app
+
+    with patch("scanner.get_esphome_version", return_value="2024.1.0"), \
+         patch("git_versioning.get_head", return_value="abc123"), \
+         patch("scanner.read_device_meta", return_value={}), \
+         patch("scanner.write_device_meta"), \
+         patch("scheduler._job_timeout", return_value=600):
+        await scheduler._fire_once(target)
+
+    fake_poller.resolve_ota_address.assert_called_once_with("no-ip-once")
+    enqueue_kwargs = fake_queue.enqueue.call_args.kwargs
+    assert enqueue_kwargs["ota_address"] == "no-ip-once.local"
+
+
 async def test_schedule_history_ring_buffer_caps(tmp_path, tmp_queue):
     """History ring buffer should not exceed _MAX_PER_TARGET entries."""
     import schedule_history

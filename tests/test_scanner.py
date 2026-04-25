@@ -64,6 +64,67 @@ def test_scan_nonexistent_dir():
     assert targets == []
 
 
+def test_scan_missing_dir_logs_info_once(tmp_path, caplog):
+    """Bug #86: a missing config dir is a config state (no ESPHome
+    builder add-on, or user hasn't created the dir yet), not a crash
+    condition. Log it once at INFO, then DEBUG on every subsequent
+    scan so the log doesn't flood every poll tick.
+    """
+    import logging
+    import scanner as scanner_module
+
+    missing = tmp_path / "does_not_exist"
+    scanner_module._missing_config_dirs_logged.discard(str(missing))
+
+    try:
+        with caplog.at_level(logging.DEBUG, logger="scanner"):
+            scan_configs(str(missing))
+            scan_configs(str(missing))
+            scan_configs(str(missing))
+
+        info_lines = [r for r in caplog.records if r.levelno == logging.INFO and "does not exist yet" in r.message]
+        debug_lines = [r for r in caplog.records if r.levelno == logging.DEBUG and "still missing" in r.message]
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "does not exist or is not a directory" in r.message]
+
+        # Exactly one INFO line total, regardless of how many scans.
+        assert len(info_lines) == 1, f"Expected 1 INFO line, got {len(info_lines)}"
+        # Subsequent scans log DEBUG.
+        assert len(debug_lines) == 2, f"Expected 2 DEBUG lines, got {len(debug_lines)}"
+        # No WARNING — the old flood-prone log level is gone.
+        assert warnings == []
+    finally:
+        scanner_module._missing_config_dirs_logged.discard(str(missing))
+
+
+def test_scan_resurfaced_dir_resets_suppression(tmp_path, caplog):
+    """When the missing dir reappears, log an INFO that scans have
+    resumed — and if it disappears again later, the 'missing' INFO
+    should fire again (suppression state must reset).
+    """
+    import logging
+    import scanner as scanner_module
+
+    d = tmp_path / "esphome"
+    scanner_module._missing_config_dirs_logged.discard(str(d))
+
+    try:
+        with caplog.at_level(logging.INFO, logger="scanner"):
+            scan_configs(str(d))  # missing → INFO
+            d.mkdir()
+            scan_configs(str(d))  # present → INFO "resuming"
+            import shutil
+            shutil.rmtree(d)
+            scan_configs(str(d))  # missing again → INFO
+
+        messages = [r.message for r in caplog.records if r.name == "scanner"]
+        missing_count = sum(1 for m in messages if "does not exist yet" in m)
+        resumed_count = sum(1 for m in messages if "now available" in m)
+        assert missing_count == 2
+        assert resumed_count == 1
+    finally:
+        scanner_module._missing_config_dirs_logged.discard(str(d))
+
+
 def test_scan_returns_sorted_list():
     targets = scan_configs(str(FIXTURES))
     assert targets == sorted(targets)
@@ -89,63 +150,178 @@ def test_scan_dir_with_only_secrets(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# create_bundle
+# create_bundle — BD (WORKITEMS-1.6.2). Per-target bundles via
+# ESPHome's ConfigBundleCreator ship only referenced files + filtered
+# secrets. Every test below is structured as a regression guard for a
+# specific leak the pre-BD rglob path permitted.
 # ---------------------------------------------------------------------------
 
+def _bundle_names(raw: bytes) -> list[str]:
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
+        return tar.getnames()
+
+
+def _bundle_file_bytes(raw: bytes, name: str) -> bytes:
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
+        fp = tar.extractfile(name)
+        assert fp is not None, f"{name} missing from bundle: {tar.getnames()}"
+        return fp.read()
+
+
 def test_bundle_is_tar_gz():
-    raw = create_bundle(str(FIXTURES))
+    raw = create_bundle(str(FIXTURES), "device1.yaml")
     assert isinstance(raw, bytes)
     assert len(raw) > 0
     # gzip magic bytes
     assert raw[:2] == b"\x1f\x8b"
 
 
-def test_bundle_includes_secrets_yaml():
-    raw = create_bundle(str(FIXTURES))
-    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
-        names = tar.getnames()
-    assert "secrets.yaml" in names
-
-
-def test_bundle_includes_device_yamls():
-    raw = create_bundle(str(FIXTURES))
-    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
-        names = tar.getnames()
+def test_bundle_ships_the_target_yaml():
+    names = _bundle_names(create_bundle(str(FIXTURES), "device1.yaml"))
     assert "device1.yaml" in names
-    assert "device2.yaml" in names
-
-
-def test_bundle_includes_subdirectory():
-    raw = create_bundle(str(FIXTURES))
-    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
-        names = tar.getnames()
-    assert any("packages" in n for n in names), f"packages/ not found in bundle: {names}"
-    assert any("common.yaml" in n for n in names)
-
-
-def test_bundle_preserves_content():
-    raw = create_bundle(str(FIXTURES))
-    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
-        f = tar.extractfile("secrets.yaml")
-        content = f.read().decode()
-    assert "wifi_ssid" in content
-    assert "wifi_password" in content
 
 
 def test_bundle_paths_are_relative():
-    """Archive paths should not start with '/' (absolute) or include the base dir prefix."""
-    raw = create_bundle(str(FIXTURES))
-    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
-        for name in tar.getnames():
-            assert not name.startswith("/"), f"Absolute path in bundle: {name}"
+    """Archive paths must not start with '/' — workers extract into a
+    per-slot dir and an absolute path would escape it."""
+    names = _bundle_names(create_bundle(str(FIXTURES), "device1.yaml"))
+    for name in names:
+        assert not name.startswith("/"), f"Absolute path in bundle: {name}"
 
 
-def test_bundle_empty_dir(tmp_path):
-    """Bundle of empty directory should be a valid but empty tar.gz."""
-    raw = create_bundle(str(tmp_path))
-    assert raw[:2] == b"\x1f\x8b"
-    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
-        assert tar.getnames() == []
+def test_bundle_includes_manifest():
+    """ConfigBundleCreator always emits a manifest.json at the tree root."""
+    names = _bundle_names(create_bundle(str(FIXTURES), "device1.yaml"))
+    assert "manifest.json" in names
+
+
+# --- BD.3.3 — bundle for target X does NOT ship unrelated target Y ----------
+
+def test_bundle_omits_unrelated_targets():
+    """Pre-BD regression guard: bundle for device1 used to include
+    every .yaml in the config directory. ConfigBundleCreator walks
+    the validated config and only adds files the target references,
+    so device2.yaml (and anything else not `!include`d by device1)
+    must not be in the archive.
+    """
+    names = _bundle_names(create_bundle(str(FIXTURES), "device1.yaml"))
+    assert "device2.yaml" not in names, (
+        f"bundle for device1.yaml leaked device2.yaml — full list: {names}"
+    )
+
+
+def test_bundle_omits_unrelated_package_files(tmp_path):
+    """Package files unreferenced by the target aren't shipped."""
+    (tmp_path / "secrets.yaml").write_text(
+        'wifi_ssid: "bundle-test-ssid"\nwifi_password: "bundle-test-password-long-enough"\nota_password: "bundle-test-ota-password"\n'
+    )
+    (tmp_path / "device-a.yaml").write_text(
+        "esphome:\n  name: device-a\n"
+        "esp8266:\n  board: d1_mini\n"
+        "wifi:\n  ssid: !secret wifi_ssid\n  password: !secret wifi_password\n"
+    )
+    # A second target that uses an included package — that package
+    # file must not ship with device-a's bundle.
+    (tmp_path / "packages").mkdir()
+    (tmp_path / "packages" / "shared.yaml").write_text(
+        "logger:\n  level: DEBUG\n"
+    )
+    (tmp_path / "device-b.yaml").write_text(
+        "esphome:\n  name: device-b\n"
+        "esp8266:\n  board: d1_mini\n"
+        "wifi:\n  ssid: !secret wifi_ssid\n  password: !secret wifi_password\n"
+        "packages:\n  shared: !include packages/shared.yaml\n"
+    )
+    names = _bundle_names(create_bundle(str(tmp_path), "device-a.yaml"))
+    assert "packages/shared.yaml" not in names
+    assert "device-b.yaml" not in names
+
+
+# --- BD.3.1 — `.git/` never ships -------------------------------------------
+
+def test_bundle_excludes_git_dir(tmp_path):
+    """Pre-BD regression guard: rglob shipped `.git/config` (containing
+    remote URLs + any wired-up push credentials) and loose objects to
+    every claiming worker. ConfigBundleCreator walks the config tree,
+    not the filesystem, so `.git/*` never appears.
+    """
+    (tmp_path / "secrets.yaml").write_text(
+        'wifi_ssid: "bundle-test-ssid"\nwifi_password: "bundle-test-password-long-enough"\nota_password: "bundle-test-ota-password"\n'
+    )
+    (tmp_path / "device.yaml").write_text(
+        "esphome:\n  name: my-device\n"
+        "esp8266:\n  board: d1_mini\n"
+        "wifi:\n  ssid: !secret wifi_ssid\n  password: !secret wifi_password\n"
+    )
+    # Seed a believable-looking `.git/` tree with a push URL + a loose
+    # object so a regression can't pass by checking for just the dir name.
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    (git_dir / "config").write_text(
+        "[remote \"origin\"]\n"
+        "  url = https://ghp_SUPERSECRETPAT@github.com/user/repo.git\n"
+    )
+    (git_dir / "objects" / "ab").mkdir(parents=True)
+    (git_dir / "objects" / "ab" / "cdef1234").write_bytes(b"\x78\x9c\x01\x00\x00")
+
+    raw = create_bundle(str(tmp_path), "device.yaml")
+    names = _bundle_names(raw)
+    assert not any(".git" in n.split("/") for n in names), (
+        f".git leaked in bundle: {[n for n in names if '.git' in n]}"
+    )
+
+
+# --- BD.3.2 — secrets.yaml is filtered to referenced keys only --------------
+
+def test_bundle_filters_secrets_to_referenced_keys(tmp_path):
+    """Pre-BD regression guard: rglob shipped the entire secrets.yaml
+    (every device's WiFi PSK, API noise-PSK, OTA password) to every
+    worker. ConfigBundleCreator loads secrets.yaml, intersects with the
+    keys actually `!secret`-referenced by the bundled YAML tree, and
+    only ships those keys.
+    """
+    (tmp_path / "secrets.yaml").write_text(
+        'wifi_ssid: "my-ssid"\n'
+        'wifi_password: "my-wifi-password"\n'
+        'ota_password: "my-ota-password"\n'
+        'api_encryption_key: "Zp82U4SqCqe55xkDDuPXzsoNhcmEws7/HbNXsv2qOGI="\n'
+        'other_device_api_key: "OTHER-DEVICE-PSK-MUST-NOT-LEAK"\n'
+        'unused_backdoor_password: "ALSO-MUST-NOT-LEAK"\n'
+    )
+    (tmp_path / "device.yaml").write_text(
+        "esphome:\n  name: my-device\n"
+        "esp8266:\n  board: d1_mini\n"
+        "wifi:\n  ssid: !secret wifi_ssid\n  password: !secret wifi_password\n"
+    )
+    secrets_content = _bundle_file_bytes(
+        create_bundle(str(tmp_path), "device.yaml"), "secrets.yaml",
+    ).decode()
+
+    # Keys this target references — must be present.
+    assert "wifi_ssid" in secrets_content
+    assert "wifi_password" in secrets_content
+
+    # Keys this target does NOT reference — must be filtered out.
+    assert "other_device_api_key" not in secrets_content
+    assert "OTHER-DEVICE-PSK-MUST-NOT-LEAK" not in secrets_content
+    assert "unused_backdoor_password" not in secrets_content
+    assert "ALSO-MUST-NOT-LEAK" not in secrets_content
+
+
+def test_bundle_raises_on_validation_error(tmp_path):
+    """BD intentionally has no fallback — a target that fails ESPHome's
+    full validator can't be dispatched until the YAML is fixed. Better
+    than silently shipping the full config directory.
+    """
+    (tmp_path / "secrets.yaml").write_text('wifi_ssid: "bundle-test-ssid"\nwifi_password: "bundle-test-password-long-enough"\n')
+    # Invalid: `esp8266.board` is missing.
+    (tmp_path / "broken.yaml").write_text(
+        "esphome:\n  name: broken\n"
+        "esp8266: {}\n"
+        "wifi:\n  ssid: !secret wifi_ssid\n  password: !secret wifi_password\n"
+    )
+    with pytest.raises(Exception):
+        create_bundle(str(tmp_path), "broken.yaml")
 
 
 # ---------------------------------------------------------------------------
@@ -499,6 +675,82 @@ def test_static_ip_fixture_metadata():
     meta = get_device_metadata(str(FIXTURES), "static_ip_device.yaml")
     assert meta["friendly_name"] == "Static IP Device"
     assert meta["device_name_raw"] == "static-ip-device"
+
+
+# ---------------------------------------------------------------------------
+# #84: wifi.domain is honored because we run ESPHome's full validator
+# (which injects `wifi.use_address = CORE.name + config[CONF_DOMAIN]`).
+# Before this fix, the substitution-only pipeline left use_address unset and
+# our waterfall fell through to `{name}.local` regardless of `domain:`.
+# ---------------------------------------------------------------------------
+
+def test_wifi_domain_fixture_resolves_address():
+    """Fixture: tests/fixtures/esphome_configs/wifi_domain.yaml
+
+    Device declares ``wifi.domain: .example.internal`` but no ``use_address``.
+    After full validation, ``wifi.use_address`` is injected as
+    ``wifi-domain-device.example.internal`` — that must propagate to
+    ``address_overrides`` so the worker OTAs to the right host, not
+    ``wifi-domain-device.local``.
+    """
+    _, _, overrides, sources = build_name_to_target_map(
+        str(FIXTURES), ["wifi_domain.yaml"],
+    )
+    assert overrides.get("wifi-domain-device") == "wifi-domain-device.example.internal"
+    # Source is `wifi_use_address` (not `mdns_default` — the pre-fix bug)
+    # because the validator set `use_address`, not `manual_ip.static_ip`.
+    assert sources.get("wifi-domain-device") == "wifi_use_address"
+
+
+def test_static_ip_fixture_keeps_static_ip_source_label():
+    """After full validation, a static-IP config keeps its `_static_ip` source.
+
+    The wifi validator promotes ``manual_ip.static_ip`` into ``use_address``
+    (so ESPHome itself connects to the static IP). Our ``get_device_address``
+    detects that match and keeps the legacy source label so the Devices-tab
+    tooltip still reads "wifi static_ip" rather than "wifi.use_address".
+    Regression guard alongside the #84 fix.
+    """
+    _, _, overrides, sources = build_name_to_target_map(
+        str(FIXTURES), ["static_ip_device.yaml"],
+    )
+    assert overrides.get("static-ip-device") == "192.168.1.99"
+    assert sources.get("static-ip-device") == "wifi_static_ip"
+
+
+def test_get_device_address_validated_use_address_from_static_ip():
+    """Direct unit-level check for the source-label heuristic.
+
+    When both ``use_address`` and ``manual_ip.static_ip`` are present and
+    equal, source is ``_static_ip`` (the pattern ``validate_config``
+    produces when it promotes a static IP). When they differ, source is
+    ``_use_address`` (explicit override or domain-injection).
+    """
+    # validator-produced shape for a static-IP config
+    config = {
+        "wifi": {
+            "use_address": "10.0.0.5",
+            "manual_ip": {"static_ip": "10.0.0.5"},
+        }
+    }
+    assert get_device_address(config, "dev") == ("10.0.0.5", "wifi_static_ip")
+
+    # validator-produced shape for a domain config — use_address is
+    # `{name}{domain}`, manual_ip absent
+    config = {
+        "wifi": {"use_address": "dev.example.com"},
+    }
+    assert get_device_address(config, "dev") == ("dev.example.com", "wifi_use_address")
+
+    # explicit override with unrelated static_ip (edge case but spec-level
+    # correct: explicit use_address wins, source is use_address)
+    config = {
+        "wifi": {
+            "use_address": "10.0.0.99",  # explicit, differs from static
+            "manual_ip": {"static_ip": "10.0.0.5"},
+        }
+    }
+    assert get_device_address(config, "dev") == ("10.0.0.99", "wifi_use_address")
 
 
 # ---------------------------------------------------------------------------

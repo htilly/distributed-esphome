@@ -115,9 +115,18 @@ async def _enqueue_job(
     return job
 
 
+# Sentinel distinguishing "argument omitted" from "argument explicitly
+# set to None". Needed because the helper's two supported shapes — "use
+# the live MIN_IMAGE_VERSION" (the default, for tests that don't care)
+# and "omit the field entirely" (for tests that want to simulate a
+# pre-image_version worker registering) — both need a falsy marker and
+# a plain ``None`` default collapsed them into one.
+_OMIT_IMAGE_VERSION = object()
+
+
 async def _register(ta: _App, hostname: str = "build-box", platform: str = "linux/amd64",
                     system_info: dict | None = None,
-                    image_version: str | None = None) -> str:
+                    image_version=_OMIT_IMAGE_VERSION) -> str:
     # Bug #21 (1.6.1): default to the live ``MIN_IMAGE_VERSION`` so a
     # future bump doesn't regress every test that uses this helper by
     # silently dropping workers into the stale-image branch. Pre-#21
@@ -125,10 +134,18 @@ async def _register(ta: _App, hostname: str = "build-box", platform: str = "linu
     # bumped the floor to 7 — ``test_heartbeat_updates_last_seen`` +
     # ``test_heartbeat_returns_server_version`` went red because the
     # heartbeat correctly suppressed ``server_client_version`` for
-    # the "fake stale" worker they'd registered without knowing. Tests
-    # that want to simulate an actually-stale worker still pass
-    # ``image_version=None`` or a literal older number explicitly.
-    if image_version is None:
+    # the "fake stale" worker they'd registered without knowing.
+    #
+    # Three shapes the helper supports:
+    #   - default (argument omitted) → send ``MIN_IMAGE_VERSION`` so
+    #     the worker passes the stale-image check.
+    #   - ``image_version=None`` → omit the field entirely, simulating
+    #     a pre-image_version worker (or an actually-stale one with
+    #     no field in its register payload).
+    #   - explicit string → literal value (e.g. ``"5"`` for "known
+    #     stale"). The server enforces the floor with an integer
+    #     compare, so string form is fine.
+    if image_version is _OMIT_IMAGE_VERSION:
         from constants import MIN_IMAGE_VERSION  # noqa: PLC0415
         image_version = MIN_IMAGE_VERSION
     body: dict = {"hostname": hostname, "platform": platform}

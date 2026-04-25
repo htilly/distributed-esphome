@@ -21,6 +21,27 @@ from job_queue import JobQueue, JobState
 from main import auth_middleware
 from registry import WorkerRegistry
 
+# pytest-homeassistant-custom-component (installed on some dev boxes but
+# not in the plain CI test env) pulls in pytest-socket, which globally
+# blocks socket() so aiohttp's TestServer can't bind a loopback listener.
+# Per-test opt-in — only the tests that explicitly pull ``_enable_socket``
+# as a fixture get loopback-socket access. Keeping it opt-in (rather than
+# autouse for this whole module) avoids exposing unrelated cleanup races
+# in older save/rename/delete tests that pre-date pytest-homeassistant
+# landing on the dev machine.
+@pytest.fixture
+def _enable_socket():
+    try:
+        import pytest_socket as _pytest_socket  # type: ignore[import-not-found]
+    except ImportError:
+        yield
+        return
+    _pytest_socket.enable_socket()
+    yield
+    # Don't re-disable on teardown — asyncio cleanup during test exit
+    # still needs the event loop's self-pipe socket (same reason as
+    # test_worker_log_endpoints.py).
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -166,6 +187,84 @@ async def test_targets_excludes_secrets_yaml(tmp_path):
         data = await resp.json()
         assert any(t["target"] == "device1.yaml" for t in data)
         assert not any(t["target"] == "secrets.yaml" for t in data)
+    finally:
+        await ta.close()
+
+
+async def test_targets_config_modified_reflects_git_status_when_clean(tmp_path, _settings_init, _enable_socket):
+    """In a git repo, `config_modified` reflects `git status` (uncommitted
+    edits) — NOT file mtime. The user's mental model for "changed locally"
+    is `git status`, and mtime false-positives on editor autosaves, external
+    touches, and `git checkout`. A target that's been committed and has no
+    past successful flash on record must not show as modified."""
+    import git_versioning as gv
+    gv._reset_for_tests()
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "bedroom.yaml", "bedroom")
+        gv.init_repo(ta.config_dir)
+        # init_repo auto-commits an initial snapshot, so the tree is clean.
+
+        resp = await ta.get("/ui/api/targets")
+        assert resp.status == 200
+        data = await resp.json()
+        bedroom = next(t for t in data if t["target"] == "bedroom.yaml")
+        assert bedroom["config_drifted_since_flash"] is None  # no past flash
+        assert bedroom["has_uncommitted_changes"] is False
+        assert bedroom["config_modified"] is False
+    finally:
+        gv._reset_for_tests()
+        await ta.close()
+
+
+async def test_targets_config_modified_reflects_git_status_when_dirty(tmp_path, _settings_init, _enable_socket):
+    """Same setup as the clean variant above, but with an uncommitted edit:
+    `config_modified` flips to True and matches `has_uncommitted_changes`."""
+    import git_versioning as gv
+    gv._reset_for_tests()
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "bedroom.yaml", "bedroom")
+        gv.init_repo(ta.config_dir)
+
+        # External edit — bypass the committing save endpoint on purpose so
+        # the tree ends up dirty, matching a user who edited via a shell.
+        (ta.config_dir / "bedroom.yaml").write_text(
+            "esphome:\n  name: bedroom\n# external edit\n"
+        )
+
+        resp = await ta.get("/ui/api/targets")
+        data = await resp.json()
+        bedroom = next(t for t in data if t["target"] == "bedroom.yaml")
+        assert bedroom["has_uncommitted_changes"] is True
+        assert bedroom["config_modified"] is True
+    finally:
+        gv._reset_for_tests()
+        await ta.close()
+
+
+async def test_targets_config_modified_uses_mtime_without_repo(tmp_path, _settings_init, _enable_socket):
+    """When the config dir isn't a git repo, `config_modified` still falls
+    back to the mtime-vs-compilation_time signal for non-versioning users.
+    With no device attached we expect None (no compilation_time to compare
+    against), which proves the mtime branch is taken and doesn't crash
+    rather than short-circuiting to False from the git-status branch."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        # Flip versioning off so `_versioning_active` returns False and
+        # `head_hash` is None → mtime branch in ui_api._build_targets.
+        import settings as settings_mod
+        await settings_mod.update_settings({"versioning_enabled": "off"})
+
+        _write_config(ta.config_dir, "bedroom.yaml", "bedroom")
+
+        resp = await ta.get("/ui/api/targets")
+        data = await resp.json()
+        bedroom = next(t for t in data if t["target"] == "bedroom.yaml")
+        # No device_poller in the test app → no compilation_time → no mtime
+        # comparison possible → None (not False).
+        assert bedroom["config_modified"] is None
+        assert bedroom["has_uncommitted_changes"] is False
     finally:
         await ta.close()
 
@@ -1029,7 +1128,7 @@ async def test_get_settings_returns_defaults_on_fresh_boot(tmp_path, _settings_i
             "ota_timeout": 120,
             "worker_offline_threshold": 30,
             "device_poll_interval": 60,
-            "require_ha_auth": True,
+            "require_ha_auth": False,
             "time_format": "auto",
         }
     finally:
@@ -1443,4 +1542,61 @@ async def test_editor_save_skips_commit_when_toggle_off(tmp_path, _settings_init
         assert after_log == baseline_log
     finally:
         gv._reset_for_tests()
+        await ta.close()
+
+
+# ---------------------------------------------------------------------------
+# POST /ui/api/esphome-version — bug #105
+# ---------------------------------------------------------------------------
+
+async def test_set_esphome_version_schedules_install(tmp_path):
+    """Picking a version in the UI must schedule the install, not just
+    record the selection. Previously this handler only updated the
+    in-memory selected version; on a fresh HAOS box with no bundled
+    ESPHome the user had no way to unblock the "Installing ESPHome…"
+    banner (bug #105)."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        scheduled: list[str] = []
+
+        def fake_ensure(ver: str) -> None:
+            scheduled.append(ver)
+
+        import scanner as scanner_module
+        with (
+            patch.object(scanner_module, "ensure_esphome_installed", fake_ensure),
+            patch.object(scanner_module, "set_esphome_version", lambda v: None),
+        ):
+            resp = await ta.post(
+                "/ui/api/esphome-version",
+                json={"version": "2026.3.3"},
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert body == {"ok": True, "version": "2026.3.3"}
+
+        # Give the executor a tick to run.
+        import asyncio
+        for _ in range(50):
+            if scheduled:
+                break
+            await asyncio.sleep(0.01)
+
+        assert scheduled == ["2026.3.3"], (
+            "POST /ui/api/esphome-version did not schedule ensure_esphome_installed — "
+            "this is the #105 UI-recovery path"
+        )
+    finally:
+        await ta.close()
+
+
+async def test_set_esphome_version_rejects_missing_version(tmp_path):
+    """Empty body or missing version returns 400."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        resp = await ta.post("/ui/api/esphome-version", json={})
+        assert resp.status == 400
+        resp = await ta.post("/ui/api/esphome-version", json={"version": ""})
+        assert resp.status == 400
+    finally:
         await ta.close()

@@ -82,6 +82,10 @@ function buildDockerCmd(params: {
   if (restartPolicy !== 'no') {
     lines.push(`  --restart ${restartPolicy} ${cont}`);
   }
+  // TR.4: match the compose branch's `network_mode: host` — without it,
+  // the worker starts on docker's default bridge and can't reach ESP
+  // devices on the host's LAN, so every OTA fails.
+  lines.push(`  --network host ${cont}`);
   lines.push(`  --hostname ${hostname || hostnameVar} ${cont}`);
   lines.push(`  -e SERVER_URL=${serverUrl} ${cont}`);
   lines.push(`  -e SERVER_TOKEN=${token} ${cont}`);

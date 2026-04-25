@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import io
 import logging
 import subprocess
 import sys
-import tarfile
 import threading
 from pathlib import Path
 from typing import Optional
 
-from constants import SECRETS_YAML
+from constants import MIN_ESPHOME_VERSION, SECRETS_YAML
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +82,27 @@ def _activate_esphome_venv(venv_path: Path) -> bool:
     return True
 
 
+def _version_tuple(version: str) -> tuple[int, ...]:
+    """Parse a dotted version string into a tuple of ints for ordering.
+
+    Unknown / unparseable suffixes (`.dev0`, `-rc1`) are dropped after the
+    numeric prefix — enough for the ESPHome-floor comparison in BD.2
+    without pulling in ``packaging.version``.
+    """
+    parts: list[int] = []
+    for chunk in version.split("."):
+        n = ""
+        for ch in chunk:
+            if ch.isdigit():
+                n += ch
+            else:
+                break
+        if not n:
+            break
+        parts.append(int(n))
+    return tuple(parts)
+
+
 def ensure_esphome_installed(
     version: str,
     *,
@@ -99,9 +118,28 @@ def ensure_esphome_installed(
 
     Idempotent: a second call for the same version is a fast cache hit
     inside VersionManager and just re-activates the venv on sys.path.
+
+    Refuses to install any ESPHome older than ``MIN_ESPHOME_VERSION``
+    (BD.2 — WORKITEMS-1.6.2). ``scanner.create_bundle`` delegates to
+    ``esphome.bundle.ConfigBundleCreator`` which landed in ESPHome
+    2026.4; older versions would fail on import and leave every job
+    un-dispatchable. Surfacing the refusal here gives the UI a clear
+    banner instead of a cascade of silent bundle failures.
     """
     global _server_esphome_venv, _server_esphome_bin, _esphome_install_failed
     global _esphome_version_cache
+
+    if _version_tuple(version) < _version_tuple(MIN_ESPHOME_VERSION):
+        logger.error(
+            "Refusing to install ESPHome %s: version too old. "
+            "ESPHome Fleet 1.6.2+ requires %s or newer "
+            "(bundle creation uses esphome.bundle, which landed in "
+            "ESPHome 2026.4). Pin a newer version via the UI or the "
+            "HA ESPHome add-on.",
+            version, MIN_ESPHOME_VERSION,
+        )
+        _esphome_install_failed = True
+        return
 
     # VersionManager lives in the bundled client code. In production the
     # Dockerfile copies client/ to /app/client; locally the test harness
@@ -241,16 +279,41 @@ def _get_installed_esphome_version() -> str:
         return "unknown"
 
 
+_missing_config_dirs_logged: set[str] = set()
+
+
 def scan_configs(config_dir: str) -> list[str]:
     """
     Scan *config_dir* for top-level ESPHome YAML config files.
 
     Returns a list of filenames (not full paths), excluding ``secrets.yaml``.
+
+    Bug #86: on installs without the HA ESPHome builder add-on,
+    ``/config/esphome`` doesn't exist. That's not an error — it's a
+    configuration state the user can resolve by installing the builder
+    or creating the directory. Log it once at INFO with a hint, then
+    DEBUG on every subsequent scan so the log doesn't flood. When the
+    directory appears, drop the "missing" marker so a future removal is
+    surfaced again.
     """
     base = Path(config_dir)
     if not base.is_dir():
-        logger.warning("Config dir %s does not exist or is not a directory", config_dir)
+        if config_dir not in _missing_config_dirs_logged:
+            logger.info(
+                "Config dir %s does not exist yet — create it or install the "
+                "Home Assistant ESPHome builder add-on. No targets will be "
+                "scanned until then. (#86)", config_dir,
+            )
+            _missing_config_dirs_logged.add(config_dir)
+        else:
+            logger.debug(
+                "Config dir %s still missing — skipping scan", config_dir,
+            )
         return []
+
+    if config_dir in _missing_config_dirs_logged:
+        logger.info("Config dir %s is now available; resuming scans", config_dir)
+        _missing_config_dirs_logged.discard(config_dir)
 
     results: list[str] = []
     for p in sorted(base.glob("*.yaml")):
@@ -264,29 +327,138 @@ def scan_configs(config_dir: str) -> list[str]:
     return results
 
 
-def create_bundle(config_dir: str) -> bytes:
+# Subprocess-executed inside the ESPHome venv by create_bundle(). Runs
+# validate_config + ConfigBundleCreator in a FRESH Python process and
+# writes the tar.gz to stdout. Fresh-process isolation is required
+# because:
+#   1. External components (remote_package:, dashboard_import:, etc.)
+#      register module-level validators in their imported modules;
+#      once a target's external component has run in-process, its
+#      module is in sys.modules and its globals persist across
+#      subsequent CORE.reset() calls.
+#   2. The ratgdo package (and others) register "only-one" invariants
+#      per device_class. A second validation of the same target in the
+#      same process sees the first validation's registrations as
+#      duplicates — reproduced on hass-4's garage-door-big.yaml even
+#      with CORE.reset() + _validator_lock.
+#   3. Even process-global caches outside CORE (e.g. an external
+#      module's entity registry) survive CORE.reset() and cannot be
+#      safely reset without patching ESPHome internals.
+# ESPHome's own `esphome compile <yaml>` CLI runs one target per
+# process so never hits this; we mimic the fresh-process contract
+# explicitly. Overhead ~1-2 seconds per bundle on a 67-target fleet
+# is fine — bundle creation is on the job-claim path, not hot.
+_BUNDLE_SUBPROCESS_SCRIPT = r"""
+import sys
+from pathlib import Path
+from esphome.core import CORE
+from esphome.yaml_util import load_yaml
+from esphome.config import validate_config
+from esphome.bundle import ConfigBundleCreator
+
+target_path = Path(sys.argv[1]).resolve()
+CORE.config_path = target_path
+config = load_yaml(target_path)
+if not isinstance(config, dict):
+    sys.stderr.write(f"YAML root of {target_path.name} is not a mapping\n")
+    sys.exit(2)
+result = validate_config(config, None, skip_external_update=True)
+if result.errors:
+    first = result.errors[0]
+    msg = getattr(first, "msg", None) or str(first)
+    sys.stderr.write(
+        f"validation errors ({len(result.errors)} total): {msg}\n"
+    )
+    sys.exit(3)
+bundle = ConfigBundleCreator(result).create_bundle()
+sys.stdout.buffer.write(bundle.data)
+"""
+
+
+def _venv_python() -> str:
+    """Return the path to the ESPHome venv's python binary.
+
+    The venv is activated by ``ensure_esphome_installed`` at first
+    boot and stored as ``_server_esphome_bin`` (path to the
+    ``esphome`` script). The ``python`` binary sits next to it.
+
+    Falls back to ``sys.executable`` for test + dev environments where
+    the venv isn't managed by ``ensure_esphome_installed`` (local
+    pytest run, CI). The fallback only works because those
+    environments have ESPHome installed in the same Python they're
+    using for the server — tests exercise the same ``esphome.*``
+    imports.
     """
-    Create a tar.gz archive of the entire *config_dir* tree, including
-    ``secrets.yaml``.
+    if _server_esphome_bin is not None:
+        return str(Path(_server_esphome_bin).parent / "python")
+    return sys.executable
 
-    Returns raw bytes (the caller is responsible for base64-encoding if needed).
+
+def create_bundle(config_dir: str, target: str) -> bytes:
+    """Create a self-contained bundle for *target* under *config_dir*.
+
+    BD — Bundle discipline (WORKITEMS-1.6.2). Delegates to ESPHome's
+    ``ConfigBundleCreator`` (``esphome/bundle.py``, ESPHome 2026.4+)
+    so the bundle walks the target's validated config tree and ships
+    only the files the target actually references — secrets.yaml is
+    filtered to just the keys this target uses, `.git/` and unrelated
+    device YAMLs don't ship by construction, and ``.esphome`` /
+    ``.pioenvs`` / ``.pio`` build caches are ignored.
+
+    Pre-1.6.2 shipped the entire ``/config/esphome/`` tree to every
+    claiming worker (``base.rglob("*")`` with only macOS ``._*`` /
+    ``.DS_Store`` filters), which was a latent secret-exfiltration
+    vector — a worker on a friend's Docker host received every device's
+    Wi-Fi PSK, API noise keys, the fleet's git remote URL, and any
+    in-place ``esphome compile`` PlatformIO cache. Cleaned up here.
+
+    Validation + bundling runs in a **fresh subprocess** via the
+    ESPHome venv's python (``_BUNDLE_SUBPROCESS_SCRIPT``). In-process
+    validate_config is not safe to call repeatedly: external components
+    (e.g. ratgdo dashboard_import) register module-level validators
+    whose state persists across ``CORE.reset()``, causing phantom
+    "Only one binary sensor of type 'motion' is allowed" errors on
+    targets that pass ``esphome compile`` standalone. Fresh-process
+    isolation mirrors what the ESPHome CLI gets for free.
+
+    Validation failures are surfaced as ``RuntimeError`` so the caller
+    can fail the job cleanly — intentional: targets that don't
+    validate under the server's ESPHome version can't be dispatched
+    until the YAML is fixed. Far better than silently shipping the
+    full config directory.
+
+    Returns raw bytes (caller base64-encodes if needed).
     """
-    base = Path(config_dir)
-    buf = io.BytesIO()
+    path = Path(config_dir) / target
+    if not path.is_file():
+        raise FileNotFoundError(f"Target not found: {path}")
 
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for path in sorted(base.rglob("*")):
-            if not path.is_file():
-                continue
-            # Skip macOS resource fork files and metadata noise
-            if path.name.startswith("._") or path.name == ".DS_Store":
-                logger.debug("Skipping resource fork file: %s", path)
-                continue
-            arcname = str(path.relative_to(base))
-            tar.add(str(path), arcname=arcname)
-            logger.debug("Added %s to bundle", arcname)
-
-    return buf.getvalue()
+    # PY-2: log the command line before the subprocess runs so a failure
+    # triage has the actual invocation visible in the add-on log (the
+    # `-c <inline-script>` shape means argv in any crash message shows
+    # up as `-c`, not a readable path — the readable info is this line).
+    cmd = [_venv_python(), "-c", _BUNDLE_SUBPROCESS_SCRIPT, str(path)]
+    logger.debug("Running bundle subprocess: %s %s -c <script> %s",
+                 cmd[0], cmd[1], cmd[3])
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        check=False,
+        timeout=120,  # validation+bundle is fast; 2 min is paranoid
+    )
+    if proc.returncode == 3:
+        raise RuntimeError(proc.stderr.decode("utf-8", errors="replace").strip())
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"bundle subprocess exited {proc.returncode}: "
+            f"{proc.stderr.decode('utf-8', errors='replace').strip()}"
+        )
+    data = proc.stdout
+    logger.info(
+        "Bundle for %s: %d bytes (subprocess-isolated validation)",
+        target, len(data),
+    )
+    return data
 
 
 # Cache resolved configs by (target, mtime) to avoid repeated git clones
@@ -662,15 +834,92 @@ def write_device_meta(config_dir: str, target: str, meta: dict) -> None:
         logger.debug("event_bus broadcast failed", exc_info=True)
 
 
+# ESPHome's CORE is a process-global singleton. validate_config()
+# mutates many of its fields (unique_ids, loaded_integrations,
+# component_ids, the pin-schema registry, raw_config, target_platform,
+# ...) and is not thread-safe. The server runs validation in executor
+# threads — from config_scanner (30s rescan), bundle creation on job
+# claim, and the /ui/api/validate endpoint — so two concurrent
+# validations against different targets race on CORE and produce
+# phantom "Duplicate entity" errors for targets that validate cleanly
+# in isolation. Serialize every entry into the ESPHome validator
+# through this lock. The lock is held for the duration of each
+# validation (typically 100-500ms); throughput is not a concern on a
+# home-lab fleet of ~60 targets and serializing is strictly safer than
+# trying to make CORE reentrant.
+_validator_lock = threading.Lock()
+
+
+def _full_validate_config(path: Path) -> dict:
+    """Run ESPHome's full validator against the YAML at *path*.
+
+    This is the authoritative resolver — it does everything
+    ``esphome compile`` does up to schema validation: packages, substitutions,
+    `!extend`/`!remove`, external components, AND per-component voluptuous
+    schemas. Crucially, component validators inject canonical fields that
+    the substitution-only pass doesn't — most notably
+    ``wifi.use_address = CORE.name + config[CONF_DOMAIN]`` (honors
+    ``wifi.domain`` and static IPs uniformly; bug #84).
+
+    Raises on any validation error so callers can fall back to the
+    hand-rolled waterfall for targets that don't fully validate (e.g.
+    typos elsewhere in the file). Returns the validated config dict on
+    success.
+
+    Serialized via ``_validator_lock`` and prefixed with ``CORE.reset()``:
+    ESPHome's CORE is process-global and non-reentrant; without the
+    lock, concurrent executor threads interleave CORE mutations and
+    produce phantom "Duplicate entity" errors on targets that validate
+    cleanly in isolation. Without the reset, even serialized calls leak
+    state (``unique_ids``, ``loaded_integrations``, ``component_ids``,
+    ``PIN_SCHEMA_REGISTRY``) across validations. ESPHome's own
+    ``esphome compile`` CLI runs one target per process so needs
+    neither — we run many sequentially + concurrently, so we must
+    mimic the fresh-process contract explicitly.
+    """
+    from esphome.core import CORE  # noqa: PLC0415
+    from esphome.yaml_util import load_yaml  # noqa: PLC0415
+    from esphome.config import validate_config  # noqa: PLC0415
+
+    with _validator_lock:
+        CORE.reset()
+        CORE.config_path = path
+        config = load_yaml(path)
+        if not isinstance(config, dict):
+            raise ValueError(f"YAML root of {path.name} is not a mapping")
+        # skip_external_update=True reuses any previously-cloned external
+        # component sources; the first validation per external-components
+        # entry still clones. Same caching shape we've always used for
+        # do_packages_pass.
+        result = validate_config(config, None, skip_external_update=True)
+        if result.errors:
+            first = result.errors[0]
+            msg = getattr(first, "msg", None) or str(first)
+            raise RuntimeError(f"validation errors ({len(result.errors)} total): {msg}")
+        return result
+
+
 def _resolve_esphome_config(config_dir: str, target: str) -> Optional[dict]:
-    """Fully resolve an ESPHome YAML config including packages and substitutions.
+    """Fully resolve an ESPHome YAML config.
 
     Uses ESPHome's own resolution pipeline so that ``packages:``, ``!include``,
-    and ``${substitutions}`` are all handled identically to ``esphome compile``.
+    ``${substitutions}``, and per-component injected fields (e.g.
+    ``wifi.use_address`` populated from ``name + domain``) are all handled
+    identically to ``esphome compile``.
 
-    Results are cached by file mtime — only re-resolved when the file changes.
+    Two-stage strategy (bug #84 + EH.2 in WORKITEMS-1.6.2):
+    1. **Full validation** via ``esphome.config.validate_config`` — gives
+       us ESPHome-native addressing (``wifi.use_address`` domain-aware,
+       static IPs promoted into ``use_address``), plus every field the
+       component schemas compute.
+    2. **Fallback** to the substitution-only pipeline when full validation
+       raises — typos elsewhere in the file (e.g.
+       ``sensor: - platform: dht112``) resolve-but-don't-validate, and
+       we still want metadata for the Devices tab. The fallback matches
+       the legacy behavior exactly.
 
-    Returns the resolved config dict, or None on error.
+    Results are cached by file mtime — only re-resolved when the file
+    changes. Returns the resolved config dict, or None on error.
     """
     try:
         path = Path(config_dir) / target
@@ -699,6 +948,24 @@ def _resolve_esphome_config(config_dir: str, target: str) -> Optional[dict]:
                 )
                 return None
 
+        # Stage 1 — full validation. Catches domain-aware addressing and
+        # every other schema-level field ESPHome injects.
+        try:
+            config = _full_validate_config(path)
+            _config_cache[target] = (mtime, config)
+            return config
+        except Exception as exc:
+            logger.warning(
+                "Full validation of %s failed (%s: %s) — falling back to "
+                "substitution-only pass. UI metadata will still populate "
+                "but domain-aware OTA addressing will not.",
+                target, type(exc).__name__, exc,
+            )
+            logger.debug("Full validation traceback for %s:", target, exc_info=True)
+
+        # Stage 2 — substitution-only fallback (legacy path). Preserves
+        # behavior for configs that don't fully validate so device
+        # discovery still works and the Devices tab keeps rendering.
         from esphome.yaml_util import load_yaml  # noqa: PLC0415
         from esphome.components.substitutions import do_substitution_pass  # noqa: PLC0415
         from esphome.components.packages import do_packages_pass, merge_packages  # noqa: PLC0415
@@ -1021,6 +1288,16 @@ def get_device_address(config: dict, device_name: str) -> tuple[str, str]:
     any later mDNS discovery creates a duplicate row instead of merging into
     the YAML-derived one (bug #179).
 
+    When the input is a fully-validated config (i.e. came from
+    ``_full_validate_config`` — bug #84), ``use_address`` is always
+    populated — ESPHome's wifi/ethernet validators inject it from
+    ``CORE.name + domain`` or promote the static IP. We then derive the
+    source label by comparing ``use_address`` to ``manual_ip.static_ip``:
+    a match means this was really a static-IP config (keep the existing
+    ``_static_ip`` label for UI tooltip continuity); otherwise the
+    validator picked an explicit-or-domain ``use_address`` and we keep
+    the ``_use_address`` label.
+
     Returns ``(address, source)`` where source is one of:
       - ``"wifi_use_address"``, ``"ethernet_use_address"``, ``"openthread_use_address"``
       - ``"wifi_static_ip"``, ``"ethernet_static_ip"``
@@ -1039,12 +1316,33 @@ def get_device_address(config: dict, device_name: str) -> tuple[str, str]:
         if not isinstance(block, dict):
             continue
 
-        # 1. Explicit use_address always wins
+        # 1. use_address — post-validation this is always set; pre-validation
+        #    it's only set when explicitly present in the YAML.
         use_addr = block.get("use_address")
         if use_addr:
+            # The wifi/ethernet/openthread validators inject
+            # `use_address = f"{CORE.name}.local"` when the user supplied
+            # nothing (no domain override, no static IP, no explicit
+            # use_address). That's semantically the mDNS default — keep
+            # the UI tooltip accurate by labeling it as such rather than
+            # misleading the user into thinking they configured a
+            # use_address when they didn't.
+            if str(use_addr) == f"{device_name}.local":
+                return (str(use_addr), "mdns_default")
+
+            # Preserve the `_static_ip` source label when the validator
+            # promoted manual_ip.static_ip into use_address (so the UI
+            # tooltip still reads "wifi static_ip" rather than
+            # "wifi.use_address" for static configs).
+            manual_ip = block.get("manual_ip")
+            if isinstance(manual_ip, dict):
+                static_ip = manual_ip.get("static_ip")
+                if static_ip and str(static_ip) == str(use_addr):
+                    return (str(use_addr), f"{block_name}_static_ip")
             return (str(use_addr), f"{block_name}_use_address")
 
-        # 2. manual_ip.static_ip is the second choice
+        # 2. manual_ip.static_ip is the second choice (pre-validation path;
+        #    post-validation it'd have been promoted into use_address above).
         manual_ip = block.get("manual_ip")
         if isinstance(manual_ip, dict):
             static_ip = manual_ip.get("static_ip")

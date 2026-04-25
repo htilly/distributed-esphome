@@ -121,7 +121,7 @@ The goal here is **what isn't automated**. Anything covered by CI, the pre-push 
   ' -F id=<PRRT_id>
   ```
   Re-run the list query until zero unresolved threads. "Fix and leave the thread open" doesn't count as done (see `CLAUDE.md` → PR Review Loop).
-- [ ] **Deploy + smoke test**: `./push-to-hass-4.sh`. Runs the full `e2e-hass-4` Playwright suite (device load, schedule upgrade, compile + OTA with live log streaming, editor edit + validate, live device logs, parallel-compile pinned to local-worker).
+- [ ] **Deploy + smoke test all three install paths**: `python scripts/test-matrix.py`. Builds+pushes the three dev-tagged images to GHCR and runs the `e2e-hass-4` Playwright suite against hass-4, the HAOS VM on `pve`, and the standalone Docker container on `docker-pve` in parallel. This is the authoritative release smoke — a green matrix exercises all three ways a user can install, not just the happy-path hass-4 one. Per-target logs + reports land under `build/test-matrix/<target>/`. `./push-to-hass-4.sh` alone is the per-turn fast path, not the release smoke.
 - [ ] **Read the changelog draft** — does it represent what users care about?
 - [ ] **Sanity-check editor autocomplete on a real config** — the only thing Playwright can't verify end-to-end.
 - [ ] Note any config changes that need migration notes for users upgrading.
@@ -169,3 +169,5 @@ The goal here is **what isn't automated**. Anything covered by CI, the pre-push 
 | `ha-addon/client/client.py` | `CLIENT_VERSION` constant |
 
 **`.githooks/pre-push`** runs `pytest` + `mypy` on every push, plus a `CHANGELOG.md` entry check when pushing to `main`. Install with `bash scripts/install-hooks.sh`.
+
+**Integration-test home lab** — this checklist assumes SSH access to `hass-4`, `docker-pve`, `docker-optiplex-5`, `pve`, and `optiplex-5`, all on the `192.168.224.0/22` flat network. Full inventory and SSH setup in `dev-plans/HOME-LAB.md`.

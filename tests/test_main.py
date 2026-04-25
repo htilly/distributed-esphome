@@ -439,7 +439,7 @@ def test_pick_latest_stable_accepts_short_versions():
 # Bug #11 (1.6.1): reseed after ensure_esphome_installed completes
 # ---------------------------------------------------------------------------
 
-def test_reseed_device_poller_refreshes_after_install(tmp_path):
+async def test_reseed_device_poller_refreshes_after_install(tmp_path):
     """On first boot the ESPHome venv hasn't been installed yet, so
     ``build_name_to_target_map`` returns empty encryption keys — every
     YAML whose ``esphome.name`` needs the substitution pass comes back
@@ -450,7 +450,12 @@ def test_reseed_device_poller_refreshes_after_install(tmp_path):
     tail of the install task so the poller catches up without waiting
     for the next 30-second config-scanner tick. This test simulates
     the narrow invariant: an empty-first-seed poller is re-populated
-    with real keys on the second call."""
+    with real keys on the second call.
+
+    Async because the helper is async (#84 moved the heavy
+    ``build_name_to_target_map`` into an executor so the full
+    ESPHome validator doesn't block the event loop — see main.py).
+    """
     from main import reseed_device_poller_from_config
 
     # Stand up a minimal ESPHome fixture inside tmp_path so the
@@ -486,14 +491,14 @@ def test_reseed_device_poller_refreshes_after_install(tmp_path):
 
     # First call — stands in for the in-flight install window: the
     # poller now sees whatever the scanner resolved.
-    reseed_device_poller_from_config(app, reason="test-initial")
+    await reseed_device_poller_from_config(app, reason="test-initial")
     first_keys = dict(captured["enc_keys"])
     assert "my-device.yaml" in captured["targets"]
 
     # Second call mirrors what runs after ``ensure_esphome_installed``
     # completes — same inputs, same outputs, but the code path at
     # least executes cleanly and re-issues update_compile_targets.
-    reseed_device_poller_from_config(app, reason="esphome install complete")
+    await reseed_device_poller_from_config(app, reason="esphome install complete")
     assert captured["enc_keys"] == first_keys
     # Bug #11 belt-and-braces: encryption keys carry both hyphenated
     # and underscore-normalised aliases after reseed.
@@ -501,7 +506,7 @@ def test_reseed_device_poller_refreshes_after_install(tmp_path):
     assert "my_device" in captured["enc_keys"]
 
 
-def test_reseed_device_poller_no_op_when_poller_absent(tmp_path):
+async def test_reseed_device_poller_no_op_when_poller_absent(tmp_path):
     """No device_poller in app — the helper returns without raising."""
     from main import reseed_device_poller_from_config
 
@@ -510,4 +515,167 @@ def test_reseed_device_poller_no_op_when_poller_absent(tmp_path):
 
     app = {"config": _Cfg()}
     # Should just return; no assertion needed beyond "didn't raise".
-    reseed_device_poller_from_config(app, reason="no poller")
+    await reseed_device_poller_from_config(app, reason="no poller")
+
+
+# ---------------------------------------------------------------------------
+# _install_esphome_initial – bug #105
+# ---------------------------------------------------------------------------
+
+
+async def test_install_esphome_initial_prefers_supervisor_version(monkeypatch, tmp_path):
+    """When SUPERVISOR_TOKEN is set and the HA ESPHome builder add-on is
+    installed, the initial install targets the Supervisor-reported
+    version (not the PyPI latest). Regression for #105's first path."""
+    import main as main_module
+
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "fake-token")
+
+    installs: list[str] = []
+
+    async def fake_supervisor(session):  # noqa: ANN001
+        return "2026.3.3"
+
+    async def fake_pypi(session):  # noqa: ANN001
+        raise AssertionError("PyPI must not be queried when Supervisor returns a version")
+
+    def fake_ensure(ver: str) -> None:
+        installs.append(ver)
+
+    set_versions: list[str] = []
+
+    def fake_set_version(ver: str) -> None:
+        set_versions.append(ver)
+
+    async def fake_reseed(app, *, reason: str) -> None:  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(main_module, "_fetch_ha_esphome_version", fake_supervisor)
+    monkeypatch.setattr(main_module, "_fetch_pypi_versions", fake_pypi)
+    monkeypatch.setattr(main_module, "reseed_device_poller_from_config", fake_reseed)
+
+    import scanner as scanner_module
+    monkeypatch.setattr(scanner_module, "_get_installed_esphome_version", lambda: "unknown")
+    monkeypatch.setattr(scanner_module, "ensure_esphome_installed", fake_ensure)
+    monkeypatch.setattr(scanner_module, "set_esphome_version", fake_set_version)
+
+    await main_module._install_esphome_initial({})  # type: ignore[arg-type]
+
+    assert installs == ["2026.3.3"]
+    assert set_versions == ["2026.3.3"]
+
+
+async def test_install_esphome_initial_falls_back_to_pypi_on_fresh_haos(monkeypatch):
+    """Fresh HAOS: SUPERVISOR_TOKEN is set but the HA ESPHome builder
+    add-on is NOT installed, so `_fetch_ha_esphome_version` returns None.
+    Previously this early-returned and the install banner stuck forever
+    (#105). Now we fall back to PyPI latest stable."""
+    import main as main_module
+
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "fake-token")
+
+    installs: list[str] = []
+    set_versions: list[str] = []
+
+    async def fake_supervisor(session):  # noqa: ANN001
+        return None  # builder add-on not installed
+
+    async def fake_pypi(session):  # noqa: ANN001
+        return ["2026.3.3", "2026.3.2"]
+
+    def fake_ensure(ver: str) -> None:
+        installs.append(ver)
+
+    def fake_set_version(ver: str) -> None:
+        set_versions.append(ver)
+
+    async def fake_reseed(app, *, reason: str) -> None:  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(main_module, "_fetch_ha_esphome_version", fake_supervisor)
+    monkeypatch.setattr(main_module, "_fetch_pypi_versions", fake_pypi)
+    monkeypatch.setattr(main_module, "reseed_device_poller_from_config", fake_reseed)
+
+    import scanner as scanner_module
+    monkeypatch.setattr(scanner_module, "_get_installed_esphome_version", lambda: "unknown")
+    monkeypatch.setattr(scanner_module, "ensure_esphome_installed", fake_ensure)
+    monkeypatch.setattr(scanner_module, "set_esphome_version", fake_set_version)
+
+    await main_module._install_esphome_initial({})  # type: ignore[arg-type]
+
+    assert installs == ["2026.3.3"]
+    assert set_versions == ["2026.3.3"]
+
+
+async def test_install_esphome_initial_standalone_docker_uses_pypi(monkeypatch):
+    """Standalone Docker: no SUPERVISOR_TOKEN at all → PyPI path."""
+    import main as main_module
+
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
+
+    installs: list[str] = []
+    supervisor_calls: list[int] = []
+
+    async def fake_supervisor(session):  # noqa: ANN001
+        supervisor_calls.append(1)
+        return None
+
+    async def fake_pypi(session):  # noqa: ANN001
+        return ["2026.3.3"]
+
+    def fake_ensure(ver: str) -> None:
+        installs.append(ver)
+
+    async def fake_reseed(app, *, reason: str) -> None:  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(main_module, "_fetch_ha_esphome_version", fake_supervisor)
+    monkeypatch.setattr(main_module, "_fetch_pypi_versions", fake_pypi)
+    monkeypatch.setattr(main_module, "reseed_device_poller_from_config", fake_reseed)
+
+    import scanner as scanner_module
+    monkeypatch.setattr(scanner_module, "_get_installed_esphome_version", lambda: "unknown")
+    monkeypatch.setattr(scanner_module, "ensure_esphome_installed", fake_ensure)
+    monkeypatch.setattr(scanner_module, "set_esphome_version", lambda v: None)
+
+    await main_module._install_esphome_initial({})  # type: ignore[arg-type]
+
+    # Supervisor probe is skipped entirely when SUPERVISOR_TOKEN is absent.
+    assert supervisor_calls == []
+    assert installs == ["2026.3.3"]
+
+
+async def test_install_esphome_initial_skips_install_when_bundled(monkeypatch):
+    """When ESPHome is already bundled (a real version, not a sentinel),
+    we still run `ensure_esphome_installed` to make sure the venv cache
+    has an activated binary, but we DON'T query Supervisor or PyPI."""
+    import main as main_module
+
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "fake-token")
+
+    installs: list[str] = []
+
+    async def fake_supervisor(session):  # noqa: ANN001
+        raise AssertionError("Supervisor must not be queried when bundled version is known")
+
+    async def fake_pypi(session):  # noqa: ANN001
+        raise AssertionError("PyPI must not be queried when bundled version is known")
+
+    def fake_ensure(ver: str) -> None:
+        installs.append(ver)
+
+    async def fake_reseed(app, *, reason: str) -> None:  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(main_module, "_fetch_ha_esphome_version", fake_supervisor)
+    monkeypatch.setattr(main_module, "_fetch_pypi_versions", fake_pypi)
+    monkeypatch.setattr(main_module, "reseed_device_poller_from_config", fake_reseed)
+
+    import scanner as scanner_module
+    monkeypatch.setattr(scanner_module, "_get_installed_esphome_version", lambda: "2026.3.1")
+    monkeypatch.setattr(scanner_module, "ensure_esphome_installed", fake_ensure)
+    monkeypatch.setattr(scanner_module, "set_esphome_version", lambda v: None)
+
+    await main_module._install_esphome_initial({})  # type: ignore[arg-type]
+
+    assert installs == ["2026.3.1"]

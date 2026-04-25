@@ -671,19 +671,29 @@ async def get_targets(request: web.Request) -> web.Response:
     for target in targets:
         dev = devices_by_target.get(target)
         meta = get_device_metadata(cfg.config_dir, target)
-        # Detect config changes since last compile
-        config_modified = None
-        if dev and dev.compilation_time:
-            try:
-                from datetime import datetime  # noqa: PLC0415
-                # compilation_time format: "Mar 29 2026, 17:00:00"
-                compile_dt = datetime.strptime(dev.compilation_time, "%b %d %Y, %H:%M:%S")
-                config_path = Path(cfg.config_dir) / target
-                if config_path.exists():
-                    mtime_dt = datetime.fromtimestamp(config_path.stat().st_mtime)
-                    config_modified = mtime_dt > compile_dt
-            except Exception:
-                pass
+        # Detect "config changed locally" — the fallback shown when the
+        # precise drift signal (``config_drifted_since_flash``, scoped to
+        # the last successful flash) isn't available. Prefer `git status`
+        # when the config dir is a git repo: a user's mental model of
+        # "changed locally" is "`git status` shows it dirty", and mtime
+        # false-positives whenever something touches the file without
+        # editing it (editor autosave, `git checkout`, etc.). mtime is
+        # kept only as a last resort for non-repo config dirs.
+        if head_hash:
+            config_modified: bool | None = target in dirty_set
+        else:
+            config_modified = None
+            if dev and dev.compilation_time:
+                try:
+                    from datetime import datetime  # noqa: PLC0415
+                    # compilation_time format: "Mar 29 2026, 17:00:00"
+                    compile_dt = datetime.strptime(dev.compilation_time, "%b %d %Y, %H:%M:%S")
+                    config_path = Path(cfg.config_dir) / target
+                    if config_path.exists():
+                        mtime_dt = datetime.fromtimestamp(config_path.stat().st_mtime)
+                        config_modified = mtime_dt > compile_dt
+                except Exception:
+                    pass
         # Determine if this target has an API encryption key in its config
         has_api_key = False
         if device_poller and device_poller._encryption_keys:
@@ -789,7 +799,9 @@ async def get_targets(request: web.Request) -> web.Response:
             # flash; drift is True when that file has changed between
             # that hash and current HEAD. Null when either side is
             # unknown (no git repo, no past flash, or the target is
-            # uncommitted) — UI falls back to `config_modified`.
+            # uncommitted) — UI falls back to `config_modified`, which
+            # in a git repo reflects `git status` (dirty set) rather than
+            # file mtime.
             "last_flashed_config_hash": last_flashed_by_target.get(target),
             "config_drifted_since_flash": (
                 None if not head_hash or target not in last_flashed_by_target
@@ -1237,6 +1249,65 @@ async def ws_events(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+@routes.get("/ui/api/workers/{id}/logs")
+async def get_worker_logs_snapshot(request: web.Request) -> web.Response:
+    """WL.3 hydration: plain-text dump of whatever the broker has buffered.
+
+    Called once by the UI when the dialog opens. The WS path is what
+    delivers live lines after the initial snapshot.
+    """
+    client_id = request.match_info["id"]
+    broker = request.app.get("worker_log_broker")
+    body = broker.snapshot(client_id) if broker else ""
+    return web.Response(
+        body=body.encode("utf-8"),
+        content_type="text/plain",
+        charset="utf-8",
+    )
+
+
+@routes.get("/ui/api/workers/{id}/logs/ws")
+async def ws_worker_logs(request: web.Request) -> web.WebSocketResponse:
+    """WL.3 live tail: open WS == 'user is watching this worker'.
+
+    The first frame sent is the broker's current buffer snapshot
+    (hydration). Every subsequent frame is a live push fanned out by
+    the broker. Combining hydration and live tail into one ordered
+    stream removes the race where a separate GET snapshot and a
+    parallel WS subscribe both observed the same chunk — the UI
+    would then write those lines twice.
+
+    The subscriber count drives ``stream_logs`` in the control-poll /
+    heartbeat response. Closing this WS decrements the count, which
+    flips the worker's pusher off within ~1 s.
+    """
+    client_id = request.match_info["id"]
+    broker = request.app.get("worker_log_broker")
+
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+
+    if broker is None:
+        await ws.close()
+        return ws
+
+    # Atomic subscribe + snapshot — no await between reading the
+    # buffer and adding ws to subscribers, so no concurrent
+    # append_async can interleave.
+    snapshot = broker.subscribe_and_snapshot(client_id, ws)
+    try:
+        if snapshot:
+            await ws.send_str(snapshot)
+        async for msg in ws:
+            if msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
+                break
+            # Browser keep-alive pings are otherwise ignored.
+    finally:
+        broker.unsubscribe(client_id, ws)
+
+    return ws
+
+
 @routes.get("/ui/api/jobs/{id}/log/ws")
 async def ws_browser_log(request: web.Request) -> web.WebSocketResponse:
     """WebSocket endpoint for browser live log tailing."""
@@ -1409,7 +1480,17 @@ async def set_esphome_version_handler(request: web.Request) -> web.Response:
     """Set the active ESPHome version for new compile jobs.
 
     Body: { "version": "2026.3.1" }
+
+    Bug #105: also schedules `ensure_esphome_installed` so the version
+    picker is a recovery path for a stuck install. Previously this
+    handler updated the selected version without scheduling the install,
+    which meant a user on a fresh HAOS box with no bundled ESPHome and
+    no builder add-on had no way to unblock the "Installing ESPHome…"
+    banner from the UI.
     """
+    import asyncio as _asyncio  # noqa: PLC0415
+    import scanner as _scanner  # noqa: PLC0415
+
     try:
         body = await request.json()
     except Exception:
@@ -1420,7 +1501,12 @@ async def set_esphome_version_handler(request: web.Request) -> web.Response:
         return web.json_response({"error": "version is required"}, status=400)
 
     set_esphome_version(version)
-    logger.info("ESPHome version changed to %s via UI", version)
+    _scanner._esphome_install_failed = False
+    _scanner._esphome_ready.clear()
+
+    loop = _asyncio.get_running_loop()
+    loop.run_in_executor(None, _scanner.ensure_esphome_installed, version)
+    logger.info("ESPHome version changed to %s via UI; install scheduled", version)
     return web.json_response({"ok": True, "version": version})
 
 
@@ -2078,6 +2164,34 @@ _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _PENDING_PREFIX = ".pending."
 
 
+def _ensure_config_dir(config_dir: Path) -> bool:
+    """Lazy-create the config dir the first time a UI write needs it.
+
+    Complements #86 (scanner stays silent on missing dir — no poll
+    spam) — fixes #190 — a truly-empty install where the HA ESPHome
+    builder add-on was never installed and the user clicks
+    **Add Device**, the staged-file write would 500 with ``[Errno 2]
+    No such file or directory`` because the parent dir doesn't exist.
+
+    Creating is idempotent + logged once so operators see "first ever
+    write landed" in the boot log, and a pre-existing dir is a no-op.
+    Returns ``True`` if we actually created the dir so the caller can
+    re-run ``init_repo`` (versioning=on + fresh dir → fresh repo).
+    """
+    if config_dir.exists():
+        return False
+    config_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Created %s on first UI write (#190)", config_dir)
+    try:
+        from settings import get_settings  # noqa: PLC0415
+        if get_settings().versioning_enabled == "on":
+            from git_versioning import init_repo  # noqa: PLC0415
+            init_repo(config_dir)
+    except Exception:
+        logger.exception("Post-mkdir init_repo raised unexpectedly (#190)")
+    return True
+
+
 @routes.post("/ui/api/targets")
 async def create_target(request: web.Request) -> web.Response:
     """Create a new device YAML file (CD.3).
@@ -2121,6 +2235,12 @@ async def create_target(request: web.Request) -> web.Response:
         return json_error("filename too long (max 64 characters)")
 
     new_filename = f"{name}.yaml"
+    # #190: first-install path — the user may be creating the very
+    # first device on a box that has no ``/config/esphome/`` yet
+    # (HAOS without the ESPHome builder add-on, standalone Docker
+    # without a pre-mounted config dir). Create the dir now and
+    # fire init_repo if versioning is on.
+    _ensure_config_dir(config_dir)
     # Check for collision with the FINAL name (not the staging name)
     final_dest = safe_resolve(config_dir, new_filename)
     if final_dest is None:
@@ -2514,14 +2634,26 @@ async def restart_device(request: web.Request) -> web.Response:
 
     token = os.environ.get("SUPERVISOR_TOKEN")
     if not token:
+        # SI (WORKITEMS-1.6.2): 503 Service Unavailable, not 500.
+        # Native-API restart failed (device offline or no button) AND
+        # the HA-service fallback is unreachable because we're running
+        # standalone — a "feature unavailable" situation, not a server
+        # error. 503 signals that distinction to the UI + any tooling
+        # that treats 5xx as "server broken." Body is unchanged so
+        # operators still see the specific reason in the JSON.
         return web.json_response(
             {
                 "error": "Could not restart device",
                 "native_api_error": native_error,
                 "ha_fallback_error": "no SUPERVISOR_TOKEN",
+                "hint": (
+                    "HA-service fallback requires Home Assistant. "
+                    "Running in standalone mode; restart via the device's "
+                    "physical button or Web UI."
+                ),
                 "candidates_tried": [],
             },
-            status=500,
+            status=503,
         )
 
     try:
@@ -2866,3 +2998,90 @@ async def cancel_jobs(request: web.Request) -> web.Response:
     cancelled = await queue.cancel(job_ids)
     logger.info("Cancelled %d of %d job(s)%s", cancelled, len(job_ids), _who(request))
     return web.json_response({"cancelled": cancelled})
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics (#109) — "Request diagnostics" in the UI.
+# ---------------------------------------------------------------------------
+
+
+@routes.post("/ui/api/diagnostics/server")
+async def request_server_diagnostics(request: web.Request) -> web.StreamResponse:
+    """Run ``py-spy dump --pid 1`` against the server's own process and
+    return the text as an ``attachment`` download. Synchronous because
+    the dump itself is fast (<1 s); running it in the request makes the
+    UI code trivial (no polling loop for the server side).
+
+    On failure (ptrace denied inside the add-on, py-spy missing, etc.)
+    still returns 200 with ``X-Diagnostics-Ok: 0`` so the UI can render
+    the returned text as a visible error without treating this as a
+    generic 5xx.
+    """
+    from diagnostics import run_self_thread_dump_async  # noqa: PLC0415
+
+    ok, text = await run_self_thread_dump_async()
+    filename = "server-diagnostics.txt"
+    logger.info("diagnostics: server self-dump ok=%s len=%d%s", ok, len(text), _who(request))
+    return web.Response(
+        text=text,
+        content_type="text/plain",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Diagnostics-Ok": "1" if ok else "0",
+        },
+    )
+
+
+@routes.post("/ui/api/workers/{id}/request-diagnostics")
+async def request_worker_diagnostics(request: web.Request) -> web.Response:
+    """Mint a diagnostics request for the named worker and return its
+    ``request_id``. The UI then polls
+    ``GET /ui/api/workers/{id}/diagnostics/{request_id}`` until the
+    worker has uploaded the dump.
+    """
+    client_id = request.match_info["id"]
+    registry = request.app["registry"]
+    worker = registry.get(client_id)
+    if worker is None:
+        return json_error("Worker not found", 404)
+    diag = request.app.get("diagnostics_broker")
+    if diag is None:
+        return json_error("Diagnostics broker unavailable", 500)
+    request_id = diag.request_for_worker(client_id)
+    logger.info(
+        "diagnostics: requested from worker %s (hostname=%s) request=%s%s",
+        client_id, worker.hostname, request_id, _who(request),
+    )
+    return web.json_response({"request_id": request_id})
+
+
+@routes.get("/ui/api/workers/{id}/diagnostics/{request_id}")
+async def get_worker_diagnostics(request: web.Request) -> web.StreamResponse:
+    """Poll endpoint — 202 while the worker hasn't uploaded yet, 200
+    with the dump text as an attachment download when it has.
+
+    Mirrors ``/ui/api/diagnostics/server``'s ``X-Diagnostics-Ok`` header
+    so the UI can distinguish a real dump from a worker-side error
+    (e.g. the worker's own ``py-spy`` attach was denied) without
+    parsing text.
+    """
+    client_id = request.match_info["id"]
+    request_id = request.match_info["request_id"]
+    diag = request.app.get("diagnostics_broker")
+    if diag is None:
+        return json_error("Diagnostics broker unavailable", 500)
+    result = diag.get_result(request_id)
+    if result is None:
+        return web.json_response({"pending": True}, status=202)
+    registry = request.app["registry"]
+    worker = registry.get(client_id)
+    host_tag = (worker.hostname if worker else client_id).replace("/", "_")
+    filename = f"worker-diagnostics-{host_tag}.txt"
+    return web.Response(
+        text=result.dump,
+        content_type="text/plain",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Diagnostics-Ok": "1" if result.ok else "0",
+        },
+    )

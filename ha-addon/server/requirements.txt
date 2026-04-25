@@ -13,3 +13,10 @@ pyyaml>=6.0
 # invisible until re-bump) in one go. The image is ~200 MB smaller.
 requests>=2.31
 icmplib>=3.0
+# #108 briefly added py-spy here for external `docker exec` thread
+# dumps. #189 replaced the py-spy path with an in-process frame walk
+# (``diagnostics.in_process_thread_dump``) that works inside every
+# HA install variant without privileged capabilities, so py-spy was
+# removed to save ~5 MB/image. ``scripts/threaddump-addon.sh`` still
+# ``pip install py-spy`` inside its own throwaway sidecar for the
+# deadlocked-interpreter edge case, so that path is unaffected.

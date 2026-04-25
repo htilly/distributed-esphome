@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.6.2
+
+A hardening release on top of 1.6.1.
+
+**Corrections to 1.6.1.** A handful of things 1.6.1 claimed or shipped weren't quite right; 1.6.2 is where they get honest.
+
+- **AppArmor confinement is real now.** 1.6.1 added an AppArmor profile and lit up the Supervisor security-star badge, but the profile was permissive enough that it didn't meaningfully confine the running container. 1.6.2's profile keeps the badge and adds a handful of explicit `deny` rules that actually close concrete paths (`/etc/shadow*`, `/run/secrets/**`, `/proc/<pid>/mem`, kernel sysctl writes, cross-container ptrace).
+- **Integration quality-scale claim corrected.** 1.6.1's `manifest.json` declared `silver`, but the audit file (`quality_scale.yaml`) hadn't been reconciled against the Silver rules. 1.6.2 honestly retreats to `bronze` — which is hassfest-validated and accurately reflects what's in the repo today. The `gold` tier-flip moves to 1.6.3 where every rule gets walked to `done`/`exempt` with a reason.
+- **Install paths that were documented to work but didn't.** Fresh HAOS installs could get stuck on "Installing ESPHome…" forever, standalone Docker installs required an HA Bearer token the user had no way to obtain, and OTA failed outright on any device with a non-`.local` mDNS domain. Each of those is fixed in this release — see Bug fixes below for the specifics.
+- **Remote workers stop shipping the whole config directory.** 1.6.1's worker bundle tar+gzipped every file under `/config/esphome/`, including `.git/` (with push credentials baked into remote URLs), every unrelated device's YAML, and in-place PlatformIO caches. The bundle now contains only what the target being compiled actually needs. Upgrading in place is enough — no action required.
+
+**Bug fixes.**
+
+- Add-on install no longer fails with `Image docker.io/library/docker:<version>-cli does not exist` when Docker Hub is rate-limiting or briefly unreachable. The add-on now ships as a prebuilt multi-architecture image on GitHub Container Registry, so fresh installs pull in seconds instead of building locally through the Docker-in-Docker builder image that was the source of the failure.
+- Fresh installs without the Home Assistant ESPHome builder add-on no longer get stuck on "Installing ESPHome…" forever. The first boot now auto-bootstraps the latest stable ESPHome from PyPI when no other version is pinned; if the ESPHome builder add-on is installed later, its version takes over on the next refresh. The Version picker in the header is also a working recovery path now — picking a version there actually triggers the install instead of just recording the selection.
+- Direct-port access to the web UI works out of the box on standalone Docker Compose installs. 1.6.1 required a Home Assistant Bearer token on direct port 8765 regardless of install path, which left standalone users at a bare-JSON 401 with no way forward. Fresh standalone installs now default "Require Home Assistant auth on direct port" to off; turn it on in Settings → Authentication if the port is reachable from an untrusted network. Home Assistant add-on installs (where the tunnel is always available) continue to default the flag to on, so direct port 8765 still returns 401 there. Home Assistant tunnel access is unaffected on either install path.
+- When direct-port auth is on and a browser lands on `:8765` without a token, you now see a styled Authentication required page that explains both recovery paths (provide a token, or disable the flag via the Home Assistant tunnel), instead of a raw JSON error body.
+- OTA targets honour `wifi.domain` / `ethernet.domain` / `openthread.domain` again. If your devices live on a non-`.local` mDNS domain, the worker now uses the correct `<name><domain>` address ESPHome itself would use — previously the compile succeeded but the OTA step hung at "Error resolving IP address" because the server was handing the worker `<name>.local` regardless of the `domain:` field.
+- Queue page: the **Clear** dropdown has a new **Clear Selected** option, so you can check a few rows and remove just those. The existing "Clear Succeeded", "Clear All Finished", and "Clear Entire Queue" entries are unchanged.
+- Startup logs no longer flood with a `WARNING` line every scan cycle when `/config/esphome/` doesn't exist. A single informational line now explains what the state means (install the Home Assistant ESPHome builder add-on, or create the directory yourself).
+- **Add Device** now works on a truly-empty first install, even when `/config/esphome/` doesn't exist yet (i.e. you installed Fleet without ever installing the Home Assistant ESPHome builder add-on). The directory is created the moment you create your first device instead of failing with a `No such file or directory` error.
+- The **Connect Worker** modal's **Bash** and **PowerShell** snippets now include `--network host`, matching the **Docker Compose** snippet that already had `network_mode: host`. Without it, a worker started from the copy-pasted command landed on Docker's default bridge network and could not reach ESP devices on the host's LAN, so every OTA failed.
+- The Devices tab's "config changed" badge no longer lights up on devices you haven't edited. It now tracks the same `git status` the rest of the UI uses, so a device whose YAML is unchanged locally stays unflagged even if the file's timestamp got nudged (an editor autosave, a `git checkout`, or a failed OTA that left the firmware's own "compiled at" time behind). The Upgrade button's "config has changed" highlight also keys off this same signal now, so the two can't disagree.
+- Fixes a hang where the add-on pegged at 100 % CPU and the UI stopped responding on fleets with large `/config/esphome/` trees (many top-level YAMLs plus a `common/` package tree and/or external-components directory). Root cause was the per-job config bundling synchronously tar+gzipping the whole directory on the event loop for every claimed job — now bundles are built off-thread and scoped to just the files the target being compiled references (see **Remote workers stop shipping the whole config directory** above).
+- Reconfigure and Reauth flows no longer crash with `TypeError: object dict can't be used in 'await' expression` on Home Assistant 2024.11 and newer — the handler was incorrectly awaiting a synchronous helper. Was a shipped regression in 1.6.1; every Reconfigure click logged the traceback.
+
+**Smaller changes.**
+
+- New **Request diagnostics** action. Click it in the Workers tab's per-worker Actions menu (online workers only) to pull a live Python thread dump from any remote worker, or in Settings → Advanced → Diagnostics to capture one from the add-on's own server process. The dump downloads as a timestamped `.txt` file you can attach to a bug report. Useful when a compile hangs or a worker pegs at 100 % CPU — the dump shows exactly which line each thread is sitting on. Works on every install variant out of the box — Home Assistant add-on, HAOS, Supervised, and standalone Docker — with no special container capabilities or shell access required on your part.
+
+**Under the hood.**
+
+- Integration config-flow hardening: the Reconfigure and Reauth flows have gained end-to-end tests against a real Home Assistant fixture. The same test pass is what caught the Reconfigure `TypeError` in 1.6.1 covered under Bug fixes above.
+
 ## 1.6.1
 
 A bug-fix + polish release on top of 1.6.

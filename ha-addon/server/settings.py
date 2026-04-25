@@ -135,8 +135,16 @@ class AppSettings:
     # Seconds between ESPHome-device API polls (online / running version).
     device_poll_interval: int = 60
     # When true, direct-port access on :8765 (outside Ingress) requires
-    # a valid HA Bearer or the add-on's own server token.
-    require_ha_auth: bool = True
+    # a valid HA Bearer or the add-on's own server token. The dataclass
+    # default is ``False`` so standalone Docker installs (no Supervisor →
+    # no way to validate an HA Bearer) stay reachable out of the box
+    # (bug #83). On HAOS fresh installs (SUPERVISOR_TOKEN present),
+    # ``_seed_from_options`` upgrades the runtime default to ``True`` so
+    # direct port 8765 actually 401s (bug #87). Ingress access never
+    # consults this flag — path 1 (Supervisor peer trust) in
+    # ``ha_auth.py`` short-circuits first. Existing installs that
+    # explicitly set a value in ``/data/settings.json`` keep it.
+    require_ha_auth: bool = False
     # #82 / UX_REVIEW §3.10 — time-of-day presentation for Queue,
     # History, and log timestamps. ``'auto'`` defers to the browser's
     # resolved locale (``Intl.DateTimeFormat().resolvedOptions().hour12``);
@@ -655,6 +663,18 @@ def _seed_from_options() -> AppSettings:
                 imported.append(key)
             except SettingsValidationError as exc:
                 logger.warning("Could not import %s: %s", key, exc)
+
+    # Bug #87: on HAOS fresh installs (SUPERVISOR_TOKEN present, no
+    # explicit `require_ha_auth` in options), default to True so direct
+    # port 8765 access returns 401. Bug #83 flipped the dataclass
+    # default to False to unblock standalone Docker; this re-enables
+    # secure-by-default for Ingress-wrapped installs without reopening
+    # the standalone-Docker lockout. Ingress paths always short-circuit
+    # in `ha_auth.ha_auth_middleware` via the Supervisor peer-IP trust
+    # path (see ha_auth.py path 1) — this only affects the direct port.
+    if "require_ha_auth" not in imported and os.environ.get("SUPERVISOR_TOKEN"):
+        kwargs["require_ha_auth"] = True
+        imported.append("require_ha_auth=true (HAOS default, #87)")
 
     recovered = _recover_legacy_token()
     if recovered:

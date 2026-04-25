@@ -4,10 +4,10 @@
 
 | Version  | Supported          |
 |----------|--------------------|
-| 1.6.1.x  | ✅ Current release  |
-| 1.6.0    | ✅ Previous stable — security fixes only if trivially backportable |
-| 1.5.x    | ⚠️ Superseded — upgrade to 1.6.x |
-| < 1.5.0  | ❌ No patches       |
+| 1.6.2.x  | ✅ Current release  |
+| 1.6.1    | ✅ Previous stable — security fixes only if trivially backportable |
+| 1.6.0    | ⚠️ Superseded — upgrade to 1.6.x |
+| < 1.6.0  | ❌ No patches       |
 
 *(Note: the 1.5 release was developed as `1.4.1-dev.N` through dev.72 and renumbered late cycle as scope grew beyond a patch release. Docker tags with the `1.4.1-dev.N` stamp remain pullable from GHCR but are superseded by the 1.5.x stable tags.)*
 
@@ -94,13 +94,17 @@ These are accepted risks within the home-network threat model; see the full audi
 - **HTTP between workers and server** (not HTTPS). Users with remote workers across network segments should front the server with their own reverse proxy.
 - **Bearer token visible to the browser** (required for the Connect Worker modal's `docker run` command UX).
 - **Direct-port `/ui/api/*` Bearer required by default** (AU.7). If a user flips `require_ha_auth: false` deliberately — for an isolated test harness, say — they're opting out of this default and the old "relies only on HA Ingress" trust model applies.
-- **`secrets.yaml` delivered to every build worker** (required for ESPHome's `!secret` resolution; workers are trusted per the threat model).
+- **`secrets.yaml` delivered to every build worker — filtered since 1.6.2** (workers receive only the `!secret` keys the bundled target actually references, courtesy of ESPHome 2026.4's built-in bundle format; the full `secrets.yaml` is no longer shipped). Workers are trusted per the threat model; this narrows the blast radius when a worker is on a less-trusted host.
 - **Build workers can execute `external_components:` / `includes:` / `libraries:` Python** during compile — core ESPHome feature, accepted because workers are trusted.
 - **Worker-to-worker job-result authorization isn't checked** on `submit_result` / `update_status` — any authenticated worker can submit results for any job. Accepted because workers are trusted.
 
 ### Residual posture
 
-All 21 audit findings are now FIXED, WONTFIX-by-threat-model, or marked INFO. Cycle deltas for 1.6.1:
+All 21 audit findings are now FIXED, WONTFIX-by-threat-model, or marked INFO. Cycle deltas for 1.6.2:
+
+- **Job-bundle scope narrowed (BD).** Before 1.6.2, every job claim shipped the full `/config/esphome/` directory to the claiming worker — `.git/` (history + remote URLs + any wired-up push credentials), the complete `secrets.yaml` with every device's Wi-Fi and API keys, and any in-place PlatformIO build caches. A worker operator on a less-trusted host effectively held read access to the entire fleet's secrets and git history. 1.6.2 switches to ESPHome's built-in bundle format (`esphome.bundle.ConfigBundleCreator`, ESPHome 2026.4+), which ships only the files the target's validated config references, with `secrets.yaml` filtered down to the keys the target actually uses. `.git/` and cross-device secrets no longer leave the server by construction.
+
+Cycle deltas for 1.6.1:
 
 - **F-13 (Docker base image digest pinning)** moved OPEN → **FIXED (partial)** via SS.4. Worker Dockerfile pins `python:3.11-slim@sha256:…`; server Dockerfile pins the `ARG BUILD_FROM` default digest. Supervisor's production build path still can't carry a digest (upstream `build_from` regex rejects `@sha256:…`); partial until that's relaxed.
 - **F-18 (worker pip install hash-pinning)** was marked FIXED (partial) in 1.5.0 via SC.3, then re-assessed and marked **WONTFIX** in 1.6.1: the single-version constraints file we committed rarely matched the version actually requested at job time (users routinely pin older ESPHome versions or track newer releases than we'd had time to generate constraints for), so the hardened `--require-hashes` path's hit rate in practice was ~0% and the fallback-to-unpinned-install behavior was the load-bearing case. See §F-18 in the audit for the full re-assessment.
