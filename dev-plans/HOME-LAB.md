@@ -28,7 +28,27 @@ If the key isn't already loaded in the agent:
 ssh-add ~/.ssh/id_ed25519
 ```
 
-After that, any `ssh <alias>` / `scp` / `rsync` against the hosts above works passwordless. The end-of-turn log tail (`ssh root@hass-4.local "ha addons logs local_esphome_dist_server"`) and `./push-to-hass-4.sh` both depend on this.
+`~/.ssh/id_ed25519` is unencrypted on disk (developer-laptop convenience), so `ssh-add` runs non-interactively — Claude can re-arm the agent itself without waiting on the user when SSH starts failing mid-session (the macOS launchd agent occasionally drops identities; symptoms are `agent refused operation` or `Too many authentication failures` in deploy logs).
+
+The 1Password / macOS-keychain SSH agent ALSO advertises a few unrelated identities ("SSH Key (abstract GitHub)", "Github (stefanzierpersonal)", "Personal SSH Key 2022") via the same `SSH_AUTH_SOCK`. They get offered before `id_ed25519` and burn the per-connection auth-attempt budget, so a clean `ssh <alias>` can hit `Permission denied; Too many authentication failures` even though `id_ed25519` itself is fine. When that happens, force the right key explicitly:
+
+```bash
+ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes <alias> ...
+```
+
+`id_ed25519`'s public key (`SHA256:szoIC2jm7xpjuJAXFuzd0NwFwEfwuhQGd1x236sOrr0 stefan@m3pro-6.local`) is the one authorized in `~root/.ssh/authorized_keys` on every host above. After that, any `ssh <alias>` / `scp` / `rsync` against the hosts above works passwordless. The end-of-turn log tail (`ssh root@hass-4.local "ha addons logs local_esphome_dist_server"`) and `./push-to-hass-4.sh` both depend on this.
+
+## Lab add-on bearer token
+
+The ESPHome Fleet add-on on `hass-4` is pinned to the server token:
+
+```
+2416d179b5d41bca62091f681065bca9
+```
+
+This is the value in `/data/settings.json → server_token` inside the add-on container (host path `/usr/share/hassio/addons/data/local_esphome_dist_server/settings.json`). Hard-code the same token in every lab build worker's `SERVER_TOKEN` env var so a clean reinstall of the add-on (which would otherwise auto-generate a fresh token and invalidate every worker) doesn't force a fleet-wide re-registration.
+
+**When you do a clean install of the add-on on hass-4**, re-pin this value after the install: stop the add-on, edit the host-side `settings.json` (`server_token` key), start the add-on. `push-to-hass-4.sh` reads it from `~/.config/distributed-esphome/hass4-token` for downstream smoke probes — keep that file in sync with the pinned value. Lab-only; not a production secret — workers on a private `192.168.224.0/22` LAN are the only consumers.
 
 ## Typical use
 
