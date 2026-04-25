@@ -996,12 +996,16 @@ _HTML_PAGE = """<!DOCTYPE html>
     return m + 'm ' + String(r).padStart(2, '0') + 's';
   };
 
-  // Output pane tab filtering. Lines in the buffer are prefixed by
-  // `[<prefix>...]` — the matrix pads prefixes to 14 chars. We match by
-  // the prefix substring so any dup padding/unpadding still works.
+  // Output pane tab filtering. Lines in the buffer are formatted
+  // `HH:MM:SS [<prefix>...] content` by run_streaming / tprint — the
+  // matrix pads prefixes to 14 chars. We match by prefix substring so
+  // dup padding/unpadding still works.
   let currentTab = 'all';
   let lastTargets = [];
   const MATRIX_PREFIXES = { build: ['build', 'ghcr'] };
+  // Strip "[prefix...] " (between timestamp and content) when rendering
+  // a tab other than All — redundant once you've selected the target.
+  const PREFIX_STRIP_RE = /^(\d{1,2}:\d{2}:\d{2})\s+\[[^\]]+\]\s?/;
 
   function renderTabs(targets) {
     const names = targets.map(t => t.name);
@@ -1029,8 +1033,8 @@ _HTML_PAGE = """<!DOCTYPE html>
 
   function lineMatchesTab(line, tab) {
     if (tab === 'all') return true;
-    // Anchor on the "[prefix" chunk at the start of the line.
-    const m = line.match(/^\[([^\s\]]+)/);
+    // Skip the leading HH:MM:SS timestamp and anchor on "[prefix".
+    const m = line.match(/^\d{1,2}:\d{2}:\d{2}\s+\[([^\s\]]+)/);
     if (!m) return false;
     const prefix = m[1];
     if (tab === 'build') return MATRIX_PREFIXES.build.includes(prefix);
@@ -1039,10 +1043,13 @@ _HTML_PAGE = """<!DOCTYPE html>
 
   function renderOutput(lines) {
     window.__lastLines = lines;
-    const filtered = lines.filter(l => lineMatchesTab(l, currentTab));
+    let display = lines.filter(l => lineMatchesTab(l, currentTab));
+    if (currentTab !== 'all') {
+      display = display.map(l => l.replace(PREFIX_STRIP_RE, '$1 '));
+    }
     const out = document.getElementById('output');
     const pinned = out.scrollHeight - out.scrollTop - out.clientHeight < 60;
-    out.textContent = filtered.join('\\n');
+    out.textContent = display.join('\\n');
     if (pinned) out.scrollTop = out.scrollHeight;
   }
   const phaseLabel = (p) => p || 'pending';
