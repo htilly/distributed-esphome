@@ -28,6 +28,14 @@ class JobState(str, Enum):
     FAILED = "failed"
     TIMED_OUT = "timed_out"
     CANCELLED = "cancelled"
+    # TG.3: a job that no online worker is eligible to claim under the
+    # current routing-rule set. Distinct from PENDING so the UI can surface
+    # the "stuck because of a rule" state with a different badge + tooltip
+    # (the QueueTab `BLOCKED` badge added in TG.9). Transitions:
+    #   PENDING → BLOCKED   when re-eval finds zero eligible workers
+    #   BLOCKED → PENDING   when re-eval finds at least one eligible worker
+    #   BLOCKED → CANCELLED user-initiated (same affordance as PENDING)
+    BLOCKED = "blocked"
 
 
 def _utcnow() -> datetime:
@@ -117,6 +125,12 @@ class Job:
     # the scheduler log. ``None`` on jobs from pre-1.6.1 that predated
     # the field.
     selection_reason: Optional[str] = None
+    # TG.3: when state == BLOCKED, the rule + summary that disqualified
+    # every online worker. Cleared when the job leaves BLOCKED. Shape:
+    # ``{"rule_id": str, "rule_name": str, "summary": str}``. The QueueTab
+    # tooltip (TG.9) reads ``rule_name`` + ``summary``; ``rule_id`` is
+    # used to deep-link the rules-editor open at the offending rule.
+    blocked_reason: Optional[dict] = None
     status_text: Optional[str] = None  # transient; not persisted
     _streaming_log: str = field(default="", repr=False)  # transient; not persisted
 
@@ -150,6 +164,7 @@ class Job:
             "api_triggered": self.api_triggered,
             "config_hash": self.config_hash,
             "selection_reason": self.selection_reason,
+            "blocked_reason": self.blocked_reason,
             "status_text": self.status_text,
             "duration_seconds": self.duration_seconds(),
         }
@@ -189,6 +204,7 @@ class Job:
             api_triggered=d.get("api_triggered", False),
             config_hash=d.get("config_hash"),
             selection_reason=d.get("selection_reason"),
+            blocked_reason=d.get("blocked_reason"),
         )
 
     def duration_seconds(self) -> Optional[float]:
@@ -552,6 +568,10 @@ class JobQueue:
                 j.target for j in self._jobs.values() if j.state == JobState.WORKING
             }
             for job in self._jobs.values():
+                # TG.3: PENDING is the only claimable state. BLOCKED jobs
+                # are explicitly excluded — the routing-rule re-eval will
+                # transition them back to PENDING when an eligible worker
+                # comes online.
                 if job.state != JobState.PENDING:
                     continue
                 # Pinned jobs can only be claimed by the designated worker
@@ -674,6 +694,63 @@ class JobQueue:
                 job_id, job.target, job.assigned_hostname or "?", status,
             )
             return True
+
+    async def re_evaluate_routing(
+        self,
+        check_eligibility: "Callable[[Job], tuple[bool, Optional[dict]]]",
+    ) -> int:
+        """TG.3: sweep PENDING + BLOCKED jobs and adjust state based on the
+        caller-supplied eligibility check.
+
+        ``check_eligibility(job)`` returns ``(eligible, blocked_reason)``:
+          - ``(True, None)``     → at least one online worker is eligible;
+                                    job moves BLOCKED → PENDING (or stays
+                                    PENDING).
+          - ``(False, reason)``  → no online worker matches the routing
+                                    rules for this device; job moves
+                                    PENDING → BLOCKED with the supplied
+                                    ``reason`` dict on Job.blocked_reason
+                                    (or stays BLOCKED, ``reason`` updated
+                                    so a renamed rule surfaces correctly).
+
+        Returns the number of jobs whose state changed. Idempotent — a
+        defensive watchdog can call this every 30s without churn.
+        """
+        async with self._lock:
+            changed = 0
+            for job in self._jobs.values():
+                if job.state not in (JobState.PENDING, JobState.BLOCKED):
+                    continue
+                eligible, reason = check_eligibility(job)
+                if eligible:
+                    if job.state == JobState.BLOCKED:
+                        logger.info(
+                            "Job %s (%s): BLOCKED → PENDING (eligible worker available)",
+                            job.id, job.target,
+                        )
+                        job.state = JobState.PENDING
+                        job.blocked_reason = None
+                        changed += 1
+                    elif job.blocked_reason is not None:
+                        # Stale reason on a PENDING job — clear it.
+                        job.blocked_reason = None
+                else:
+                    if job.state == JobState.PENDING:
+                        logger.info(
+                            "Job %s (%s): PENDING → BLOCKED (rule=%s)",
+                            job.id, job.target,
+                            (reason or {}).get("rule_id", "?"),
+                        )
+                        job.state = JobState.BLOCKED
+                        job.blocked_reason = reason
+                        changed += 1
+                    elif job.blocked_reason != reason:
+                        # Same state, but rule that fires changed (e.g.
+                        # rule renamed). Update the reason silently.
+                        job.blocked_reason = reason
+            if changed:
+                self._persist()
+            return changed
 
     async def cancel(self, job_ids: list[str]) -> int:
         """Cancel jobs by id; transitions any non-terminal job to CANCELLED.
