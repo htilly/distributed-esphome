@@ -74,11 +74,18 @@ async function getJob(request: APIRequestContext, id: string): Promise<QueueJob 
   return (await getQueue(request)).find(j => j.id === id) ?? null;
 }
 
-async function readMeta(request: APIRequestContext, filename: string): Promise<Record<string, unknown>> {
+async function readTargetTags(request: APIRequestContext, filename: string): Promise<string[]> {
+  // ``/ui/api/targets/{filename}/meta`` is POST-only on the server (it
+  // writes the YAML metadata comment block). To read the current tag
+  // string we hit the targets list endpoint and pluck the matching
+  // entry's ``tags`` field — same field the UI reads from SWR.
   return retryTransient(async () => {
-    const resp = await request.get(`/ui/api/targets/${encodeURIComponent(filename)}/meta`);
-    if (!resp.ok()) throw new Error(`meta GET returned ${resp.status()}`);
-    return resp.json();
+    const resp = await request.get('/ui/api/targets');
+    if (!resp.ok()) throw new Error(`targets GET returned ${resp.status()}`);
+    const targets = (await resp.json()) as Array<{ target?: string; tags?: string | null }>;
+    const t = targets.find(x => x.target === filename);
+    if (!t) throw new Error(`target ${filename} not present in /ui/api/targets`);
+    return (t.tags ?? '').split(',').map(s => s.trim()).filter(Boolean);
   });
 }
 
@@ -116,9 +123,7 @@ test.describe('TG.10 routing-rule end-to-end', { tag: ['@requires-ha'] }, () => 
     // in /data/routing-rules.json across subsequent specs.
     await deleteRule(request, RULE_ID);
     try {
-      const meta = await readMeta(request, TARGET_FILENAME);
-      const tagsRaw = typeof meta.tags === 'string' ? meta.tags : '';
-      const tags = tagsRaw.split(',').map((s: string) => s.trim()).filter(Boolean);
+      const tags = await readTargetTags(request, TARGET_FILENAME);
       if (tags.includes(TEST_TAG)) {
         const next = tags.filter(t => t !== TEST_TAG);
         await writeMeta(request, TARGET_FILENAME, { tags: next.length ? next.join(',') : null });
@@ -134,9 +139,7 @@ test.describe('TG.10 routing-rule end-to-end', { tag: ['@requires-ha'] }, () => 
     test.setTimeout(COMPILE_BUDGET_MS + 90_000);
 
     // 1. Tag the device.
-    const initialMeta = await readMeta(request, TARGET_FILENAME);
-    const initialTagsRaw = typeof initialMeta.tags === 'string' ? initialMeta.tags : '';
-    const initialTags = initialTagsRaw.split(',').map((s: string) => s.trim()).filter(Boolean);
+    const initialTags = await readTargetTags(request, TARGET_FILENAME);
     if (!initialTags.includes(TEST_TAG)) {
       const next = [...initialTags, TEST_TAG].join(',');
       await writeMeta(request, TARGET_FILENAME, { tags: next });
