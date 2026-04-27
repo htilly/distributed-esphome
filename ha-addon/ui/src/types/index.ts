@@ -349,7 +349,8 @@ export interface Job {
   config_hash?: string | null;
   /** Bug #8 (1.6.1): why this worker got the job. One of
    *  "pinned_to_worker" / "only_online_worker" /
-   *  "fewer_jobs_than_others" / "higher_perf_score" / "first_available".
+   *  "only_eligible_worker" / "fewer_jobs_than_others" /
+   *  "higher_perf_score" / "first_available".
    *  Null on jobs that predate the field. */
   selection_reason?: string | null;
   duration_seconds?: number | null;

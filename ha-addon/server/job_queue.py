@@ -119,6 +119,7 @@ class Job:
     # Bug #8 (1.6.1): human-readable reason this worker was chosen for
     # the job, captured the moment :meth:`claim_next` hands the job off.
     # One of "pinned_to_worker" / "only_online_worker" /
+    # "only_eligible_worker" (#99 — rule narrowed the field to one) /
     # "fewer_jobs_than_others" / "higher_perf_score" / "first_available".
     # Surfaced in the Queue + Compile-history tables so an operator can
     # answer "why did this worker pick up this compile" without diffing

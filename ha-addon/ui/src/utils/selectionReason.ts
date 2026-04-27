@@ -30,6 +30,15 @@ export function formatSelectionReason(reason: string | null | undefined): Select
         label: 'Only worker online',
         title: 'This was the only online, eligible worker when the job was claimed.',
       };
+    case 'only_eligible_worker':
+      // Bug #99: distinct from 'only_online_worker'. Other workers
+      // were online but the routing rules disqualified all of them
+      // for this job — this worker was the only one whose tags
+      // satisfied the required clause.
+      return {
+        label: 'Only eligible by tag',
+        title: 'Other workers were online but the routing rules disqualified them for this device — this worker’s tags were the only ones that satisfied the rule.',
+      };
     case 'fewer_jobs_than_others':
       return {
         label: 'Least busy worker',

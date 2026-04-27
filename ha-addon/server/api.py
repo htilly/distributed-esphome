@@ -371,6 +371,12 @@ async def get_next_job(request: web.Request) -> web.Response:
     # Count other candidate workers so we can pick the most informative
     # reason when we don't defer.
     other_candidate_count = 0
+    # Bug #99: separately count *eligible* other candidates — workers
+    # that are eligible for at least one of the same PENDING jobs we
+    # are. When this is zero but other_candidate_count > 0, the
+    # routing rules narrowed the field to just us and the reason
+    # should reflect that, not "first_available" / "first to poll".
+    eligible_other_candidate_count = 0
     defer_beats_me_on_jobs = False
     defer_beats_me_on_perf = False
     if worker:
@@ -401,10 +407,13 @@ async def get_next_job(request: web.Request) -> web.Response:
             other_free = other_active < other.max_parallel_jobs
             if not other_free:
                 continue  # fully busy, ignore
-            # Bug #95-followup: skip "other" as a deferral candidate
-            # when they aren't eligible for any of the jobs *we* could
-            # take. A faster-but-ineligible worker deferring loop
-            # leaves the job stranded.
+            # Bug #98: skip "other" as a deferral candidate when they
+            # aren't eligible for any of the jobs *we* could take. A
+            # faster-but-ineligible worker deferring loop leaves the
+            # job stranded.
+            # Bug #99: also use this filter to count "real" eligible
+            # alternatives — drives the new ``only_eligible_worker``
+            # reason when the rule has narrowed the field to just us.
             if my_eligible_pending:
                 other_check = build_claim_eligibility(request.app, list(other.tags or []))
                 if not any(
@@ -413,6 +422,9 @@ async def get_next_job(request: web.Request) -> web.Response:
                     for j in my_eligible_pending
                 ):
                     continue
+                eligible_other_candidate_count += 1
+            else:
+                eligible_other_candidate_count += 1
             # Rule 1: another worker has fewer jobs — let them catch up
             if other_active < my_active:
                 should_defer = True
@@ -433,6 +445,11 @@ async def get_next_job(request: web.Request) -> web.Response:
     # job (returns None if nothing matches).
     if other_candidate_count == 0:
         selection_reason_hint = "only_online_worker"
+    elif eligible_other_candidate_count == 0 and my_eligible_pending:
+        # Bug #99: other workers are online, but the routing rules
+        # disqualified all of them for the jobs in our queue. The
+        # reason isn't "first to poll" — it's "rule narrowed to me".
+        selection_reason_hint = "only_eligible_worker"
     elif defer_beats_me_on_jobs:
         selection_reason_hint = "fewer_jobs_than_others"
     elif defer_beats_me_on_perf:
