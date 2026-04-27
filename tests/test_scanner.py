@@ -411,6 +411,35 @@ def test_metadata_extracts_area_and_comment():
     assert meta["comment"] == "Over the sink"
 
 
+def test_metadata_extracts_area_from_dict_form():
+    """Bug #18: ESPHome's newer schema accepts ``area: {name: ..., id: ...}``.
+    The extractor must surface the human-readable name rather than the
+    repr of the dict (which renders as a JSON-looking blob in the UI).
+    """
+    config = {
+        "esphome": {
+            "name": "dev",
+            "area": {"name": "Living Room", "id": "lr1"},
+        },
+    }
+    meta = _empty_meta()
+    _extract_metadata(config, meta)
+    assert meta["area"] == "Living Room"
+
+
+def test_metadata_extracts_area_from_dict_form_id_fallback():
+    """Bug #18: dict area with no name still resolves via the id."""
+    config = {
+        "esphome": {
+            "name": "dev",
+            "area": {"id": "lr1"},
+        },
+    }
+    meta = _empty_meta()
+    _extract_metadata(config, meta)
+    assert meta["area"] == "lr1"
+
+
 def test_metadata_extracts_project():
     config = {
         "esphome": {

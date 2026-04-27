@@ -52,11 +52,23 @@ interface OptionalColumnDef {
   defaultVisible: boolean;
 }
 
-// #69: entries are ordered to match the actual column render order in
-// ``useDeviceColumns.tsx``. The picker renders checkboxes in this
-// order, so keeping them aligned means toggling a column on/off
-// matches the user's left-to-right reading of the table itself.
+// Bug #19: order MUST match the actual column render order in
+// ``useDeviceColumns.tsx`` exactly — the picker renders checkboxes in
+// this order, and a mismatch means toggling a column visually drifts
+// from the user's left-to-right reading of the table. Enforced by
+// ``OPTIONAL_COLUMNS_ORDER_MATCHES_TABLE`` invariant test in
+// ``e2e/column-picker-order.spec.ts``.
+//
+// Current table order (from useDeviceColumns):
+//   select, device, tags, status, ha, ip, mac, net, ipconfig, ap,
+//   schedule, last_compiled, running, area, comment, project, actions
+// Picker covers the optional / hideable subset (everything except
+// select, device, actions which are always-visible).
 const OPTIONAL_COLUMNS: OptionalColumnDef[] = [
+  // TG.5: read-only chip-pill tag column. Default ON so a user adding
+  // tags via YAML (or via TG.4's API) sees them without hunting through
+  // the column-visibility menu first.
+  { id: 'tags', label: 'Tags', defaultVisible: true },
   { id: 'status', label: 'Status', defaultVisible: true },
   { id: 'ha', label: 'HA', defaultVisible: true },
   { id: 'ip', label: 'IP', defaultVisible: true },
@@ -74,10 +86,6 @@ const OPTIONAL_COLUMNS: OptionalColumnDef[] = [
   { id: 'running', label: 'ESPHome', defaultVisible: true },
   { id: 'area', label: 'Area', defaultVisible: false },
   { id: 'comment', label: 'Comment', defaultVisible: false },
-  // TG.5: read-only chip-pill tag column. Default ON so a user adding
-  // tags via YAML (or via TG.4's API) sees them without hunting through
-  // the column-visibility menu first.
-  { id: 'tags', label: 'Tags', defaultVisible: true },
   { id: 'project', label: 'Project', defaultVisible: false },
 ];
 

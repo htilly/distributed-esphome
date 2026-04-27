@@ -1101,7 +1101,15 @@ def _extract_metadata(config: dict, result: dict) -> None:
         comment = esphome_block.get("comment")
         if comment:
             result["comment"] = str(comment)
+        # Bug #18: ESPHome accepts ``area: "Living Room"`` (string) and the
+        # newer ``area: {name: "Living Room", id: "...", ...}`` (dict). The
+        # naive ``str(area)`` on a dict serialises Python's repr (``{'name':
+        # 'Living Room', ...}``) into the cell, which surfaces as a
+        # JSON-looking blob in the Devices tab. Normalise both shapes to the
+        # plain area name string.
         area = esphome_block.get("area")
+        if isinstance(area, dict):
+            area = area.get("name") or area.get("id")
         if area:
             result["area"] = str(area)
         project = esphome_block.get("project")
@@ -1249,7 +1257,11 @@ def _fill_missing_metadata(raw_config: dict, result: dict) -> None:
         if result["comment"] is None:
             result["comment"] = _resolve(esphome_block.get("comment") or "")
         if result["area"] is None:
-            result["area"] = _resolve(esphome_block.get("area") or "")
+            # Bug #18: handle both string and {name, id, ...} dict forms.
+            raw_area = esphome_block.get("area")
+            if isinstance(raw_area, dict):
+                raw_area = raw_area.get("name") or raw_area.get("id") or ""
+            result["area"] = _resolve(raw_area or "")
         if result["project_name"] is None:
             project = esphome_block.get("project")
             if isinstance(project, dict):

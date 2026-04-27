@@ -58,6 +58,7 @@ export function TagsEditDialog({ open, onOpenChange, subject, initial, suggestio
   const [input, setInput] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [focused, setFocused] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Bug #14: re-seed only on the open transition, not on every render.
@@ -127,52 +128,69 @@ export function TagsEditDialog({ open, onOpenChange, subject, initial, suggestio
 
         <div className="px-4 py-3 space-y-3">
           <p className="text-[12px] text-[var(--text-muted)]">
-            Type a tag and press Enter or comma to add. Click × to remove.
-            Click a suggestion below to add a tag already in use elsewhere
-            in the fleet.
+            Type a tag and press Enter or comma to add, or pick from the
+            autocomplete dropdown. Click × to remove.
           </p>
 
-          {/* Chip-input box: existing tags + trailing free-form input. */}
-          <div
-            className="flex flex-wrap items-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--surface2)] px-2 py-1.5 min-h-[40px] cursor-text"
-            onClick={() => inputRef.current?.focus()}
-          >
-            {tags.map(t => (
-              <TagChip key={t} tag={t} onRemove={() => removeTag(t)} />
-            ))}
-            <input
-              ref={inputRef}
-              autoFocus
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === 'Enter' || e.key === ',') {
-                  e.preventDefault();
-                  if (input.trim()) addTag(input);
-                  else if (!saving) void handleSave();
-                } else if (e.key === 'Backspace' && !input && tags.length > 0) {
-                  e.preventDefault();
-                  setTags(prev => prev.slice(0, -1));
-                }
-              }}
-              placeholder={tags.length === 0 ? 'Type a tag and press Enter…' : ''}
-              className="flex-1 min-w-[140px] bg-transparent outline-none text-[13px] text-[var(--text)] placeholder:text-[var(--text-muted)]"
-            />
-          </div>
-
-          {/* Suggestions: fleet-wide tags not yet attached, filtered by input prefix. */}
-          {filtered.length > 0 && (
-            <div>
-              <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--text-muted)]">
-                Suggestions
-              </div>
-              <div className="flex flex-wrap gap-1.5">
+          {/* Bug #20: chip-input + autocomplete dropdown anchored to it.
+              The dropdown only renders when the input is focused; matches
+              are filtered by the prefix the user has typed. Replaces the
+              dev.7 "Suggestions" section that appeared below as a
+              separate row of chips. */}
+          <div className="relative">
+            <div
+              className="flex flex-wrap items-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--surface2)] px-2 py-1.5 min-h-[40px] cursor-text"
+              onClick={() => inputRef.current?.focus()}
+            >
+              {tags.map(t => (
+                <TagChip key={t} tag={t} onRemove={() => removeTag(t)} />
+              ))}
+              <input
+                ref={inputRef}
+                autoFocus
+                value={input}
+                onFocus={() => setFocused(true)}
+                onBlur={() => setFocused(false)}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' || e.key === ',') {
+                    e.preventDefault();
+                    if (input.trim()) addTag(input);
+                    else if (!saving) void handleSave();
+                  } else if (e.key === 'Backspace' && !input && tags.length > 0) {
+                    e.preventDefault();
+                    setTags(prev => prev.slice(0, -1));
+                  } else if (e.key === 'Escape') {
+                    setFocused(false);
+                  }
+                }}
+                placeholder={tags.length === 0 ? 'Type a tag and press Enter…' : ''}
+                className="flex-1 min-w-[140px] bg-transparent outline-none text-[13px] text-[var(--text)] placeholder:text-[var(--text-muted)]"
+              />
+            </div>
+            {focused && input.trim().length > 0 && filtered.length > 0 && (
+              <div
+                className="absolute left-0 right-0 top-full mt-1 z-10 rounded-md border border-[var(--border)] bg-[var(--surface)] shadow-lg max-h-[220px] overflow-y-auto py-1"
+              >
                 {filtered.map(t => (
-                  <TagChip key={t} tag={t} onClick={() => addTag(t)} />
+                  <button
+                    key={t}
+                    type="button"
+                    // onMouseDown fires before the input's onBlur, so the
+                    // click registers even though blur is closing the
+                    // dropdown 120ms later.
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      addTag(t);
+                    }}
+                    className="flex w-full items-center gap-2 px-2 py-1 text-left text-[13px] text-[var(--text)] hover:bg-[var(--surface2)]"
+                  >
+                    <TagChip tag={t} />
+                  </button>
                 ))}
               </div>
-            </div>
-          )}
+            )}
+          </div>
 
           {error && (
             <div className="rounded-md border border-[var(--danger,#ef4444)] bg-[var(--danger,#ef4444)]/10 px-2.5 py-1.5 text-[12px] text-[var(--danger,#ef4444)]">

@@ -43,6 +43,10 @@ export const targets: Target[] = [
     has_api_key: true,
     has_web_server: false,
     area: 'Living Room',
+    // Bug #8: gives the bulk-tag-edit spec a "common" tag (kitchen
+    // appears on living-room AND bedroom-light) and a "partial" tag
+    // (cosy is only on living-room).
+    tags: 'kitchen,cosy',
   },
   {
     target: 'bedroom-light.yaml',
@@ -58,6 +62,7 @@ export const targets: Target[] = [
     // PT.12 — pinned to a specific version so the pin-unpin spec can verify
     // the 📌 icon appears in the version cell.
     pinned_version: '2026.2.0',
+    tags: 'kitchen,sleeping',
   },
   {
     target: 'garage-door.yaml',

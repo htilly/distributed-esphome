@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -7,8 +7,22 @@ import {
   DropdownMenuItem,
 } from '../ui/dropdown-menu';
 import { UpgradeModal } from '../UpgradeModal';
-import { setTargetSchedule } from '../../api/client';
+import { BulkTagsEditDialog } from '../BulkTagsEditDialog';
+import { setTargetSchedule, updateTargetMeta } from '../../api/client';
 import type { Target, Worker } from '../../types';
+
+function parseTags(s: string | null | undefined): string[] {
+  if (!s) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const part of s.split(',')) {
+    const t = part.trim();
+    if (!t || seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
+}
 
 /**
  * Bulk "Actions" dropdown for the Devices tab (QS.18).
@@ -37,7 +51,59 @@ interface Props {
 
 export function DeviceTableActions({ selectedTargets, workers, targets, onToast, onRefresh }: Props) {
   const [bulkScheduleOpen, setBulkScheduleOpen] = useState(false);
+  const [bulkTagsOpen, setBulkTagsOpen] = useState(false);
   const hasSelection = selectedTargets.length > 0;
+
+  // Bug #8: pre-compute the per-target tag lists, the intersection
+  // (tags shared by all selected — bulk-removable), the partial set
+  // (tags on some-but-not-all — read-only context), and the fleet-wide
+  // suggestion pool (all device + worker tags). Memoized on the inputs
+  // so the 1Hz SWR poll on the parent doesn't recompute on every render.
+  const tagsAggregate = useMemo(() => {
+    const selectedTags: string[][] = selectedTargets.map(name => {
+      const t = targets.find(x => x.target === name);
+      return parseTags(t?.tags);
+    });
+    let common: string[] = [];
+    if (selectedTags.length > 0) {
+      const first = new Set(selectedTags[0]);
+      for (const list of selectedTags.slice(1)) {
+        const seen = new Set(list);
+        for (const t of Array.from(first)) {
+          if (!seen.has(t)) first.delete(t);
+        }
+      }
+      common = Array.from(first).sort();
+    }
+    const union = new Set<string>();
+    for (const list of selectedTags) for (const t of list) union.add(t);
+    const partial = Array.from(union).filter(t => !common.includes(t)).sort();
+    const pool = new Set<string>();
+    for (const tg of targets) for (const t of parseTags(tg.tags)) pool.add(t);
+    for (const w of workers) if (w.tags) for (const t of w.tags) pool.add(t);
+    return { common, partial, suggestions: Array.from(pool).sort() };
+  }, [selectedTargets, targets, workers]);
+
+  async function applyBulkTagDiff(diff: { add: string[]; remove: string[] }) {
+    // Per-target: existing - removeMatching + addNew
+    await Promise.all(selectedTargets.map(async (name) => {
+      const t = targets.find(x => x.target === name);
+      const existing = parseTags(t?.tags);
+      const removeSet = new Set(diff.remove);
+      const next = [
+        ...existing.filter(x => !removeSet.has(x)),
+        ...diff.add.filter(x => !existing.includes(x)),
+      ];
+      // Bug #9: drop the tags key entirely when the resulting list is empty.
+      const value: string | null = next.length > 0 ? next.join(',') : null;
+      await updateTargetMeta(name, { tags: value });
+    }));
+    onToast(
+      `Updated tags on ${selectedTargets.length} device${selectedTargets.length === 1 ? '' : 's'}`,
+      'success',
+    );
+    onRefresh();
+  }
 
   function handleScheduleSelected() {
     if (!hasSelection) return;
@@ -86,9 +152,28 @@ export function DeviceTableActions({ selectedTargets, workers, targets, onToast,
             >
               Remove Schedule from Selected
             </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => setBulkTagsOpen(true)}
+              disabled={!hasSelection}
+              title={!hasSelection ? 'Check one or more devices in the table first' : undefined}
+            >
+              Edit Tags…
+            </DropdownMenuItem>
           </DropdownMenuGroup>
         </DropdownMenuContent>
       </DropdownMenu>
+
+      {bulkTagsOpen && (
+        <BulkTagsEditDialog
+          open={bulkTagsOpen}
+          onOpenChange={setBulkTagsOpen}
+          count={selectedTargets.length}
+          common={tagsAggregate.common}
+          partial={tagsAggregate.partial}
+          suggestions={tagsAggregate.suggestions}
+          onSave={applyBulkTagDiff}
+        />
+      )}
 
       {bulkScheduleOpen && (
         <UpgradeModal
