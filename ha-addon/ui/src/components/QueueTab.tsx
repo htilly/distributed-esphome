@@ -293,10 +293,10 @@ export function QueueTab({
       sortingFn: 'alphanumeric',
     }),
     // Bug #100: surface the per-job routing intent — i.e. which radio
-    // the user picked in the Upgrade modal's "Worker" section: any
-    // available worker, a specific worker, or a tag expression. The
-    // existing Worker column shows where the job *landed*; this column
-    // shows what the user *asked for*. Same operator labels and same
+    // the user picked in the Upgrade modal's "Worker" section (one of
+    // 'any available worker' / 'a specific worker' / 'a tag expression').
+    // The existing Worker column shows where the job *landed*; this
+    // column shows what the user *asked for*. Same operator labels and
     // tag-chip rendering as the modal so the two surfaces read alike.
     columnHelper.accessor(
       row => {
