@@ -36,6 +36,9 @@ interface Props {
   onDuplicate: (target: string) => void;
   onRequestRename: (target: string) => void;
   onRequestDelete: (target: string) => void;
+  /** Bug #3: archive the target without showing the Delete confirmation
+   *  modal — archived configs are restorable from Settings. */
+  onArchive: (target: string) => void;
   onPin: (target: string) => void;
   onUnpin: (target: string) => void;
   /** AV.6: open the per-file History panel. */
@@ -58,6 +61,7 @@ function ActionsCellImpl({
   onDuplicate,
   onRequestRename,
   onRequestDelete,
+  onArchive,
   onPin,
   onUnpin,
   onOpenHistory,
@@ -97,6 +101,7 @@ function ActionsCellImpl({
         onRename={onRequestRename}
         onDuplicate={(tg) => onDuplicate(tg.target)}
         onDelete={onRequestDelete}
+        onArchive={onArchive}
         onLogs={onLogs}
         onPin={onPin}
         onUnpin={onUnpin}

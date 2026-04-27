@@ -45,7 +45,7 @@ from sysinfo import collect_system_info
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.7.0-dev.9"
+CLIENT_VERSION = "1.7.0-dev.10"
 
 
 def _read_image_version() -> Optional[str]:
@@ -175,6 +175,11 @@ _state_lock: threading.Lock = threading.Lock()
 _server_reachable: bool = True   # False once we've logged "server offline"
 _auth_ok: bool = True            # False once we've logged "auth failed"
 _reregister_needed: threading.Event = threading.Event()  # set by heartbeat on 404
+# Bug #4: clean-cache request received from the server but deferred until
+# all active jobs drain. The poll loops also check this and skip claiming
+# new jobs while it's set, so the cache only gets wiped on a quiescent
+# worker — never mid-compile.
+_clean_pending: threading.Event = threading.Event()
 
 
 def _is_idle() -> bool:
@@ -652,10 +657,24 @@ def heartbeat_loop(client_id: str, stop_event: threading.Event) -> None:
                     # Write new value to env so it persists across restart
                     os.environ["MAX_PARALLEL_JOBS"] = str(new_jobs)
                     _restart_self()
-                # Check for clean build cache request from UI
+                # Bug #4: defer the clean until all in-flight compiles finish.
+                # Cleaning mid-compile wipes the .esphome/build/* directory the
+                # running ``esphome run`` is mid-way through writing, which
+                # silently breaks the upload. Set a pending flag here; the
+                # main loop drains active jobs and runs the actual clean
+                # below at idle. Pollers also skip claiming new jobs while
+                # this is set so the worker reaches quiescence.
                 if data.clean_build_cache:
-                    logger.info("Server requested build cache clean — clearing esphome-versions")
-                    _clean_build_cache()
+                    if _is_idle():
+                        logger.info("Server requested build cache clean — worker is idle, clearing immediately")
+                        _clean_build_cache()
+                    else:
+                        if not _clean_pending.is_set():
+                            logger.info(
+                                "Server requested build cache clean — deferring until "
+                                "active job(s) finish",
+                            )
+                        _clean_pending.set()
                 # WL.2: start/stop the log pusher thread based on the
                 # server's watch state. The heartbeat is the single
                 # signal source; pusher never polls the server for
@@ -1695,9 +1714,14 @@ def worker_loop(
     _log_context.current_target = None
     logger.info("Worker %d started", worker_id)
     while not stop_event.is_set():
-        # Pause polling when update or re-register is pending so the main
-        # thread can reach idle state and handle the event.
-        if _reregister_needed.is_set() or _update_available.is_set():
+        # Pause polling when update / re-register / pending clean is set so
+        # the main thread can reach idle state and handle the event.
+        # Bug #4: ``_clean_pending`` lands here too — the heartbeat moved
+        # the actual ``_clean_build_cache()`` to the main loop's idle
+        # branch, but pollers must stop CLAIMING new jobs as soon as the
+        # request arrives; otherwise we keep grabbing work and the
+        # "drain to idle" never converges.
+        if _reregister_needed.is_set() or _update_available.is_set() or _clean_pending.is_set():
             stop_event.wait(1)
             continue
 
@@ -1884,6 +1908,15 @@ def main() -> None:
                 # Update failed — restart heartbeat + control-poll and workers
                 stop_heartbeat, hb_thread, cp_thread = _start_bg_threads(client_id)
                 worker_stop, worker_threads = _launch_workers(client_id, version_manager)
+
+            # Bug #4: run the deferred build-cache clean once all workers
+            # have drained. The poll loops are paused while ``_clean_pending``
+            # is set so we'll reach idle as soon as in-flight jobs finish;
+            # then the clean runs on a quiet worker and pollers resume.
+            elif _clean_pending.is_set() and _is_idle():
+                logger.info("Worker is idle — running deferred build-cache clean")
+                _clean_build_cache()
+                _clean_pending.clear()
 
             time.sleep(1)
     except KeyboardInterrupt:

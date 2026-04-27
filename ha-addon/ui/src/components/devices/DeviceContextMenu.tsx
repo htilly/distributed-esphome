@@ -43,6 +43,10 @@ interface Props {
   onRename: (target: string) => void;
   onDuplicate: (target: Target) => void;
   onDelete: (target: string) => void;
+  /** Bug #3: Archive directly from the hamburger menu — no confirmation
+   *  dialog, since archived devices can be restored from Settings →
+   *  Archived devices. */
+  onArchive: (target: string) => void;
   onLogs: (target: string) => void;
   onPin: (target: string) => void;
   onUnpin: (target: string) => void;
@@ -63,6 +67,7 @@ function DeviceContextMenuImpl({
   onRename,
   onDuplicate,
   onDelete,
+  onArchive,
   onLogs,
   onPin,
   onUnpin,
@@ -188,6 +193,12 @@ function DeviceContextMenuImpl({
               Commit changes…
             </DropdownMenuItem>
           )}
+          {/* Bug #3: Archive as a first-order action — no confirmation
+              modal, archived configs are restorable from
+              Settings → Archived devices. */}
+          <DropdownMenuItem onClick={() => onArchive(t.target)}>
+            Archive
+          </DropdownMenuItem>
           <DropdownMenuItem
             variant="destructive"
             onClick={() => onDelete(t.target)}

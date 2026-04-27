@@ -60,6 +60,8 @@ interface Options {
   onDuplicate: (target: string) => void;
   onRequestRename: (target: string) => void;
   onRequestDelete: (target: string) => void;
+  /** Bug #3: Archive — first-order hamburger action, no modal. */
+  onArchive: (target: string) => void;
   onPin: (target: string) => void;
   onUnpin: (target: string) => void;
   /** AV.6: open the per-file History panel from the row hamburger menu. */
@@ -135,6 +137,7 @@ export function useDeviceColumns(options: Options) {
     menuOpenTarget,
     setMenuOpenTarget,
     onEditTags,
+    onArchive,
   } = options;
 
   return useMemo(() => [
@@ -573,6 +576,7 @@ export function useDeviceColumns(options: Options) {
           onDuplicate={onDuplicate}
           onRequestRename={onRequestRename}
           onRequestDelete={onRequestDelete}
+          onArchive={onArchive}
           onPin={onPin}
           onUnpin={onUnpin}
           onOpenHistory={onOpenHistory}
@@ -601,5 +605,6 @@ export function useDeviceColumns(options: Options) {
     menuOpenTarget,
     setMenuOpenTarget,
     onEditTags,
+    onArchive,
   ]);
 }

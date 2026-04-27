@@ -277,6 +277,10 @@ export interface AppSettings {
   // #82 — time-of-day presentation. 'auto' defers to the browser's
   // resolved locale; '12h'/'24h' force the format globally.
   time_format: 'auto' | '12h' | '24h';
+  // Bug #5 — date presentation. 'auto' defers to the browser's locale;
+  // 'iso' = YYYY-MM-DD, 'us' = M/D/YYYY, 'eu' = DD/MM/YYYY,
+  // 'long' = "Apr 27, 2026". Wired to App.tsx → setDateFormatPref.
+  date_format: 'auto' | 'iso' | 'us' | 'eu' | 'long';
 }
 
 export async function getSettings(): Promise<AppSettings> {

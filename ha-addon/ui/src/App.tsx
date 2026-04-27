@@ -66,7 +66,7 @@ import {
 } from './components/ui/dialog';
 import { WorkersTab } from './components/WorkersTab';
 import type { Device, Job, Target, Worker } from './types';
-import { setTimeFormatPref, stripYaml } from './utils';
+import { setDateFormatPref, setTimeFormatPref, stripYaml } from './utils';
 import { downloadTextFile } from './utils/terminal';
 import esphomeLogoUrl from './assets/esphome-logo.svg';
 import './theme.css';
@@ -214,6 +214,9 @@ export default function App() {
   useEffect(() => {
     if (appSettings?.time_format) setTimeFormatPref(appSettings.time_format);
   }, [appSettings?.time_format]);
+  useEffect(() => {
+    if (appSettings?.date_format) setDateFormatPref(appSettings.date_format);
+  }, [appSettings?.date_format]);
   // Poll at 1 Hz for live-feeling updates. Workers + queue are pure in-memory
   // reads. Targets/devices does a readdir + per-target stat() for mtime cache
   // checks (metadata resolution is cached and only re-fires when a file

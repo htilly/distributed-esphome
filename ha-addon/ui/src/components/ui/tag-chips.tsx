@@ -21,21 +21,43 @@ import { X } from 'lucide-react';
  * cells render.
  */
 
-const HUES = [0, 30, 60, 95, 130, 160, 190, 215, 240, 270, 300, 335];
+// Bug #21: 12 *visually-distinct* named colors instead of 12 evenly-spaced
+// HSL hues. The dev.6 hue list (0/30/60/…) had clusters that looked
+// near-identical at chip size — 130+160 both read as "green",
+// 215+240 both read as "blue", etc. Using Tailwind's 600-stop palette
+// (curated for accessible foreground/background contrast against white)
+// gives every chip a perceptibly different hue and saturation, so a
+// row of 4 tags reads as 4 colors at a glance.
+const PALETTE: { bg: string; border: string }[] = [
+  { bg: '#dc2626', border: '#991b1b' }, // red-600
+  { bg: '#ea580c', border: '#9a3412' }, // orange-600
+  { bg: '#ca8a04', border: '#854d0e' }, // amber-600
+  { bg: '#65a30d', border: '#3f6212' }, // lime-600
+  { bg: '#16a34a', border: '#15803d' }, // green-600
+  { bg: '#0d9488', border: '#115e59' }, // teal-600
+  { bg: '#0284c7', border: '#075985' }, // sky-600
+  { bg: '#2563eb', border: '#1e40af' }, // blue-600
+  { bg: '#7c3aed', border: '#5b21b6' }, // violet-600
+  { bg: '#c026d3', border: '#86198f' }, // fuchsia-600
+  { bg: '#db2777', border: '#9d174d' }, // pink-600
+  { bg: '#475569', border: '#334155' }, // slate-600
+];
 
 function tagHueIndex(tag: string): number {
+  // djb2 hash — small, stable, no deps. Same tag string always picks
+  // the same palette entry, regardless of where it's rendered.
   let h = 5381;
   for (let i = 0; i < tag.length; i++) {
     h = ((h << 5) + h + tag.charCodeAt(i)) | 0;
   }
-  return Math.abs(h) % HUES.length;
+  return Math.abs(h) % PALETTE.length;
 }
 
 function tagChipStyle(tag: string): { background: string; borderColor: string; color: string } {
-  const hue = HUES[tagHueIndex(tag)];
+  const c = PALETTE[tagHueIndex(tag)];
   return {
-    background: `hsl(${hue}, 65%, 45%)`,
-    borderColor: `hsl(${hue}, 70%, 35%)`,
+    background: c.bg,
+    borderColor: c.border,
     color: '#ffffff',
   };
 }

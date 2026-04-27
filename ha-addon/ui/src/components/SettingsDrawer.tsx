@@ -222,6 +222,20 @@ export function SettingsDrawer({ open, onOpenChange, dirtyTargets = [], onReques
                   ]}
                   onCommit={v => patch({ time_format: v as 'auto' | '12h' | '24h' })}
                 />
+                {/* Bug #5: date format companion to the time format above. */}
+                <EnumRow
+                  label="Date format"
+                  help="How absolute dates render in row tooltips, the Queue, and History."
+                  value={data.date_format}
+                  options={[
+                    { value: 'auto', label: 'Auto (follow browser locale)' },
+                    { value: 'iso', label: 'ISO (2026-04-27)' },
+                    { value: 'us', label: 'US (4/27/2026)' },
+                    { value: 'eu', label: 'EU (27/04/2026)' },
+                    { value: 'long', label: 'Long (Apr 27, 2026)' },
+                  ]}
+                  onCommit={v => patch({ date_format: v as 'auto' | 'iso' | 'us' | 'eu' | 'long' })}
+                />
               </Section>
               </>}
               {activeTab === 'advanced' && <>

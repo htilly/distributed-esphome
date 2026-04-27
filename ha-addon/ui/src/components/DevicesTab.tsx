@@ -374,6 +374,13 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
     menuOpenTarget,
     setMenuOpenTarget,
     onEditTags: setTagsEditTarget,
+    // Bug #3: Archive directly without opening the Delete confirmation
+    // modal. The configs are restorable from Settings → Archived devices,
+    // so a confirm step here just slows down a non-destructive action.
+    onArchive: (target: string) => {
+      onDelete(target, true);
+      onToast(`Archived ${stripYaml(target)} — restore from Settings → Archived devices`, 'info');
+    },
   });
 
 

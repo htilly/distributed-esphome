@@ -511,6 +511,7 @@ def test_init_creates_settings_file_when_absent(tmp_path: Path):
         "device_poll_interval": 60,
         "require_ha_auth": False,
         "time_format": "auto",
+        "date_format": "auto",
     }
     # Everything else matches the dataclass defaults.
     assert s.auto_commit_on_save is True
@@ -780,6 +781,7 @@ def test_settings_as_dict_round_trips():
         "device_poll_interval": 60,
         "require_ha_auth": False,
         "time_format": "auto",
+        "date_format": "auto",
     }
 
 

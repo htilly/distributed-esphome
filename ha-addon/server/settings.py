@@ -153,6 +153,13 @@ class AppSettings:
     # ``utils/format.ts``.
     time_format: str = "auto"
 
+    # Bug #5: date presentation for absolute dates in Queue / History tabs.
+    # Same shape as time_format: ``'auto'`` defers to the browser's resolved
+    # locale; the explicit values force a specific style regardless. Wired
+    # through ``utils/format.ts::setDateFormatPref`` from App.tsx on settings
+    # load and on every drawer commit.
+    date_format: str = "auto"
+
 
 # ---------------------------------------------------------------------------
 # Validators
@@ -278,6 +285,9 @@ _VALIDATORS: dict[str, Callable[[Any, str], Any]] = {
     "require_ha_auth": _validate_bool,
     # #82: enum validator — 'auto' / '12h' / '24h'. See AppSettings.time_format.
     "time_format": _validate_enum("auto", "12h", "24h"),
+    # Bug #5: date enum — 'auto' / 'iso' (2026-04-27) / 'us' (4/27/2026)
+    # / 'eu' (27/04/2026) / 'long' (Apr 27, 2026).
+    "date_format": _validate_enum("auto", "iso", "us", "eu", "long"),
 }
 
 
