@@ -213,6 +213,28 @@ export interface Device {
   ha_device_id?: string | null;
 }
 
+/**
+ * TG.2 / TG.8: routing rule shapes mirrored from `ha-addon/server/routing.py`.
+ * A clause is a single predicate against a tag set; a rule pairs a
+ * `device_match` (when this fires) with a `worker_match` (then the worker
+ * must satisfy this). Severity is reserved for future expansion — only
+ * `"required"` is accepted by the API in 1.7.0.
+ */
+export type RoutingClauseOp = 'all_of' | 'any_of' | 'none_of';
+
+export interface RoutingClause {
+  op: RoutingClauseOp;
+  tags: string[];
+}
+
+export interface RoutingRule {
+  id: string;
+  name: string;
+  severity: 'required';
+  device_match: RoutingClause[];
+  worker_match: RoutingClause[];
+}
+
 export interface SystemInfo {
   os_version?: string;
   cpu_model?: string;

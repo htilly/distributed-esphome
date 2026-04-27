@@ -731,6 +731,48 @@ export async function setWorkerTags(
   ), 'setting worker tags');
 }
 
+// ---------------------------------------------------------------------------
+// TG.4 / TG.8 — routing rule CRUD
+// ---------------------------------------------------------------------------
+
+import type { RoutingRule } from '../types';
+
+export async function getRoutingRules(): Promise<RoutingRule[]> {
+  const data = await parseResponse<{ rules: RoutingRule[] }>(
+    await apiFetch('./ui/api/routing-rules'),
+    'fetching routing rules',
+  );
+  return data.rules ?? [];
+}
+
+export async function createRoutingRule(rule: Omit<RoutingRule, 'id'> & { id?: string }): Promise<RoutingRule> {
+  return parseResponse<RoutingRule>(
+    await apiFetch('./ui/api/routing-rules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(rule),
+    }),
+    'creating routing rule',
+  );
+}
+
+export async function updateRoutingRule(id: string, rule: RoutingRule): Promise<RoutingRule> {
+  return parseResponse<RoutingRule>(
+    await apiFetch(`./ui/api/routing-rules/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(rule),
+    }),
+    'updating routing rule',
+  );
+}
+
+export async function deleteRoutingRule(id: string): Promise<void> {
+  await expectOk(await apiFetch(`./ui/api/routing-rules/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  }), 'deleting routing rule');
+}
+
 export async function setTargetSchedule(
   filename: string,
   cron: string,

@@ -35,13 +35,15 @@ function buildDockerCmd(params: {
   maxJobs: number;
   seedVersion: string;
   hostPlatform: string;
+  /** TG.7: comma-joined tag list (already trimmed/deduped by the form). */
+  tags: string;
   restartPolicy: string;
   clientTag: string;
   format: Format;
 }): string {
   const {
     serverUrl, token, containerName, hostname, maxJobs,
-    seedVersion, hostPlatform, restartPolicy, clientTag, format,
+    seedVersion, hostPlatform, tags, restartPolicy, clientTag, format,
   } = params;
 
   if (format === 'compose') {
@@ -53,6 +55,10 @@ function buildDockerCmd(params: {
     if (hostname) envLines.push(`      - HOSTNAME=${hostname}`);
     if (seedVersion) envLines.push(`      - ESPHOME_SEED_VERSION=${seedVersion}`);
     if (hostPlatform) envLines.push(`      - HOST_PLATFORM=${hostPlatform}`);
+    // TG.7: WORKER_TAGS only emitted when the user typed at least one
+    // tag — keeps the docker invocation clean for users who don't care
+    // about routing yet.
+    if (tags) envLines.push(`      - WORKER_TAGS=${tags}`);
     const yaml = [
       'name: esphome-fleet-worker',
       '',
@@ -96,6 +102,9 @@ function buildDockerCmd(params: {
   if (hostPlatform) {
     lines.push(`  -e HOST_PLATFORM=${JSON.stringify(hostPlatform)} ${cont}`);
   }
+  if (tags) {
+    lines.push(`  -e WORKER_TAGS=${tags} ${cont}`);
+  }
   lines.push(`  -v esphome-versions:/esphome-versions ${cont}`);
   lines.push(`  ghcr.io/weirded/esphome-dist-client:${clientTag}`);
 
@@ -113,6 +122,10 @@ interface FormState {
   maxJobs: number;
   seedVersion: string;
   hostPlatform: string;
+  /** TG.7: comma-separated WORKER_TAGS. The server normalises (trim /
+   *  drop empties / dedupe) on registration; the docker command emits
+   *  the field verbatim so the user can paste this into `.env` later. */
+  tags: string;
   restartPolicy: string;
   // UX.10: renamed from `shell` to cover the new `compose` output too.
   format: Format;
@@ -151,6 +164,7 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
     maxJobs: preset?.max_parallel_jobs ?? 2,
     seedVersion: esphomeVersion || '',
     hostPlatform: preset?.host_platform ?? '',
+    tags: '',
     restartPolicy: 'unless-stopped',
     format: 'bash',
   });
@@ -159,7 +173,7 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
 
   // Convenience aliases so JSX stays readable.
   const { serverUrl, containerName, hostname, maxJobs, seedVersion,
-    hostPlatform, restartPolicy, format } = form;
+    hostPlatform, tags, restartPolicy, format } = form;
   const set = <K extends keyof FormState>(field: K, value: FormState[K]) =>
     dispatch({ type: 'set', field, value });
 
@@ -187,6 +201,7 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
     maxJobs,
     seedVersion,
     hostPlatform,
+    tags,
     restartPolicy,
     clientTag,
     format,
@@ -279,6 +294,22 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
                 value={hostPlatform}
                 placeholder="e.g. macOS 15.3 (Apple M1 Pro)"
                 onChange={e => set('hostPlatform', e.target.value)}
+              />
+            </div>
+            {/* TG.7: WORKER_TAGS — comma-separated. Only the *first*
+                registration seeds the server-side store; later edits live in
+                the Workers tab Tags column. The docker command picks this up
+                so tags travel with the docker invocation on initial setup. */}
+            <div>
+              <Label>
+                Tags{' '}
+                <span className="text-[var(--text-muted)] font-normal normal-case">(optional, comma-separated)</span>
+              </Label>
+              <Input
+                type="text"
+                value={tags}
+                placeholder="e.g. linux, fast, prod"
+                onChange={e => set('tags', e.target.value)}
               />
             </div>
             <div>

@@ -21,6 +21,7 @@ import { StatusDot } from './StatusDot';
 import { SortHeader, getAriaSort } from './ui/sort-header';
 import { TagChips } from './ui/tag-chips';
 import { TagsEditDialog } from './TagsEditDialog';
+import { RoutingRulesModal } from './RoutingRulesModal';
 import { setWorkerTags } from '../api/client';
 import { useSWRConfig } from 'swr';
 
@@ -257,6 +258,8 @@ export function WorkersTab({ workers, targets, queue, serverClientVersion, minIm
   const [filter, setFilter] = useState('');
   // TG.6 inline edit — same lift-out-of-row pattern as the Actions menu.
   const [tagsEditClientId, setTagsEditClientId] = useState<string | null>(null);
+  // TG.6/TG.8 — routing-rules editor opened from the toolbar.
+  const [rulesModalOpen, setRulesModalOpen] = useState(false);
   const { mutate } = useSWRConfig();
   // QS.27: persist sort across reloads via localStorage.
   const [sorting, setSorting] = usePersistedState<SortingState>(
@@ -546,6 +549,12 @@ export function WorkersTab({ workers, targets, queue, serverClientVersion, minIm
           <div className="actions">
             {/* #88: standardized layout — primary "add new" action FIRST, Actions dropdown LAST */}
             <Button size="sm" onClick={() => onConnectWorker()}>+ Connect Worker</Button>
+            {/* TG.6/TG.8 — primary entry point for the routing rules editor.
+                Lives with the workers because that's where the user thinks
+                about routing (per the spec). */}
+            <Button variant="secondary" size="sm" onClick={() => setRulesModalOpen(true)}>
+              Routing rules…
+            </Button>
             <DropdownMenu>
               <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg border border-border bg-background px-2.5 h-7 text-[0.8rem] font-medium text-foreground hover:bg-muted cursor-pointer">
                 Actions <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
@@ -610,6 +619,13 @@ export function WorkersTab({ workers, targets, queue, serverClientVersion, minIm
           </table>
         </div>
       </div>
+
+      <RoutingRulesModal
+        open={rulesModalOpen}
+        onOpenChange={setRulesModalOpen}
+        targets={targets}
+        workers={workers}
+      />
     </div>
   );
 }
