@@ -15,13 +15,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * round-robin scheduling could send the second job to a different worker
  * with a cold cache and the comparison becomes meaningless.
  *
- * Threshold: second ≤ 1.20 × first. Honest about what this test can detect:
+ * Threshold: second ≤ 1.50 × first. Honest about what this test can detect:
  * for a small device like cyd-office-info, most of the wall-clock budget is
  * OTA upload + PlatformIO setup, not the C++ compile that the cache
- * accelerates. Two healthy back-to-back runs have measured ratios of 0.76,
- * 0.83, and 0.88 — the variance is high enough that any threshold below
- * ~1.0 flakes. The realistic regression we catch here is "PlatformIO has
- * to redownload its package cache" — that pushes the ratio well above 1.5.
+ * accelerates. Two healthy back-to-back runs on the always-on hass-4 host
+ * have measured 0.76 / 0.83 / 0.88 — but the standalone-pve docker host in
+ * the matrix shares CPU with other VMs and routinely lands in the 1.0–1.4
+ * band purely from host-load variance. The 1.20 default was tuned for
+ * hass-4 only and reliably flaked on standalone-pve. The realistic
+ * regression we want to catch is "PlatformIO had to redownload its package
+ * cache between runs" — that pushes the ratio above 1.5 on every host
+ * we've measured, so 1.50 still catches it without misfiring on noise.
  * Tune via SPEEDUP_THRESHOLD env if you want a stricter check on a larger
  * project. Ratio is logged so trends can be eyeballed across CI runs.
  *
@@ -37,7 +41,7 @@ const EXPECTED_VERSION =
   readFileSync(join(__dirname, '../../VERSION'), 'utf-8').trim();
 
 const COMPILE_BUDGET_MS = parseInt(process.env.COMPILE_BUDGET_MS || '480000', 10);
-const SPEEDUP_THRESHOLD = parseFloat(process.env.SPEEDUP_THRESHOLD || '1.20');
+const SPEEDUP_THRESHOLD = parseFloat(process.env.SPEEDUP_THRESHOLD || '1.50');
 
 interface QueueJob {
   id: string;
