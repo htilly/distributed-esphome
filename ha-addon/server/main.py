@@ -1472,6 +1472,13 @@ def create_app() -> web.Application:
     from worker_tags import WorkerTagStore  # noqa: PLC0415
     app["worker_tag_store"] = WorkerTagStore(path="/data/worker-tags.json")
 
+    # TG.2: routing-rule store. JSON-backed list of "when device matches X,
+    # worker must match Y" rules. The eligibility evaluator uses this list
+    # at job-claim time; TG.4's REST endpoints (create/update/delete) and
+    # TG.8's UI editor mutate it.
+    from routing import RoutingRuleStore  # noqa: PLC0415
+    app["routing_rule_store"] = RoutingRuleStore(path="/data/routing-rules.json")
+
     # Register routes
     app.router.add_routes(api_module.routes)
     app.router.add_routes(ui_api_module.routes)
