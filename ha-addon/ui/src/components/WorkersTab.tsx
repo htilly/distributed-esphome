@@ -21,6 +21,7 @@ import { StatusDot } from './StatusDot';
 import { SortHeader, getAriaSort } from './ui/sort-header';
 import { TagChips } from './ui/tag-chips';
 import { TagsEditDialog } from './TagsEditDialog';
+import { TagFilterBar } from './TagFilterBar';
 import { RoutingRulesModal } from './RoutingRulesModal';
 import { setWorkerTags } from '../api/client';
 import { useSWRConfig } from 'swr';
@@ -258,6 +259,8 @@ export function WorkersTab({ workers, targets, queue, serverClientVersion, minIm
   const [filter, setFilter] = useState('');
   // TG.6 inline edit — same lift-out-of-row pattern as the Actions menu.
   const [tagsEditClientId, setTagsEditClientId] = useState<string | null>(null);
+  // TG.6 filter pills — selected tag set persisted across reloads.
+  const [tagFilter, setTagFilter] = usePersistedState<string[]>('workers-tag-filter', []);
   // TG.6/TG.8 — routing-rules editor opened from the toolbar.
   const [rulesModalOpen, setRulesModalOpen] = useState(false);
   const { mutate } = useSWRConfig();
@@ -268,21 +271,38 @@ export function WorkersTab({ workers, targets, queue, serverClientVersion, minIm
   );
 
 
+  // TG.6 filter pills: fleet-wide worker-tag pool with usage counts.
+  const tagPool = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const w of workers) {
+      if (w.tags) for (const tag of w.tags) {
+        counts.set(tag, (counts.get(tag) ?? 0) + 1);
+      }
+    }
+    return Array.from(counts.entries())
+      .map(([tag, count]) => ({ tag, count }))
+      .sort((a, b) => a.tag.localeCompare(b.tag));
+  }, [workers]);
+
   // Filter before handing to TanStack — keeps filter state local, same as DevicesTab pattern
   const filteredWorkers = useMemo(() => {
-    if (!filter) return workers;
+    // TG.6 pill filter first (OR-logic: any selected tag matches).
+    const tagFilterSet = new Set(tagFilter);
+    const tagged = tagFilterSet.size === 0
+      ? workers
+      : workers.filter(w => (w.tags ?? []).some(t => tagFilterSet.has(t)));
+    if (!filter) return tagged;
     const q = filter.toLowerCase();
-    return workers.filter(w =>
+    return tagged.filter(w =>
       w.hostname.toLowerCase().includes(q)
       || (w.system_info?.os_version || '').toLowerCase().includes(q)
       || (w.system_info?.cpu_model || '').toLowerCase().includes(q)
       || (w.client_version || '').toLowerCase().includes(q)
-      // TG.6: tags participate in the existing search box (substring,
-      // case-insensitive). The chip-pill row + autocomplete-driven filter
-      // pills land in a follow-up turn.
+      // TG.6: tags participate in the existing search box too on top of
+      // the pill filter (substring, case-insensitive).
       || (w.tags ?? []).some(t => t.toLowerCase().includes(q))
     );
-  }, [workers, filter]);
+  }, [workers, filter, tagFilter]);
 
   // UX.2: wrap every sortable column header in SortHeader so the sort
   // glyph renders consistently with Devices/Queue/Schedules (QS.21).
@@ -602,6 +622,9 @@ export function WorkersTab({ workers, targets, queue, serverClientVersion, minIm
             />
           );
         })()}
+        {/* TG.6 filter pills — same shape as the Devices tab. Hidden when
+            no worker has any tag yet so the bar doesn't show empty. */}
+        <TagFilterBar tags={tagPool} selected={tagFilter} onChange={setTagFilter} />
         <div className="table-wrap">
           <table>
             <thead>

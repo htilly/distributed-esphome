@@ -18,6 +18,7 @@ import {
   type ArchivedConfig,
 } from '../api/client';
 import { TagsEditDialog } from './TagsEditDialog';
+import { TagFilterBar } from './TagFilterBar';
 import type { AddressSource, Device, Job, Target, Worker } from '../types';
 import { stripYaml, haDeepLink, usePersistedState } from '../utils';
 import { StatusDot } from './StatusDot';
@@ -215,6 +216,9 @@ export { RenameModal };
 
 export function DevicesTab({ targets, devices, workers, streamerMode, activeJobsByTarget, onCompile, onUpgradeOne, onEdit, onLogs, onToast, onDelete, onRename, onSchedule, onNewDevice, onDuplicate, onOpenHistory, onOpenCompileHistory, onCommitChanges, onRefresh }: Props) {
   const [filter, setFilter] = useState('');
+  // TG.5 filter pills — selected tag set, persisted to localStorage so the
+  // "show me kitchen OR bedroom" filter sticks across reloads.
+  const [tagFilter, setTagFilter] = usePersistedState<string[]>('devices-tag-filter', []);
   // QS.27: persist sort across reloads via localStorage.
   const [sorting, setSorting] = usePersistedState<SortingState>('devices-sort', []);
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(loadColumnVisibility);
@@ -317,11 +321,37 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
     [devices, managedDeviceNames, managedIPs]
   );
 
+  // TG.5 filter pills — fleet-wide tag pool with usage counts, sorted
+  // alphabetically. The TagFilterBar component reads this directly.
+  const tagPool = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const t of targets) {
+      if (t.tags) for (const tag of t.tags.split(',').map(s => s.trim()).filter(Boolean)) {
+        counts.set(tag, (counts.get(tag) ?? 0) + 1);
+      }
+    }
+    return Array.from(counts.entries())
+      .map(([tag, count]) => ({ tag, count }))
+      .sort((a, b) => a.tag.localeCompare(b.tag));
+  }, [targets]);
+
   // Filter targets before passing to TanStack (filter state owned here, not in TanStack)
   const filteredTargets = useMemo(() => {
     const sorted = [...targets].sort((a, b) => a.target.localeCompare(b.target));
-    if (!filter) return sorted;
-    return sorted.filter(t =>
+    // TG.5 filter pills: OR-logic across selected tags. A row matches
+    // when it has *any* of the selected tags. Empty selection = no
+    // filter (show everything). Applied before the search-box text
+    // filter so a search with active pill filters narrows the
+    // already-pill-filtered set.
+    const tagFilterSet = new Set(tagFilter);
+    const tagged = tagFilterSet.size === 0
+      ? sorted
+      : sorted.filter(t => {
+          const ts = (t.tags || '').split(',').map(s => s.trim()).filter(Boolean);
+          return ts.some(x => tagFilterSet.has(x));
+        });
+    if (!filter) return tagged;
+    return tagged.filter(t =>
       matchesFilter(
         filter,
         t.friendly_name,
@@ -335,13 +365,17 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
         t.comment,
         t.project_name,
         // TG.5: tags participate in the existing search box (substring,
-        // case-insensitive) before the dedicated filter pills land.
+        // case-insensitive) on top of the pill filter.
         t.tags,
       )
     );
-  }, [targets, filter]);
+  }, [targets, filter, tagFilter]);
 
   const filteredUnmanaged = useMemo(() => {
+    // TG.5: an active pill filter means "show me devices with these
+    // tags" — unmanaged devices have no tags, so hide them entirely
+    // while a filter is active.
+    if (tagFilter.length > 0) return [];
     if (!filter) return unmanaged;
     return unmanaged.filter(d =>
       matchesFilter(
@@ -353,7 +387,7 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
         d.running_version,
       )
     );
-  }, [unmanaged, filter]);
+  }, [unmanaged, filter, tagFilter]);
 
   const columns = useDeviceColumns({
     activeJobsByTarget,
@@ -557,6 +591,11 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
             </DropdownMenu>
           </div>
         </div>
+        {/* TG.5: filter pill bar — one pill per fleet tag with usage
+            count, OR-logic across selections, persisted via
+            usePersistedState above. Hidden when the fleet has no
+            tags so a fresh install doesn't show an empty bar. */}
+        <TagFilterBar tags={tagPool} selected={tagFilter} onChange={setTagFilter} />
         <div className="table-wrap">
           <table>
             <thead>

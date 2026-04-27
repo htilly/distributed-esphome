@@ -71,9 +71,13 @@ interface ChipProps {
    *  ``onRemove`` in practice — a chip is either "click body to add" or
    *  "click × to remove". */
   onClick?: () => void;
+  /** TG.5/TG.6 filter pill: optional usage count rendered as a faint
+   *  ``(N)`` suffix. Doesn't participate in the color hash so the same
+   *  tag stays the same color across rows / pill-bar / editor. */
+  count?: number;
 }
 
-export function TagChip({ tag, onRemove, onClick }: ChipProps) {
+export function TagChip({ tag, onRemove, onClick, count }: ChipProps) {
   const s = tagChipStyle(tag);
   const interactive = onClick != null;
   return (
@@ -93,6 +97,9 @@ export function TagChip({ tag, onRemove, onClick }: ChipProps) {
       role={interactive ? 'button' : undefined}
     >
       {tag}
+      {count != null && (
+        <span className="ml-1 opacity-70 text-[10px]">({count})</span>
+      )}
       {onRemove && (
         <button
           type="button"
