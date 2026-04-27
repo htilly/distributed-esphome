@@ -257,7 +257,23 @@ Severity: only `required` accepted by the API in 1.7.0 (`preferred` rejected wit
 
 - [x] **6** *(1.7.0-dev.6)* — hash-based tag chip colors. djb2 hash of the tag text picks one of 12 hues; HSL pastel background (60% S / 88% L) + same-hue dark text (60% S / 22% L) is AA-readable on both the dark `[data-theme="dark"]` and light `[data-theme="light"]` surfaces, so we don't need to branch on theme. Same tag string → same color across rows, tabs, and refreshes — `kitchen` looks the same on a device row as on a worker row. Lives in `ha-addon/ui/src/components/ui/tag-chips.tsx`.
 
-- [ ] 7 anywhere we let users add or edit or remove tags, we should use the little colorful checklists and we should auto-complete. We should also always show a choice of existing tags to be added. 
+- [x] **7** *(1.7.0-dev.7)* — subsumed by **#11**. The chip-input editor in `TagsEditDialog.tsx` shows chips, lets the user add new tags by typing + Enter (or comma), and renders a "Suggestions" row of fleet-wide existing tags (union of every device's `tags` + every worker's `tags`, sorted, deduped, capped at 12) which the user clicks to attach. Substring filter narrows the suggestion row as the user types.
 
 - [ ] 8 we should allow an option or an action on both devices and workers to tag-select it. When the user ticks the boxes, they can add tags to those options. If all the ticked boxes share any tags in common, we should allow those to be removed. Also, a variation of the editor that basically works on the union of the tags of all of these selected items 
+
+- [x] **9** *(1.7.0-dev.7)* — clear-tags strips the YAML key (and the whole metadata comment block when no other keys remain). The Devices-tab dialog now sends `{tags: null}` rather than `{tags: ""}` when the user saves an empty list; `update_target_meta` already pops `null` keys, and `write_device_meta` already strips the whole `# esphome-fleet:` block when the resulting dict is empty (see `test_write_device_meta_removes_block_when_empty`). New regression tests cover the dialog flow specifically: `test_write_device_meta_clearing_only_tags_strips_block` (tags-only meta → block gone) and `test_write_device_meta_clearing_tags_with_other_keys_keeps_block` (mixed meta → block stays minus the tags line).
+
+- [x] **10** ANSWERED — not auto-tagging; not tests. The tags surfaced on hass-4 workers (`kitchen, prod, linux, fast` etc.) were demo POSTs against `POST /ui/api/workers/{id}/tags` to prove the round-trip end-to-end and to give the UI something visible to render. Cleared during 1.7.0-dev.7 setup. Auto-tagging is intentionally deferred (see "Deferred (intentionally NOT 1.7.0)" above) — when it lights up, system-derived tags will be additive read-only chips alongside the user-managed ones.
+
+- [x] **11** *(1.7.0-dev.7)* — chip-input editor with X-to-remove and inline-add. `TagsEditDialog` shows each existing tag as a colored chip with a small × button (uses Lucide `X` inside the chip's white-bg-on-color hover affordance); the trailing free-form input creates a new tag on Enter or comma; Backspace on an empty input removes the last chip; click any suggestion chip in the "Suggestions" row to attach it. `TagChip` (singular) lives next to `TagChips` (plural) in `components/ui/tag-chips.tsx` and accepts an optional `onRemove` (× variant) or `onClick` (suggestion variant). Replaces the dev.4 plain text-input dialog.
+
+- [x] **12** *(1.7.0-dev.7)* — punchier chip palette. Switched from the dev.6 washed-out pastel (60% S / 88% L bg + dark same-hue text) to GitHub-issue-label-style solid chips: saturated mid-tone background `hsl(h, 65%, 45%)` + white text. AA-readable on both `[data-theme="light"]` and `[data-theme="dark"]` surfaces without branching, and reads as the chip's color rather than gray.
+
+- [ ] 13 the "last compiled" values on devices aren't really populating correctly - are we getting those from sqlite? if not, we should. 
+
+- [x] **14** *(1.7.0-dev.7)* — background refresh wiping in-progress edits. The `TagsEditDialog`'s seed-from-`initial` `useEffect` previously listed `initial` in its dep array, which fired on every parent SWR poll (1Hz) because the parent passes a fresh array reference each render even when values are unchanged — overwriting the user's typed text mid-edit. Dropped `initial` from the deps so the seed only fires on the open transition (false→true); save still uses the current text state, so the latest typed value is what's persisted.
+
+- [ ] 15 we don't need the little tag icon in front of each chip - wastes spaces 
+
+- [ ] 16 can we give the tags colum more width, make the font bigger and move it next to name?
 

@@ -1,28 +1,29 @@
-import { Tag } from 'lucide-react';
+import { Tag, X } from 'lucide-react';
 
 /**
- * TG.5 / TG.6 — render a worker or device tag list as chip pills.
+ * TG.5 / TG.6 — render a worker or device tag as a colored chip pill.
  *
- * Bug #6: each tag picks a color from a fixed palette via a stable hash of
- * its text. Same tag → same color across rows / tabs / pages. Light-mode
- * and dark-mode palettes are intentionally desaturated (HSL S=70%, L=88%
- * for light backgrounds; S=55%, L=22% for dark backgrounds) so the table
- * doesn't look like a circus. Foreground text picks the darker / lighter
- * end of the same hue so contrast stays AA against the chosen background.
+ * Bug #6: each tag picks a color from a 12-hue palette via a stable djb2
+ * hash of its text. Same tag string → same color across rows / tabs /
+ * pages so "kitchen" looks the same on a device row as on a worker row,
+ * and "prod" stays visually distinct from "linux".
  *
- * The empty case renders nothing so the cell is visually empty rather than
- * stamped with an em-dash — matches the TG.5 spec ("Empty-cell rendering:
- * leave blank, not '—'").
+ * Bug #12: GitHub-issue-label-style solid chips (saturated mid-tone bg
+ * with white text) instead of washed-out pastels. The single palette
+ * works on both ``[data-theme="light"]`` and ``[data-theme="dark"]``
+ * surfaces because ``hsl(h, 65%, 45%)`` is dark enough for white text
+ * to read AA-contrast and saturated enough to register as the chip's
+ * color (not gray) against either surface.
+ *
+ * Bug #11: ``TagChip`` accepts an optional ``onRemove`` handler — passing
+ * one renders a small × inside the chip so the editor can mutate. Without
+ * it the chip is a plain read-only pill, identical to what the table
+ * cells render.
  */
 
-// 12 hues spaced ~30° apart around the HSL wheel. Enough variety that
-// real fleets ("kitchen", "office", "garage", "prod", "linux", "fast")
-// rarely collide; small enough that the table doesn't get loud.
 const HUES = [0, 30, 60, 95, 130, 160, 190, 215, 240, 270, 300, 335];
 
 function tagHueIndex(tag: string): number {
-  // djb2 — small, stable, no deps. Same tag string always maps to the
-  // same hue, regardless of where it's rendered.
   let h = 5381;
   for (let i = 0; i < tag.length; i++) {
     h = ((h << 5) + h + tag.charCodeAt(i)) | 0;
@@ -30,46 +31,65 @@ function tagHueIndex(tag: string): number {
   return Math.abs(h) % HUES.length;
 }
 
-interface ChipStyle {
-  background: string;
-  borderColor: string;
-  color: string;
+function tagChipStyle(tag: string): { background: string; borderColor: string; color: string } {
+  const hue = HUES[tagHueIndex(tag)];
+  return {
+    background: `hsl(${hue}, 65%, 45%)`,
+    borderColor: `hsl(${hue}, 70%, 35%)`,
+    color: '#ffffff',
+  };
 }
 
-function tagChipStyle(tag: string): ChipStyle {
-  const hue = HUES[tagHueIndex(tag)];
-  // One palette, intentionally readable on both themes. The project uses
-  // a manual ``[data-theme="light"]`` toggle (theme.css) rather than
-  // prefers-color-scheme, so ``light-dark()`` doesn't work here. Pastel
-  // background (50% S / 85% L) provides contrast against the dark app
-  // surface ``#1a1d27`` and against the light surface ``#ffffff``;
-  // dark same-hue text (70% S / 25% L) is AA-readable against the
-  // pastel background regardless of theme.
-  return {
-    background: `hsl(${hue}, 60%, 88%)`,
-    borderColor: `hsl(${hue}, 40%, 70%)`,
-    color: `hsl(${hue}, 60%, 22%)`,
-  };
+interface ChipProps {
+  tag: string;
+  /** Bug #11: render an inline × the caller can wire to "remove this tag". */
+  onRemove?: () => void;
+  /** Optional click handler for the whole chip (e.g. picker suggestions
+   *  call ``addTag(t)`` when the user clicks). Mutually exclusive with
+   *  ``onRemove`` in practice — a chip is either "click body to add" or
+   *  "click × to remove". */
+  onClick?: () => void;
+}
+
+export function TagChip({ tag, onRemove, onClick }: ChipProps) {
+  const s = tagChipStyle(tag);
+  const interactive = onClick != null;
+  return (
+    <span
+      className={
+        'inline-flex items-center gap-0.5 rounded-full border px-1.5 py-px text-[10px] leading-none ' +
+        (interactive ? 'cursor-pointer hover:opacity-90 transition-opacity' : '')
+      }
+      style={s}
+      title={`Tag: ${tag}`}
+      onClick={onClick}
+      role={interactive ? 'button' : undefined}
+    >
+      <Tag className="size-2.5" aria-hidden="true" />
+      {tag}
+      {onRemove && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove();
+          }}
+          aria-label={`Remove tag ${tag}`}
+          className="ml-0.5 inline-flex size-3 items-center justify-center rounded-full bg-white/20 hover:bg-white/40"
+          tabIndex={-1}
+        >
+          <X className="size-2" />
+        </button>
+      )}
+    </span>
+  );
 }
 
 export function TagChips({ tags }: { tags: string[] | null | undefined }) {
   if (!tags || tags.length === 0) return null;
   return (
     <span className="inline-flex flex-wrap gap-1">
-      {tags.map(t => {
-        const s = tagChipStyle(t);
-        return (
-          <span
-            key={t}
-            className="inline-flex items-center gap-0.5 rounded-full border px-1.5 py-px text-[10px] leading-none"
-            style={s}
-            title={`Tag: ${t}`}
-          >
-            <Tag className="size-2.5" aria-hidden="true" />
-            {t}
-          </span>
-        );
-      })}
+      {tags.map(t => <TagChip key={t} tag={t} />)}
     </span>
   );
 }

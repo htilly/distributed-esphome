@@ -918,6 +918,64 @@ def test_write_device_meta_removes_block_when_empty(tmp_path):
     assert "esphome:" in content
 
 
+def test_write_device_meta_clearing_only_tags_strips_block(tmp_path):
+    """Bug #9 regression: clearing the last tag (the only meta key) removes
+    the whole comment block, not an empty `tags:` line.
+
+    Models the dialog-save path: the UI sends `{tags: null}` to
+    /ui/api/targets/{filename}/meta when the user clears every chip;
+    update_target_meta turns null into a `meta.pop("tags")`; if `tags`
+    was the only key in the YAML metadata block, the resulting empty
+    dict triggers the whole-block strip path here.
+    """
+    f = tmp_path / "device.yaml"
+    f.write_text(
+        "# esphome-fleet:\n"
+        "#   tags: office, sensors\n"
+        "\n"
+        "esphome:\n"
+        "  name: test\n"
+    )
+
+    # Pop the only key (what update_target_meta does on tags=null):
+    meta = read_device_meta(str(tmp_path), "device.yaml")
+    meta.pop("tags", None)
+    write_device_meta(str(tmp_path), "device.yaml", meta)
+
+    content = f.read_text()
+    assert "esphome-fleet" not in content
+    assert "tags:" not in content
+    assert "office" not in content
+    # Original YAML survives.
+    assert "esphome:" in content
+    assert "name: test" in content
+
+
+def test_write_device_meta_clearing_tags_with_other_keys_keeps_block(tmp_path):
+    """Bug #9 partner: clearing tags but leaving other meta keys preserves
+    the block (just minus the `tags:` line).
+    """
+    f = tmp_path / "device.yaml"
+    f.write_text(
+        "# esphome-fleet:\n"
+        "#   pin_version: 2026.3.3\n"
+        "#   tags: office, sensors\n"
+        "\n"
+        "esphome:\n"
+        "  name: test\n"
+    )
+
+    meta = read_device_meta(str(tmp_path), "device.yaml")
+    meta.pop("tags", None)
+    write_device_meta(str(tmp_path), "device.yaml", meta)
+
+    content = f.read_text()
+    assert "# esphome-fleet:" in content
+    assert "pin_version: 2026.3.3" in content
+    assert "tags:" not in content
+    assert "office" not in content
+
+
 def test_write_device_meta_preserves_other_comments(tmp_path):
     """Other comment lines in the file survive the write."""
     f = tmp_path / "device.yaml"

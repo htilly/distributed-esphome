@@ -7,7 +7,7 @@ import {
   createColumnHelper,
   type SortingState,
 } from '@tanstack/react-table';
-import type { Job, SystemInfo, Worker } from '../types';
+import type { Job, SystemInfo, Target, Worker } from '../types';
 import { Button } from './ui/button';
 import {
   DropdownMenu,
@@ -26,6 +26,10 @@ import { useSWRConfig } from 'swr';
 
 interface Props {
   workers: Worker[];
+  /** Bug #11: device list for the chip-input autocomplete pool. The
+   *  TagsEditDialog suggests every tag in use across the fleet (devices
+   *  + workers); ``targets`` carries the device side. */
+  targets: Target[];
   queue: Job[];
   serverClientVersion?: string;
   minImageVersion?: string;
@@ -244,7 +248,7 @@ function getWorkerSortValue(w: Worker, colId: string): string {
 
 const columnHelper = createColumnHelper<Worker>();
 
-export function WorkersTab({ workers, queue, serverClientVersion, minImageVersion, onRemove, onSetParallelJobs, onCleanCache, onCleanAllCaches, onConnectWorker, onViewLogs, onRequestDiagnostics }: Props) {
+export function WorkersTab({ workers, targets, queue, serverClientVersion, minImageVersion, onRemove, onSetParallelJobs, onCleanCache, onCleanAllCaches, onConnectWorker, onViewLogs, onRequestDiagnostics }: Props) {
   // WL.3: lift the actions-dropdown open state out of the TanStack row
   // cell so the 1 Hz SWR poll doesn't tear it down mid-click (bug #2
   // / #71 class — see Design Judgment in CLAUDE.md). Keyed by
@@ -563,12 +567,23 @@ export function WorkersTab({ workers, queue, serverClientVersion, minImageVersio
         {tagsEditClientId && (() => {
           const w = workers.find(x => x.client_id === tagsEditClientId);
           if (!w) return null;
+          // Bug #11: fleet-wide pool — union of every worker's tags + every
+          // device's comma-separated tags string, sorted, deduped.
+          const pool = new Set<string>();
+          for (const wx of workers) {
+            if (wx.tags) for (const t of wx.tags) pool.add(t);
+          }
+          for (const t of targets) {
+            if (t.tags) for (const x of t.tags.split(',').map(s => s.trim()).filter(Boolean)) pool.add(x);
+          }
+          const suggestions = Array.from(pool).sort();
           return (
             <TagsEditDialog
               open
               onOpenChange={(open) => { if (!open) setTagsEditClientId(null); }}
               subject={`Worker ${w.hostname}`}
               initial={w.tags ?? []}
+              suggestions={suggestions}
               onSave={async (tags) => {
                 await setWorkerTags(w.client_id, tags);
                 // SWR key is 'workers' (see App.tsx); 1Hz poll would catch

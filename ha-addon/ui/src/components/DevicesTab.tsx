@@ -621,18 +621,35 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
           .split(',')
           .map(s => s.trim())
           .filter(Boolean);
+        // Bug #11: fleet-wide tag pool for autocomplete. Union of every
+        // device's tags + every worker's tags, sorted, deduped, scoped
+        // to non-empty entries. Computed inline because it's tiny (a
+        // handful of strings) and SWR already keeps both lists fresh.
+        const pool = new Set<string>();
+        for (const dt of targets) {
+          if (dt.tags) for (const x of dt.tags.split(',').map(s => s.trim()).filter(Boolean)) pool.add(x);
+        }
+        for (const w of workers) {
+          if (w.tags) for (const x of w.tags) pool.add(x);
+        }
+        const suggestions = Array.from(pool).sort();
         return (
           <TagsEditDialog
             open
             onOpenChange={(open) => { if (!open) setTagsEditTarget(null); }}
             subject={`Device ${stripYaml(t.target)}`}
             initial={initial}
+            suggestions={suggestions}
             onSave={async (tags) => {
               // Existing /ui/api/targets/{filename}/meta endpoint stores
               // the comment block as one comma-joined string — re-use it
               // verbatim so tags round-trip through read_device_meta /
-              // write_device_meta unchanged.
-              await updateTargetMeta(t.target, { tags: tags.join(',') });
+              // write_device_meta unchanged. Bug #9: send `null` (not "")
+              // when the user clears every tag — `null` triggers the
+              // server's `meta.pop(key)` path, and write_device_meta
+              // strips the whole comment block once the dict is empty.
+              const value: string | null = tags.length > 0 ? tags.join(',') : null;
+              await updateTargetMeta(t.target, { tags: value });
               await onRefresh();
               onToast(`Saved tags for ${stripYaml(t.target)}`, 'success');
             }}

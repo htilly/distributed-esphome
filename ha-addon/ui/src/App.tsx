@@ -824,6 +824,7 @@ export default function App() {
         {activeTab === 'workers' && (
           <WorkersTab
             workers={workers}
+            targets={targets}
             queue={displayQueue}
             serverClientVersion={serverInfo.server_client_version}
             minImageVersion={serverInfo.min_image_version}
