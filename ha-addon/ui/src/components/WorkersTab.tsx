@@ -22,7 +22,6 @@ import { SortHeader, getAriaSort } from './ui/sort-header';
 import { TagChips } from './ui/tag-chips';
 import { TagsEditDialog } from './TagsEditDialog';
 import { TagFilterBar } from './TagFilterBar';
-import { RoutingRulesModal } from './RoutingRulesModal';
 import { setWorkerTags } from '../api/client';
 import { useSWRConfig } from 'swr';
 
@@ -44,6 +43,10 @@ interface Props {
   // #109: "Request diagnostics" runs py-spy on the worker and downloads
   // the thread dump. Online-workers only (offline workers can't reply).
   onRequestDiagnostics: (id: string) => void;
+  // TG.9: routing-rules modal is now hoisted to App.tsx so the QueueTab
+  // BLOCKED-badge click can target the same instance. Toolbar button calls
+  // this with no arg → list mode.
+  onOpenRoutingRules: () => void;
 }
 
 function workerPlatformHtml(si: SystemInfo): React.ReactNode {
@@ -250,7 +253,7 @@ function getWorkerSortValue(w: Worker, colId: string): string {
 
 const columnHelper = createColumnHelper<Worker>();
 
-export function WorkersTab({ workers, targets, queue, serverClientVersion, minImageVersion, onRemove, onSetParallelJobs, onCleanCache, onCleanAllCaches, onConnectWorker, onViewLogs, onRequestDiagnostics }: Props) {
+export function WorkersTab({ workers, targets, queue, serverClientVersion, minImageVersion, onRemove, onSetParallelJobs, onCleanCache, onCleanAllCaches, onConnectWorker, onViewLogs, onRequestDiagnostics, onOpenRoutingRules }: Props) {
   // WL.3: lift the actions-dropdown open state out of the TanStack row
   // cell so the 1 Hz SWR poll doesn't tear it down mid-click (bug #2
   // / #71 class — see Design Judgment in CLAUDE.md). Keyed by
@@ -261,8 +264,9 @@ export function WorkersTab({ workers, targets, queue, serverClientVersion, minIm
   const [tagsEditClientId, setTagsEditClientId] = useState<string | null>(null);
   // TG.6 filter pills — selected tag set persisted across reloads.
   const [tagFilter, setTagFilter] = usePersistedState<string[]>('workers-tag-filter', []);
-  // TG.6/TG.8 — routing-rules editor opened from the toolbar.
-  const [rulesModalOpen, setRulesModalOpen] = useState(false);
+  // TG.9: rules modal is now lifted to App.tsx so the QueueTab can also
+  // open it (deep-linked to the rule that fired). Toolbar button calls
+  // onOpenRoutingRules() to flip the App-level state.
   const { mutate } = useSWRConfig();
   // QS.27: persist sort across reloads via localStorage.
   const [sorting, setSorting] = usePersistedState<SortingState>(
@@ -572,7 +576,7 @@ export function WorkersTab({ workers, targets, queue, serverClientVersion, minIm
             {/* TG.6/TG.8 — primary entry point for the routing rules editor.
                 Lives with the workers because that's where the user thinks
                 about routing (per the spec). */}
-            <Button variant="secondary" size="sm" onClick={() => setRulesModalOpen(true)}>
+            <Button variant="secondary" size="sm" onClick={() => onOpenRoutingRules()}>
               Routing rules…
             </Button>
             <DropdownMenu>
@@ -643,12 +647,8 @@ export function WorkersTab({ workers, targets, queue, serverClientVersion, minIm
         </div>
       </div>
 
-      <RoutingRulesModal
-        open={rulesModalOpen}
-        onOpenChange={setRulesModalOpen}
-        targets={targets}
-        workers={workers}
-      />
+      {/* TG.9: RoutingRulesModal moved to App.tsx so the Queue's
+          BLOCKED-badge click can target the same instance. */}
     </div>
   );
 }

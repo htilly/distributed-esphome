@@ -2087,6 +2087,11 @@ async def start_compile(request: web.Request) -> web.Response:
         f" pinned={pinned_client_id}" if pinned_client_id else "",
         _who(request),
     )
+    # TG.3: a freshly-enqueued job whose target has rules with no
+    # eligible online worker should land in BLOCKED, not PENDING.
+    if enqueued > 0:
+        from routing_eligibility import fire_and_forget  # noqa: PLC0415
+        fire_and_forget(request.app)
     return web.json_response({"run_id": run_id, "enqueued": enqueued})
 
 
@@ -2520,6 +2525,9 @@ async def rename_target(request: web.Request) -> web.Response:
         config_hash=_get_head(config_dir),
     )
     logger.info("Enqueued compile+OTA for renamed device %s", new_filename)
+    # TG.3: re-eval the just-enqueued job against current rules.
+    from routing_eligibility import fire_and_forget  # noqa: PLC0415
+    fire_and_forget(request.app)
 
     # AV.2: commit both paths so the rename shows up as a
     # delete-of-old + add-of-new. `git add --all -- <path>` picks up
@@ -2901,6 +2909,9 @@ async def set_worker_tags(request: web.Request) -> web.Response:
         client_id, worker.hostname, normalised, _who(request),
     )
     _broadcast_ws("workers_changed")
+    # TG.3: tag change may unblock or newly-block jobs.
+    from routing_eligibility import fire_and_forget  # noqa: PLC0415
+    fire_and_forget(request.app)
     return web.json_response({"ok": True, "tags": normalised})
 
 
@@ -3004,6 +3015,9 @@ async def create_routing_rule(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=400)
     logger.info("Created routing rule %s (%s)%s", created.id, created.name, _who(request))
     _broadcast_ws("routing_rules_changed")
+    # TG.3: a new rule may push PENDING jobs to BLOCKED.
+    from routing_eligibility import fire_and_forget  # noqa: PLC0415
+    fire_and_forget(request.app)
     return web.json_response(_rule_to_dict_handler(request, created), status=201)
 
 
@@ -3027,6 +3041,9 @@ async def update_routing_rule(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=400)
     logger.info("Updated routing rule %s (%s)%s", updated.id, updated.name, _who(request))
     _broadcast_ws("routing_rules_changed")
+    # TG.3: rule edit may shift jobs PENDING ↔ BLOCKED in either direction.
+    from routing_eligibility import fire_and_forget  # noqa: PLC0415
+    fire_and_forget(request.app)
     return web.json_response(_rule_to_dict_handler(request, updated))
 
 
@@ -3040,6 +3057,9 @@ async def delete_routing_rule(request: web.Request) -> web.Response:
         return web.json_response({"error": "Rule not found"}, status=404)
     logger.info("Deleted routing rule %s%s", rule_id, _who(request))
     _broadcast_ws("routing_rules_changed")
+    # TG.3: a deleted rule may unblock previously-BLOCKED jobs.
+    from routing_eligibility import fire_and_forget  # noqa: PLC0415
+    fire_and_forget(request.app)
     return web.json_response({"ok": True})
 
 

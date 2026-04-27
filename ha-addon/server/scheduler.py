@@ -77,6 +77,9 @@ async def _fire_recurring(target: str) -> None:
         job.schedule_kind = "recurring"
         schedule_history.record(target, datetime.now(timezone.utc), job.id)
         logger.info("Schedule fired for %s: enqueued job %s (version=%s)", target, job.id, version)
+        # TG.3: route the freshly-enqueued job through the rule engine.
+        from routing_eligibility import fire_and_forget  # noqa: PLC0415
+        fire_and_forget(_app)
 
     fresh_meta = read_device_meta(cfg.config_dir, target)
     fresh_meta["schedule_last_run"] = datetime.now(timezone.utc).isoformat()
@@ -124,6 +127,9 @@ async def _fire_once(target: str) -> None:
         job.schedule_kind = "once"
         schedule_history.record(target, datetime.now(timezone.utc), job.id)
         logger.info("One-time schedule fired for %s: enqueued job %s", target, job.id)
+        # TG.3: route the freshly-enqueued job through the rule engine.
+        from routing_eligibility import fire_and_forget  # noqa: PLC0415
+        fire_and_forget(_app)
 
     fresh_meta = read_device_meta(cfg.config_dir, target)
     fresh_meta.pop("schedule_once", None)

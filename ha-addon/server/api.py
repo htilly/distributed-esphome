@@ -165,6 +165,11 @@ async def _register_worker_handler(request: web.Request) -> web.Response:
         image_version=msg.image_version,
         tags=resolved_tags,
     )
+    # TG.3: a new worker (or one re-registering with different tags)
+    # may unblock or newly-block PENDING jobs. Fire-and-forget — the
+    # registration response shouldn't wait on the sweep.
+    from routing_eligibility import fire_and_forget  # noqa: PLC0415
+    fire_and_forget(request.app)
     return web.json_response(RegisterResponse(client_id=client_id).model_dump(exclude_none=True))
 
 
@@ -253,6 +258,9 @@ async def _deregister_handler(request: web.Request) -> web.Response:
     hostname = worker.hostname if worker else "?"
     if registry.remove(msg.client_id):
         logger.info("Worker %s [%s] deregistered (clean shutdown)", hostname, msg.client_id)
+        # TG.3: a worker leaving the pool may push PENDING jobs to BLOCKED.
+        from routing_eligibility import fire_and_forget  # noqa: PLC0415
+        fire_and_forget(request.app)
         return web.json_response(OkResponse().model_dump())
     return _protocol_error("unknown_client_id", status=404)
 

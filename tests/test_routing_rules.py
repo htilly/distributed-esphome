@@ -28,8 +28,10 @@ from routing import (
     Rule,
     RoutingRuleError,
     RoutingRuleStore,
+    _summarize_clauses,
     evaluate_clause,
     evaluate_rule,
+    find_blocking_rule,
     is_eligible,
 )
 
@@ -367,3 +369,87 @@ def test_effective_rules_compose_global_with_device_extra() -> None:
     assert is_eligible(["kitchen"], ["kitchen"], rules) is False
     # Worker has both → both rules pass.
     assert is_eligible(["kitchen"], ["kitchen", "fast"], rules) is True
+
+
+# ---------------------------------------------------------------------------
+# TG.3 — find_blocking_rule + clause summary
+# ---------------------------------------------------------------------------
+
+
+def test_summarize_clauses_each_op() -> None:
+    assert _summarize_clauses([]) == "(any)"
+    assert _summarize_clauses([Clause(op="all_of", tags=["a", "b"])]) == "all of [a, b]"
+    assert _summarize_clauses([Clause(op="any_of", tags=["a"])]) == "any of [a]"
+    assert _summarize_clauses([Clause(op="none_of", tags=["x"])]) == "none of [x]"
+    # Multi-clause sides AND together in the rendered summary.
+    summary = _summarize_clauses([
+        Clause(op="all_of", tags=["kitchen"]),
+        Clause(op="none_of", tags=["dev"]),
+    ])
+    assert summary == "all of [kitchen] AND none of [dev]"
+
+
+def test_find_blocking_rule_eligible_when_some_worker_passes() -> None:
+    rules = [_rule(device_tags=("kitchen",), worker_tags=("kitchen",))]
+    eligible, reason = find_blocking_rule(
+        device_tags=["kitchen"],
+        worker_tags_list=[["kitchen", "fast"], ["office"]],
+        rules=rules,
+    )
+    assert eligible is True
+    assert reason is None
+
+
+def test_find_blocking_rule_surfaces_first_applicable_rule() -> None:
+    """Two rules apply to the device; the first one no worker satisfies is the blocker."""
+    rule_a = Rule(
+        id="needs-kitchen",
+        name="Kitchen build only",
+        severity="required",
+        device_match=[Clause(op="all_of", tags=["kitchen"])],
+        worker_match=[Clause(op="all_of", tags=["kitchen"])],
+    )
+    rule_b = Rule(
+        id="needs-fast",
+        name="Kitchen needs fast",
+        severity="required",
+        device_match=[Clause(op="all_of", tags=["kitchen"])],
+        worker_match=[Clause(op="all_of", tags=["fast"])],
+    )
+    # Worker has fast but not kitchen → rule_a fires (no kitchen worker).
+    eligible, reason = find_blocking_rule(
+        device_tags=["kitchen"],
+        worker_tags_list=[["fast"]],
+        rules=[rule_a, rule_b],
+    )
+    assert eligible is False
+    assert reason == {
+        "rule_id": "needs-kitchen",
+        "rule_name": "Kitchen build only",
+        "summary": "all of [kitchen]",
+    }
+
+
+def test_find_blocking_rule_skips_non_applicable_rules() -> None:
+    """A rule whose device_match doesn't apply never blocks, even if no worker passes."""
+    # This rule applies only to "office" devices, but the device is "kitchen".
+    irrelevant = Rule(
+        id="office-rule",
+        name="Office",
+        severity="required",
+        device_match=[Clause(op="all_of", tags=["office"])],
+        worker_match=[Clause(op="all_of", tags=["nonexistent-tag"])],
+    )
+    eligible, reason = find_blocking_rule(
+        device_tags=["kitchen"],
+        worker_tags_list=[["kitchen"]],
+        rules=[irrelevant],
+    )
+    assert eligible is True
+    assert reason is None
+
+
+def test_find_blocking_rule_eligible_with_no_rules() -> None:
+    eligible, reason = find_blocking_rule(["a"], [["b"]], [])
+    assert eligible is True
+    assert reason is None

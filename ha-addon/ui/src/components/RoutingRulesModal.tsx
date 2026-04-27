@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import useSWR from 'swr';
 import { toast } from 'sonner';
 import { Trash2, Pencil, Plus } from 'lucide-react';
@@ -42,6 +42,10 @@ interface Props {
    *  surface uses. */
   targets: Target[];
   workers: Worker[];
+  /** TG.9: when set on the open transition, jump straight into edit
+   *  mode for the matching rule (deep-link from the Queue tab's
+   *  BLOCKED-badge click). Empty string / null ⇒ open in list mode. */
+  initialEditRuleId?: string | null;
 }
 
 type Mode =
@@ -70,7 +74,7 @@ function clauseSummary(clauses: RoutingClause[]): React.ReactNode {
   );
 }
 
-export function RoutingRulesModal({ open, onOpenChange, targets, workers }: Props) {
+export function RoutingRulesModal({ open, onOpenChange, targets, workers, initialEditRuleId }: Props) {
   const [mode, setMode] = useState<Mode>({ kind: 'list' });
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
 
@@ -79,6 +83,22 @@ export function RoutingRulesModal({ open, onOpenChange, targets, workers }: Prop
     getRoutingRules,
     { revalidateOnFocus: false },
   );
+
+  // TG.9: when the modal opens with an initialEditRuleId, jump straight
+  // into edit-mode for that rule once the rule list has loaded. Falls
+  // back to list-mode if the rule was deleted between the badge click
+  // and the modal mount.
+  useEffect(() => {
+    if (!open || !initialEditRuleId || rules.length === 0) return;
+    const rule = rules.find((r) => r.id === initialEditRuleId);
+    if (rule && (mode.kind !== 'edit' || mode.rule.id !== rule.id)) {
+      setMode({ kind: 'edit', rule });
+    }
+    // Intentional: fire on open + when rules arrive. Re-jumping into the
+    // builder while the user is mid-edit would clobber typing, so we
+    // gate on the mode mismatch above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, initialEditRuleId, rules]);
 
   // Reset mode on each open transition so a half-finished builder
   // session doesn't reappear when the user reopens the modal.

@@ -45,11 +45,20 @@ interface Props {
    * panel preset to from=config_hash, to=Current. Same flow as the
    * Log modal's "Diff since compile" button. */
   onOpenHistoryDiff: (target: string, fromHash: string) => void;
+  /** TG.9: BLOCKED-badge click opens the routing-rules editor with the
+   *  offending rule pre-selected. The Queue passes
+   *  ``job.blocked_reason.rule_id`` (empty string if the reason
+   *  surfaces a synthetic combined-rules placeholder). */
+  onOpenRoutingRule: (ruleId: string) => void;
 }
 
 const STATE_ORDER: Record<string, number> = {
   working: 0,
   pending: 1,
+  // TG.9: BLOCKED sorts adjacent to pending — same "in-flight, not yet
+  // claimed" position in the queue, but with a distinct red-orange
+  // badge so the user notices the constraint.
+  blocked: 1.5,
   timed_out: 2,
   failed: 3,
   cancelled: 4,
@@ -84,6 +93,7 @@ export function QueueTab({
   onOpenLog,
   onEdit,
   onOpenHistoryDiff,
+  onOpenRoutingRule,
 }: Props) {
   // QS.27: persist sort across reloads via localStorage.
   const [sorting, setSorting] = usePersistedState<SortingState>(
@@ -170,6 +180,25 @@ export function QueueTab({
       header: ({ column }) => <SortHeader label="State" column={column} />,
       cell: ({ row: { original: job } }) => {
         const { label: badgeLabel, cls: badgeCls } = getJobBadge(job);
+        // TG.9: when the job is BLOCKED, render the badge as a button
+        // that opens the routing-rules editor pre-selected to the rule
+        // that fired. Tooltip surfaces the reason inline so a hover
+        // tells the user *why* this isn't running yet.
+        if (job.state === 'blocked' && job.blocked_reason) {
+          const r = job.blocked_reason;
+          const tooltip = `Blocked by rule '${r.rule_name}' — no online worker matches ${r.summary}. Click to edit the rule.`;
+          return (
+            <button
+              type="button"
+              className={`${badgeCls} cursor-pointer hover:brightness-125`}
+              title={tooltip}
+              aria-label={tooltip}
+              onClick={() => onOpenRoutingRule(r.rule_id)}
+            >
+              {badgeLabel}
+            </button>
+          );
+        }
         return (
           <span className="inline-flex items-center gap-1.5">
             <span className={badgeCls}>{badgeLabel}</span>
@@ -487,7 +516,7 @@ export function QueueTab({
       },
     }),
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [workers, onCancel, onRetry, onClear, onOpenLog, onEdit, onOpenHistoryDiff, targetNameMap, downloadMenuOpenJobId, versioningEnabled]);
+  ], [workers, onCancel, onRetry, onClear, onOpenLog, onEdit, onOpenHistoryDiff, onOpenRoutingRule, targetNameMap, downloadMenuOpenJobId, versioningEnabled]);
 
   const table = useReactTable({
     data: filteredQueue,

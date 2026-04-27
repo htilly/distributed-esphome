@@ -65,6 +65,7 @@ import {
   DialogTitle,
 } from './components/ui/dialog';
 import { WorkersTab } from './components/WorkersTab';
+import { RoutingRulesModal } from './components/RoutingRulesModal';
 import type { Device, Job, Target, Worker } from './types';
 import { setDateFormatPref, setTimeFormatPref, stripYaml } from './utils';
 import { downloadTextFile } from './utils/terminal';
@@ -297,6 +298,11 @@ export default function App() {
   // CD.4-CD.6: shared "create / duplicate" modal state. null = closed, object = open.
   // sourceTarget is set when duplicating an existing device.
   const [newDeviceModal, setNewDeviceModal] = useState<{ mode: 'new' | 'duplicate'; sourceTarget?: string } | null>(null);
+  // TG.9: lifted out of WorkersTab so the Queue's BLOCKED-badge click can
+  // also open it (deep-linked to the offending rule). null = closed, ''
+  // = open in list mode, '<id>' = open with that rule pre-selected for
+  // edit. The QueueTab's badge passes job.blocked_reason.rule_id.
+  const [routingRulesEditId, setRoutingRulesEditId] = useState<string | null>(null);
   // #42: targets that were just created via the NewDeviceModal and haven't
   // been saved yet. If the editor closes without a successful save, the
   // stub/duplicated file is deleted so cancelled-out creates don't leave
@@ -829,6 +835,9 @@ export default function App() {
               setHistoryFromHash(fromHash);
               setHistoryTarget(target);
             }}
+            // TG.9: BLOCKED-badge click opens the routing-rules editor
+            // pre-selected to the rule that fired.
+            onOpenRoutingRule={(ruleId) => setRoutingRulesEditId(ruleId)}
           />
         )}
         {activeTab === 'workers' && (
@@ -845,6 +854,7 @@ export default function App() {
             onConnectWorker={(preset) => { setConnectModalPreset(preset ?? null); setConnectModalOpen(true); }}
             onViewLogs={setLogWorkerId}
             onRequestDiagnostics={handleRequestWorkerDiagnostics}
+            onOpenRoutingRules={() => setRoutingRulesEditId('')}
           />
         )}
         {activeTab === 'schedules' && (
@@ -1170,6 +1180,18 @@ export default function App() {
           onToast={addToast}
         />
       )}
+
+      {/* TG.9: shared routing-rules editor — same instance is reached
+          from the Workers tab toolbar AND the Queue tab BLOCKED-badge
+          click. ``initialEditRuleId`` lets the Queue path deep-link to
+          the rule that's blocking the job. */}
+      <RoutingRulesModal
+        open={routingRulesEditId !== null}
+        onOpenChange={(o) => { if (!o) setRoutingRulesEditId(null); }}
+        targets={targets}
+        workers={workers}
+        initialEditRuleId={routingRulesEditId || null}
+      />
     </>
   );
 }

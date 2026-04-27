@@ -350,4 +350,12 @@ export interface Job {
   firmware_variants?: string[];
   ota_result?: string;
   log?: string;
+  /** TG.3: when state="blocked", the rule that disqualified every online worker.
+   *  Drives the QueueTab BLOCKED-badge tooltip and the click-through to the
+   *  routing-rules editor. Cleared when the job leaves BLOCKED. */
+  blocked_reason?: {
+    rule_id: string;
+    rule_name: string;
+    summary: string;
+  } | null;
 }

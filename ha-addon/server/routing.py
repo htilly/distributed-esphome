@@ -132,6 +132,69 @@ def is_eligible(
     return all(evaluate_rule(r, device_tags, worker_tags) for r in rules)
 
 
+def _summarize_clauses(clauses: list[Clause]) -> str:
+    """Human-readable one-line summary of a clause list (worker_match / device_match).
+
+    Used in :class:`Job.blocked_reason` to populate the Queue tooltip
+    (TG.9): "Blocked by rule '{name}' — no online worker matches `{summary}`."
+    """
+    if not clauses:
+        return "(any)"
+    parts: list[str] = []
+    for c in clauses:
+        joined = ", ".join(c.tags)
+        if c.op == "all_of":
+            parts.append(f"all of [{joined}]")
+        elif c.op == "any_of":
+            parts.append(f"any of [{joined}]")
+        elif c.op == "none_of":
+            parts.append(f"none of [{joined}]")
+        else:
+            parts.append(f"{c.op} [{joined}]")
+    return " AND ".join(parts)
+
+
+def find_blocking_rule(
+    device_tags: list[str],
+    worker_tags_list: list[list[str]],
+    rules: list[Rule],
+) -> tuple[bool, dict | None]:
+    """TG.3 helper for ``re_evaluate_routing``.
+
+    Decides whether *device* has at least one eligible worker among the
+    candidates in *worker_tags_list*. Returns ``(True, None)`` when so;
+    otherwise ``(False, blocked_reason)`` where ``blocked_reason`` names
+    the *first applicable rule* that no worker satisfies — same surface
+    the Queue's BLOCKED tooltip renders.
+
+    Conditional semantics: a rule whose ``device_match`` doesn't apply to
+    *device* never blocks anyone, no matter how strict its ``worker_match``.
+    """
+    if any(is_eligible(device_tags, wt, rules) for wt in worker_tags_list):
+        return (True, None)
+    dt = set(device_tags)
+    for rule in rules:
+        if not _matches_side(rule.device_match, dt):
+            continue  # rule doesn't apply to this device
+        # Rule applies. Does any worker match its worker_match?
+        if any(_matches_side(rule.worker_match, set(wt)) for wt in worker_tags_list):
+            continue  # not the blocker — some worker satisfies this rule
+        return (False, {
+            "rule_id": rule.id,
+            "rule_name": rule.name,
+            "summary": _summarize_clauses(rule.worker_match),
+        })
+    # Defensive: every rule on the (device, worker) graph has someone
+    # satisfying it, yet no single worker satisfies all of them. The
+    # rules ANDed together produced an empty intersection. Return a
+    # generic reason that points at the rule list as a whole.
+    return (False, {
+        "rule_id": "",
+        "rule_name": "(combined rules)",
+        "summary": "no online worker matches every applicable rule",
+    })
+
+
 # ---------------------------------------------------------------------------
 # Validation — used by both the store and the API layer (TG.4)
 # ---------------------------------------------------------------------------

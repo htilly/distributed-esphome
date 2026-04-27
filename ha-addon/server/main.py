@@ -1635,6 +1635,13 @@ def create_app() -> web.Application:
         # ago get evicted when they fall out of budget.
         app["firmware_budget_task"] = asyncio.create_task(firmware_budget_enforcer(app))
 
+        # TG.3: defensive 30-s routing-rule watchdog. Backstop against
+        # missed explicit triggers (registry mutations, rule CRUD,
+        # enqueue) — when those fire correctly this sees zero state
+        # changes and stays quiet.
+        from routing_eligibility import routing_watchdog  # noqa: PLC0415
+        app["routing_watchdog_task"] = asyncio.create_task(routing_watchdog(app))
+
         # #87: APScheduler replaces the DIY schedule_checker
         import scheduler as scheduler_module  # noqa: PLC0415
         scheduler_module.start(app)
