@@ -403,9 +403,19 @@ async def get_next_job(request: web.Request) -> web.Response:
     else:
         selection_reason_hint = "first_available"
 
+    # Bug #95: build a per-worker routing-rule eligibility predicate
+    # so PENDING jobs can be filtered by *this* worker's tags. Without
+    # it, claim_next only filters out BLOCKED jobs — meaning any
+    # online worker could grab a PENDING job even when only a subset
+    # of the fleet satisfies the required rule.
+    from routing_eligibility import build_claim_eligibility  # noqa: PLC0415
+    worker_tags_list = list(worker.tags or []) if worker else []
+    is_eligible_for = build_claim_eligibility(request.app, worker_tags_list)
+
     job = await queue.claim_next(client_id, worker_id, hostname=hostname,
                                   faster_idle_worker_exists=should_defer,
-                                  selection_reason_hint=selection_reason_hint)
+                                  selection_reason_hint=selection_reason_hint,
+                                  is_eligible=is_eligible_for)
     if job is None:
         return web.Response(status=204)
 

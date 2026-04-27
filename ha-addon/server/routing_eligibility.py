@@ -21,13 +21,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable
 
 from routing import (
     Rule,
     RoutingRuleError,
     _clause_from_dict,
     find_blocking_rule,
+    is_eligible,
 )
 
 if TYPE_CHECKING:
@@ -36,6 +37,8 @@ if TYPE_CHECKING:
     from job_queue import Job, JobQueue
     from registry import WorkerRegistry
     from routing import RoutingRuleStore
+
+    EligibilityPredicate = Callable[[Job], bool]
 
 logger = logging.getLogger(__name__)
 
@@ -246,11 +249,73 @@ def fire_and_forget(app: "web.Application") -> None:
     loop.create_task(re_evaluate_routing(app))
 
 
+def build_claim_eligibility(
+    app: "web.Application", worker_tags: list[str],
+) -> Callable[["Job"], bool]:
+    """Bug #95 — per-worker eligibility predicate for ``JobQueue.claim_next``.
+
+    The fleet-wide :func:`re_evaluate_routing` only decides PENDING vs.
+    BLOCKED ("can ANY worker take this?"). It cannot stop the *wrong*
+    worker from grabbing a PENDING job — that's the per-worker decision
+    this predicate adds. ``api.py``'s claim handler builds one predicate
+    per HTTP request (one closure per polling worker call) and feeds it
+    to ``claim_next`` so the queue can skip jobs whose required rules
+    don't match this caller.
+
+    Cheap path: when no global rules are defined, the predicate
+    short-circuits without reading any device YAML. With rules, each
+    unique target is read at most once per claim_next call (the cache
+    survives the inner loop because the closure captures it).
+    """
+    rule_store: "RoutingRuleStore | None" = app.get("routing_rule_store")
+    cfg = app.get("config")
+    if rule_store is None or cfg is None:
+        return lambda _job: True
+    global_rules = rule_store.list_rules()
+
+    # Per-call cache so two PENDING jobs against the same target
+    # don't double-read the YAML metadata block.
+    cache: dict[str, tuple[list[str], list[Rule]]] = {}
+    from scanner import read_device_meta  # noqa: PLC0415
+
+    def _resolve(target: str) -> tuple[list[str], list[Rule]]:
+        cached = cache.get(target)
+        if cached is not None:
+            return cached
+        try:
+            meta = read_device_meta(cfg.config_dir, target)
+        except Exception:
+            logger.debug("read_device_meta failed for %s", target, exc_info=True)
+            meta = {}
+        device_tags = _device_tags_from_meta(meta)
+        effective = global_rules + _device_routing_extra(meta)
+        cache[target] = (device_tags, effective)
+        return device_tags, effective
+
+    def check(job: "Job") -> bool:
+        # Cheapest path first — most fleets have zero global rules and
+        # zero per-device routing_extra, so we never touch the YAML.
+        if not global_rules:
+            # Still need read_device_meta to discover routing_extra; do
+            # it lazily and only when no global rules narrow first.
+            device_tags, effective = _resolve(job.target)
+            if not effective:
+                return True
+            return is_eligible(device_tags, worker_tags, effective)
+        device_tags, effective = _resolve(job.target)
+        if not effective:
+            return True
+        return is_eligible(device_tags, worker_tags, effective)
+
+    return check
+
+
 # Re-export for callers that prefer the symbol on this module.
 __all__ = [
     "re_evaluate_routing",
     "routing_watchdog",
     "fire_and_forget",
+    "build_claim_eligibility",
 ]
 
 

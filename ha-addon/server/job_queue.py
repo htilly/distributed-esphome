@@ -92,7 +92,7 @@ class Job:
     # #92: when scheduled, distinguish recurring (cron) from one-time fires so
     # the Queue tab can show which kind triggered the job. None for user-triggered.
     schedule_kind: Optional[str] = None  # "recurring" | "once" | None
-    # Bug 27: True when the enqueue came from Home Assistant's
+    # Bug 28: True when the enqueue came from Home Assistant's
     # ``esphome_fleet.compile`` / similar service action (identified by
     # the ``esphome_fleet_integration`` system-token Bearer in ha_auth).
     # Lets the Queue tab's Triggered column distinguish HA-driven
@@ -539,6 +539,7 @@ class JobQueue:
         hostname: Optional[str] = None,
         faster_idle_worker_exists: bool = False,
         selection_reason_hint: Optional[str] = None,
+        is_eligible: Optional[Callable[["Job"], bool]] = None,
     ) -> Optional[Job]:
         """
         Atomically claim the next pending job for *client_id*.
@@ -555,6 +556,19 @@ class JobQueue:
         worker was determined at enqueue time, not at claim time. The
         final reason is persisted on the Job so the Queue + history
         tables can surface it.
+
+        Bug #95 (1.7.0): *is_eligible* is an optional per-worker
+        eligibility predicate — caller passes a closure that returns
+        True iff this client_id satisfies all routing rules for the
+        candidate job. Without it, ``claim_next`` only filters BLOCKED
+        jobs, which means a PENDING job (= "at least one fleet worker
+        is eligible") could still be claimed by an *ineligible* worker
+        — exactly the bug the user reported (RAD GDO devices were
+        running on debian + macos workers despite a windows-only
+        rule). Pinned jobs bypass the check: pinning is an explicit
+        user override, and a re-eval already let the job through to
+        PENDING. Mismatched pin + rule is a user-visible conflict, not
+        something we silently strand the job for.
 
         Returns the claimed Job or None if the queue is empty.
         """
@@ -582,6 +596,18 @@ class JobQueue:
                     continue
                 # Skip follow-ups whose predecessor is still WORKING.
                 if job.is_followup and job.target in blocked_targets:
+                    continue
+                # Bug #95: per-worker routing-rule eligibility check.
+                # Pinned jobs bypass — pinning is the user's explicit
+                # override; re-eval already cleared the job to PENDING
+                # based on fleet-wide eligibility. Without this filter,
+                # any worker can claim a PENDING job even when only a
+                # subset of the fleet satisfies the required rule.
+                if (
+                    is_eligible is not None
+                    and not job.pinned_client_id
+                    and not is_eligible(job)
+                ):
                     continue
                 job.state = JobState.WORKING
                 # Once claimed, a follow-up is no longer "queued behind

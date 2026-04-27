@@ -259,3 +259,122 @@ async def test_re_eval_ignores_offline_workers(
     changed = await re_evaluate_routing(app)
     assert changed == 1
     assert job.state == JobState.BLOCKED
+
+
+# ---------------------------------------------------------------------------
+# Bug #95 — build_claim_eligibility: per-worker predicate for claim_next
+# ---------------------------------------------------------------------------
+
+
+async def test_build_claim_eligibility_no_rules_short_circuits(
+    tmp_path: Path, config_dir: Path,
+) -> None:
+    """When no global rules and no routing_extra exist, every worker is
+    eligible for every job — the predicate must return True without
+    touching the YAML metadata block (the cache walks `_resolve` only
+    when needed)."""
+    from routing_eligibility import build_claim_eligibility
+    app = await _make_app(tmp_path, config_dir)
+    _write_yaml(config_dir, "kitchen.yaml", tags=["kitchen"])
+    job = await _enqueue(app, "kitchen.yaml")
+
+    check = build_claim_eligibility(app, worker_tags=["any"])
+    assert check(job) is True
+
+
+async def test_build_claim_eligibility_rejects_ineligible_worker(
+    tmp_path: Path, config_dir: Path,
+) -> None:
+    """The reproduction of the user-reported bug: the rule says ratgdo
+    devices need a ``windows``-tagged worker; a debian worker calling
+    claim_next must be told no."""
+    from routing_eligibility import build_claim_eligibility
+    app = await _make_app(tmp_path, config_dir)
+    _write_yaml(config_dir, "garage-door-big.yaml", tags=["ratgdo"])
+    job = await _enqueue(app, "garage-door-big.yaml")
+    app["routing_rule_store"].create_rule(Rule(
+        id="garage-rule",
+        name="Garage doors on Windows",
+        severity="required",
+        device_match=[Clause(op="any_of", tags=["ratgdo"])],
+        worker_match=[Clause(op="all_of", tags=["windows"])],
+    ))
+
+    debian_check = build_claim_eligibility(app, worker_tags=["debian"])
+    assert debian_check(job) is False
+
+    windows_check = build_claim_eligibility(app, worker_tags=["windows"])
+    assert windows_check(job) is True
+
+
+async def test_build_claim_eligibility_honours_routing_extra(
+    tmp_path: Path, config_dir: Path,
+) -> None:
+    """Per-device additive rule (``routing_extra`` in the YAML metadata
+    block) must also gate the per-worker claim — same composition rule
+    re_evaluate_routing follows."""
+    from routing_eligibility import build_claim_eligibility
+    app = await _make_app(tmp_path, config_dir)
+    # No global rules; the per-device routing_extra alone constrains.
+    _write_yaml(
+        config_dir, "garage-door-big.yaml",
+        tags=["ratgdo"],
+        routing_extra=[{
+            "id": "extra1",
+            "name": "Per-device rule",
+            "severity": "required",
+            "device_match": [{"op": "any_of", "tags": ["ratgdo"]}],
+            "worker_match": [{"op": "all_of", "tags": ["windows"]}],
+        }],
+    )
+    job = await _enqueue(app, "garage-door-big.yaml")
+
+    debian_check = build_claim_eligibility(app, worker_tags=["debian"])
+    assert debian_check(job) is False
+
+    windows_check = build_claim_eligibility(app, worker_tags=["windows"])
+    assert windows_check(job) is True
+
+
+async def test_build_claim_eligibility_caches_target_meta_within_call(
+    tmp_path: Path, config_dir: Path,
+) -> None:
+    """A single claim_next call may iterate many PENDING jobs; the
+    closure cache must avoid re-reading the same target's YAML for
+    each one. We assert the cache by counting ``read_device_meta``
+    calls via monkeypatch."""
+    from routing_eligibility import build_claim_eligibility
+    app = await _make_app(tmp_path, config_dir)
+    _write_yaml(config_dir, "garage-door-big.yaml", tags=["ratgdo"])
+    app["routing_rule_store"].create_rule(Rule(
+        id="r", name="r", severity="required",
+        device_match=[Clause(op="any_of", tags=["ratgdo"])],
+        worker_match=[Clause(op="all_of", tags=["windows"])],
+    ))
+
+    job = await _enqueue(app, "garage-door-big.yaml")
+
+    import scanner
+    call_count = {"n": 0}
+    real = scanner.read_device_meta
+
+    def counting(*args, **kwargs):
+        call_count["n"] += 1
+        return real(*args, **kwargs)
+
+    # build_claim_eligibility does ``from scanner import read_device_meta``
+    # inside the closure each call; patch the scanner module attribute so
+    # the rebound name resolves to our counter.
+    import pytest as _pytest
+    monkeypatch = _pytest.MonkeyPatch()
+    monkeypatch.setattr(scanner, "read_device_meta", counting)
+    try:
+        check = build_claim_eligibility(app, worker_tags=["debian"])
+        assert check(job) is False
+        # Second evaluation against the same target — cache must hit.
+        assert check(job) is False
+    finally:
+        monkeypatch.undo()
+
+    assert call_count["n"] == 1, \
+        f"read_device_meta called {call_count['n']} times for one target — cache miss"

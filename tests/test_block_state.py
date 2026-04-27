@@ -178,3 +178,76 @@ async def test_re_evaluate_clears_stale_reason_on_pending(queue: JobQueue) -> No
 
     await queue.re_evaluate_routing(check)
     assert queue.get(job.id).blocked_reason is None
+
+
+# ---------------------------------------------------------------------------
+# Bug #95 — claim_next per-worker eligibility filter
+# ---------------------------------------------------------------------------
+
+
+async def test_claim_next_skips_jobs_when_predicate_rejects(queue: JobQueue) -> None:
+    """A PENDING job with at least one fleet-eligible worker stays PENDING
+    (re_evaluate's correct call) — but the *ineligible* worker calling
+    claim_next must not snatch it. Without the per-worker check, every
+    online worker could grab the job, defeating required rules."""
+    job = await _enqueue_pending(queue, target="garage-door-big.yaml")
+
+    def is_eligible(j: Job) -> bool:
+        # Stand-in for "this worker's tags don't satisfy the rule for j".
+        return False
+
+    claimed = await queue.claim_next(
+        client_id="debian-worker", worker_id=1, hostname="local-worker",
+        is_eligible=is_eligible,
+    )
+    assert claimed is None
+    # Job stayed PENDING — the eligible worker can still grab it later.
+    assert queue.get(job.id).state == JobState.PENDING
+
+
+async def test_claim_next_accepts_jobs_when_predicate_passes(queue: JobQueue) -> None:
+    """Symmetry — a passing predicate doesn't block the claim path."""
+    job = await _enqueue_pending(queue, target="garage-door-big.yaml")
+
+    claimed = await queue.claim_next(
+        client_id="windows-worker", worker_id=1, hostname="OPTIPLEX-7",
+        is_eligible=lambda _j: True,
+    )
+    assert claimed is not None
+    assert claimed.id == job.id
+    assert queue.get(job.id).state == JobState.WORKING
+
+
+async def test_claim_next_predicate_bypassed_for_pinned(queue: JobQueue) -> None:
+    """Pinned jobs are the user's explicit override — even an ineligible
+    pinned target should be claimable by the pinned worker. (Mismatched
+    pin + rule is a user-visible conflict, not something we silently
+    strand the job for.)"""
+    job = await queue.enqueue(
+        target="garage-door-big.yaml",
+        esphome_version="2026.3.2",
+        run_id="r1",
+        timeout_seconds=300,
+        pinned_client_id="debian-worker",
+    )
+    assert job is not None
+
+    claimed = await queue.claim_next(
+        client_id="debian-worker", worker_id=1, hostname="local-worker",
+        # Predicate would normally reject this debian worker for ratgdo
+        # devices, but the pin bypasses the eligibility filter.
+        is_eligible=lambda _j: False,
+    )
+    assert claimed is not None
+    assert claimed.id == job.id
+
+
+async def test_claim_next_predicate_omitted_is_backwards_compatible(queue: JobQueue) -> None:
+    """Callers that don't supply ``is_eligible`` keep the old behaviour
+    (no per-worker filtering)."""
+    job = await _enqueue_pending(queue, target="anything.yaml")
+    claimed = await queue.claim_next(
+        client_id="any-worker", worker_id=1, hostname="any-host",
+    )
+    assert claimed is not None
+    assert claimed.id == job.id
