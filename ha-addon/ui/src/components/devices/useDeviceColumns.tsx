@@ -113,6 +113,24 @@ function formatAddressSource(source: AddressSource | null | undefined): string |
   }
 }
 
+// UD.1: hover-explain *how* the device's address was discovered, not
+// just a raw enum value. Distinct copy per source so a user reading
+// "via ARP" understands it's a fallback that fired because mDNS came up
+// empty (the most common live confusion in 1.6.x support threads).
+function formatAddressSourceTooltip(source: AddressSource | null | undefined): string | null {
+  switch (source) {
+    case 'mdns': return 'Detected via mDNS — the device advertises itself on the local network with the hostname from the YAML.';
+    case 'wifi_use_address': return 'From wifi.use_address in the device YAML — overrides hostname-based discovery.';
+    case 'ethernet_use_address': return 'From ethernet.use_address in the device YAML — overrides hostname-based discovery.';
+    case 'openthread_use_address': return 'From openthread.use_address in the device YAML — overrides hostname-based discovery.';
+    case 'wifi_static_ip': return 'From wifi.manual_ip.static_ip in the device YAML — the OTA upload targets this fixed address.';
+    case 'ethernet_static_ip': return 'From ethernet.manual_ip.static_ip in the device YAML — the OTA upload targets this fixed address.';
+    case 'mdns_default': return null;
+    case 'arp': return 'Detected via ARP scan of the local network — mDNS came up empty, so the add-on broadcast an ARP probe and matched the MAC against the device.';
+    default: return null;
+  }
+}
+
 // --- The hook --------------------------------------------------------------
 
 const columnHelper = createColumnHelper<Target>();
@@ -319,7 +337,7 @@ export function useDeviceColumns(options: Options) {
             {sourceLabel && (
               <div
                 className="text-[10px] text-[var(--text-muted)] font-sans"
-                title={`Address source: ${t.address_source}`}
+                title={formatAddressSourceTooltip(t.address_source) ?? `Address source: ${t.address_source}`}
               >
                 {sourceLabel}
               </div>

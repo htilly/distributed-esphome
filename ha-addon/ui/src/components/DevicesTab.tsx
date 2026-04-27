@@ -216,6 +216,24 @@ function formatAddressSource(source: AddressSource | null | undefined): string |
   }
 }
 
+// UD.1: explanatory hover copy mirrored from useDeviceColumns.tsx for
+// the unmanaged-row IP cell. Both surfaces should hover-explain the
+// detection mechanism (especially ARP) instead of surfacing the raw
+// enum.
+function formatAddressSourceTooltip(source: AddressSource | null | undefined): string | null {
+  switch (source) {
+    case 'mdns': return 'Detected via mDNS — the device advertises itself on the local network with the hostname from the YAML.';
+    case 'wifi_use_address': return 'From wifi.use_address in the device YAML — overrides hostname-based discovery.';
+    case 'ethernet_use_address': return 'From ethernet.use_address in the device YAML — overrides hostname-based discovery.';
+    case 'openthread_use_address': return 'From openthread.use_address in the device YAML — overrides hostname-based discovery.';
+    case 'wifi_static_ip': return 'From wifi.manual_ip.static_ip in the device YAML — the OTA upload targets this fixed address.';
+    case 'ethernet_static_ip': return 'From ethernet.manual_ip.static_ip in the device YAML — the OTA upload targets this fixed address.';
+    case 'mdns_default': return null;
+    case 'arp': return 'Detected via ARP scan of the local network — mDNS came up empty, so the add-on broadcast an ARP probe and matched the MAC against the device.';
+    default: return null;
+  }
+}
+
 // QS.19: RenameModal + DeleteModal live in ./devices/DeviceTableModals.
 // RenameModal is re-exported so App.tsx's existing import path still works.
 export { RenameModal };
@@ -830,11 +848,10 @@ function UnmanagedRow({ device: d, isVisible }: { device: Device; isVisible: (co
           {(sourceLabel || d.ha_configured) && (
             <div
               className="text-[10px] text-[var(--text-muted)] font-sans"
-              title={
-                d.ha_configured
-                  ? `Address source: ${d.address_source ?? 'unknown'} · Home Assistant confirms this device exists`
-                  : `Address source: ${d.address_source ?? 'unknown'}`
-              }
+              title={(() => {
+                const base = formatAddressSourceTooltip(d.address_source) ?? `Address source: ${d.address_source ?? 'unknown'}`;
+                return d.ha_configured ? `${base} · Home Assistant confirms this device exists.` : base;
+              })()}
             >
               {[sourceLabel, d.ha_configured ? 'in HA' : null].filter(Boolean).join(' · ')}
             </div>

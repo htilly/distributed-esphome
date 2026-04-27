@@ -347,6 +347,42 @@ for f in tests/test_integration_*.py; do
 done
 
 # -----------------------------------------------------------------------------
+# (PY-10b / CI.5) Skipped-integration-test ratio.
+#
+# PY-10 above guarantees non-_logic test_integration_*.py files import the
+# HA custom-integration pytest plugin. That makes them *real* tests on
+# paper — but the invariant doesn't catch a future regression where every
+# real test gets ``@pytest.mark.skip``-decorated and the plugin import is
+# the only honest part left. Same coverage-mirage failure mode IT.1
+# documented for the mock-based files.
+#
+# Rule: across every non-_logic test_integration_*.py file, count
+# ``@pytest.mark.skip`` decorators vs total ``def test_`` /
+# ``async def test_`` declarations. If skip / total > 50 %, fail.
+# Empty file set is a pass (no integration suite at all → not this
+# invariant's problem).
+# -----------------------------------------------------------------------------
+rule_count=$((rule_count + 1))
+total_tests=0
+total_skips=0
+for f in tests/test_integration_*.py; do
+    [[ -f "$f" ]] || continue
+    if [[ "$f" == *"_logic.py" ]]; then
+        continue
+    fi
+    file_tests=$(grep -cE '^(async )?def test_' "$f")
+    file_skips=$(grep -cE '@pytest\.mark\.skip' "$f")
+    total_tests=$((total_tests + file_tests))
+    total_skips=$((total_skips + file_skips))
+done
+if [[ $total_tests -gt 0 ]]; then
+    # Bash integer math — compare 100*skips vs 50*tests to avoid floats.
+    if [[ $((total_skips * 100)) -gt $((total_tests * 50)) ]]; then
+        fail "#PY-10b" "Skipped-test ratio in non-_logic test_integration_*.py files is $total_skips/$total_tests (>50%) — the suite is mostly pass-through, defeating PY-10's coverage guarantee. Either un-skip or move the helper-test cases into a *_logic.py companion file."
+    fi
+fi
+
+# -----------------------------------------------------------------------------
 # Summary
 # -----------------------------------------------------------------------------
 

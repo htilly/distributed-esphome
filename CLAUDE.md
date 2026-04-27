@@ -135,6 +135,8 @@ Checked mechanically by `scripts/check-invariants.sh` (wired into the CI `test` 
 
 **PY-10 — `tests/test_integration_*.py` (without a `_logic` suffix) must import `pytest_homeassistant_custom_component`.** The plain `test_integration_*` name reads as "real test against a running HA" — if that's not what the file does, rename it to `test_integration_*_logic.py` (which the invariant exempts) so the filename doesn't mislead. Origin: IT.1 from 1.6 — mock-based helper tests were file-named as integration tests and reviewers kept assuming coverage that wasn't there, letting CR.12-class bugs ship (`async_setup_entry` misuse, `unique_id` collisions, config-flow regressions). `scripts/check-invariants.sh` greps each non-`_logic` integration test file for the `pytest_homeassistant_custom_component` import and fails CI if it's absent.
 
+**PY-10b — Skipped-integration-test ratio across non-`_logic` `test_integration_*.py` files must stay ≤ 50 %.** PY-10 above guarantees those files *import* the HA custom-integration plugin, but a future regression where every real test gets `@pytest.mark.skip`-decorated would leave the import as the only honest part — same coverage-mirage failure mode IT.1 was filed for. `scripts/check-invariants.sh` counts `@pytest.mark.skip` decorators vs `def test_` / `async def test_` declarations across every non-`_logic` integration test file; if the ratio crosses 50 %, CI fails. Origin: CI.5 from 1.7.0.
+
 ## Design Judgment (aspirational — reviewed, not enforced)
 
 These aren't grep-checkable but matter just as much. They're how the codebase stays coherent.

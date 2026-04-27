@@ -31,7 +31,8 @@
         "data": {
           "base_url": "Base URL",
           "token": "Add-on token"
-        }
+        },
+        "submit": "Save changes"
       }
     },
     "error": {

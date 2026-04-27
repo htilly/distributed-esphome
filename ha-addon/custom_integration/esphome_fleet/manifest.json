@@ -4,6 +4,7 @@
   "codeowners": ["@weirded"],
   "config_flow": true,
   "documentation": "https://github.com/weirded/distributed-esphome",
+  "homeassistant": "2024.11.0",
   "integration_type": "hub",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/weirded/distributed-esphome/issues",
