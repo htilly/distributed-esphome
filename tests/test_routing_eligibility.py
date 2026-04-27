@@ -473,3 +473,44 @@ async def test_worker_tag_filter_malformed_is_permissive(
     assert job is not None
     check = build_claim_eligibility(app, worker_tags=["debian"])
     assert check(job) is True
+
+
+# ---------------------------------------------------------------------------
+# Bug #98 — should_defer must not strand a job by deferring to an
+# ineligible higher-perf worker
+# ---------------------------------------------------------------------------
+
+
+async def test_eligibility_isolates_stalemate_when_only_one_worker_qualifies(
+    tmp_path: Path, config_dir: Path,
+) -> None:
+    """Reproduces the live hass-4 stalemate: one rule disqualifies all
+    workers except OPTIPLEX-7, but the perf-based scheduler kept
+    deferring OPTIPLEX-7 to faster macos workers that were ineligible.
+    The fix lives in api.py (it filters the deferral candidate list by
+    routing eligibility) — but the underlying predicate must give the
+    handler a clean signal: when this is the only eligible job, the
+    other workers' eligibility predicates must all return False."""
+    from routing_eligibility import build_claim_eligibility
+    app = await _make_app(tmp_path, config_dir)
+    _write_yaml(config_dir, "garage-door-big.yaml", tags=["ratgdo"])
+    job = await _enqueue(app, "garage-door-big.yaml")
+    app["routing_rule_store"].create_rule(Rule(
+        id="windows-only",
+        name="Garage Doors on Windows",
+        severity="required",
+        device_match=[Clause(op="any_of", tags=["ratgdo"])],
+        worker_match=[Clause(op="all_of", tags=["windows"])],
+    ))
+
+    # Build an eligibility predicate per worker tag set. The scheduler
+    # would have used these to filter "other" workers in the
+    # should_defer loop. None of the non-windows workers should be
+    # eligible — that's exactly what the api.py-side fix relies on.
+    windows_check = build_claim_eligibility(app, worker_tags=["windows"])
+    macos_check = build_claim_eligibility(app, worker_tags=["macos"])
+    debian_check = build_claim_eligibility(app, worker_tags=["debian"])
+
+    assert windows_check(job) is True
+    assert macos_check(job) is False
+    assert debian_check(job) is False

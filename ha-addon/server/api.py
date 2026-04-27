@@ -342,6 +342,31 @@ async def get_next_job(request: web.Request) -> web.Response:
     # persisted on the Job so the UI can explain the scheduling
     # decision without requiring an operator to cross-reference
     # the scheduler log.
+    # Bug #95: build a per-worker routing-rule eligibility predicate
+    # so PENDING jobs can be filtered by *this* worker's tags. Without
+    # it, claim_next only filters out BLOCKED jobs — meaning any
+    # online worker could grab a PENDING job even when only a subset
+    # of the fleet satisfies the required rule.
+    from routing_eligibility import build_claim_eligibility  # noqa: PLC0415
+    worker_tags_list = list(worker.tags or []) if worker else []
+    is_eligible_for = build_claim_eligibility(request.app, worker_tags_list)
+
+    # Bug #95-followup: the scheduler must also know about routing
+    # eligibility when deciding whether to defer to a "faster" worker.
+    # The PENDING jobs *we* are eligible for, ignoring pinning, drive
+    # the deferral check below — if no other worker is eligible for
+    # any of them, deferring would just strand the job (the original
+    # symptom: ratgdo job stayed PENDING because OPTIPLEX-7 deferred
+    # to higher-score macos workers that the windows-only rule
+    # disqualified).
+    my_eligible_pending = [
+        j for j in queue.get_all()
+        if j.state == JobState.PENDING
+        and not j.is_followup
+        and (not j.pinned_client_id or j.pinned_client_id == client_id)
+        and is_eligible_for(j)
+    ]
+
     should_defer = False
     # Count other candidate workers so we can pick the most informative
     # reason when we don't defer.
@@ -376,6 +401,18 @@ async def get_next_job(request: web.Request) -> web.Response:
             other_free = other_active < other.max_parallel_jobs
             if not other_free:
                 continue  # fully busy, ignore
+            # Bug #95-followup: skip "other" as a deferral candidate
+            # when they aren't eligible for any of the jobs *we* could
+            # take. A faster-but-ineligible worker deferring loop
+            # leaves the job stranded.
+            if my_eligible_pending:
+                other_check = build_claim_eligibility(request.app, list(other.tags or []))
+                if not any(
+                    other_check(j)
+                    and (not j.pinned_client_id or j.pinned_client_id == other.client_id)
+                    for j in my_eligible_pending
+                ):
+                    continue
             # Rule 1: another worker has fewer jobs — let them catch up
             if other_active < my_active:
                 should_defer = True
@@ -402,15 +439,6 @@ async def get_next_job(request: web.Request) -> web.Response:
         selection_reason_hint = "higher_perf_score"
     else:
         selection_reason_hint = "first_available"
-
-    # Bug #95: build a per-worker routing-rule eligibility predicate
-    # so PENDING jobs can be filtered by *this* worker's tags. Without
-    # it, claim_next only filters out BLOCKED jobs — meaning any
-    # online worker could grab a PENDING job even when only a subset
-    # of the fleet satisfies the required rule.
-    from routing_eligibility import build_claim_eligibility  # noqa: PLC0415
-    worker_tags_list = list(worker.tags or []) if worker else []
-    is_eligible_for = build_claim_eligibility(request.app, worker_tags_list)
 
     job = await queue.claim_next(client_id, worker_id, hostname=hostname,
                                   faster_idle_worker_exists=should_defer,
