@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Dialog,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogDescription,
 } from './ui/dialog';
 import { Button } from './ui/button';
 import { TagChip } from './ui/tag-chips';
@@ -117,20 +117,24 @@ export function TagsEditDialog({ open, onOpenChange, subject, initial, suggestio
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent showCloseButton={false}>
+        {/* shadcn DialogHeader is flex-row justify-between — keep it title-only.
+            Description + body content live in the padded body section below
+            so they don't collide horizontally with the title. Bug #17. */}
         <DialogHeader>
           <DialogTitle>Edit tags — {subject}</DialogTitle>
-          <DialogDescription>
+        </DialogHeader>
+
+        <div className="px-4 py-3 space-y-3">
+          <p className="text-[12px] text-[var(--text-muted)]">
             Type a tag and press Enter or comma to add. Click × to remove.
             Click a suggestion below to add a tag already in use elsewhere
             in the fleet.
-          </DialogDescription>
-        </DialogHeader>
+          </p>
 
-        <div className="space-y-3">
           {/* Chip-input box: existing tags + trailing free-form input. */}
           <div
-            className="flex flex-wrap items-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--surface2)] px-2 py-1.5 min-h-[36px] cursor-text"
+            className="flex flex-wrap items-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--surface2)] px-2 py-1.5 min-h-[40px] cursor-text"
             onClick={() => inputRef.current?.focus()}
           >
             {tags.map(t => (
@@ -152,39 +156,39 @@ export function TagsEditDialog({ open, onOpenChange, subject, initial, suggestio
                 }
               }}
               placeholder={tags.length === 0 ? 'Type a tag and press Enter…' : ''}
-              className="flex-1 min-w-[120px] bg-transparent outline-none text-[13px] text-[var(--text)] placeholder:text-[var(--text-muted)]"
+              className="flex-1 min-w-[140px] bg-transparent outline-none text-[13px] text-[var(--text)] placeholder:text-[var(--text-muted)]"
             />
           </div>
 
           {/* Suggestions: fleet-wide tags not yet attached, filtered by input prefix. */}
           {filtered.length > 0 && (
             <div>
-              <div className="mb-1 text-[10px] uppercase tracking-wide text-[var(--text-muted)]">
+              <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--text-muted)]">
                 Suggestions
               </div>
-              <div className="flex flex-wrap gap-1">
+              <div className="flex flex-wrap gap-1.5">
                 {filtered.map(t => (
                   <TagChip key={t} tag={t} onClick={() => addTag(t)} />
                 ))}
               </div>
             </div>
           )}
+
+          {error && (
+            <div className="rounded-md border border-[var(--danger,#ef4444)] bg-[var(--danger,#ef4444)]/10 px-2.5 py-1.5 text-[12px] text-[var(--danger,#ef4444)]">
+              {error}
+            </div>
+          )}
         </div>
 
-        {error && (
-          <div className="rounded-md border border-[var(--danger,#ef4444)] bg-[var(--danger,#ef4444)]/10 px-2 py-1 text-[12px] text-[var(--danger,#ef4444)]">
-            {error}
-          </div>
-        )}
-
-        <div className="flex justify-end gap-2 pt-1">
+        <DialogFooter>
           <Button variant="secondary" size="sm" onClick={() => onOpenChange(false)} disabled={saving}>
             Cancel
           </Button>
           <Button size="sm" onClick={handleSave} disabled={saving}>
             {saving ? 'Saving…' : 'Save'}
           </Button>
-        </div>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

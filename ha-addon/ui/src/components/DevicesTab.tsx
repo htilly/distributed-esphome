@@ -789,7 +789,6 @@ function UnmanagedRow({ device: d, isVisible }: { device: Device; isVisible: (co
       {isVisible('running') && <td className="text-[12px]">{d.running_version || '—'}</td>}
       {isVisible('area') && <td className="text-[12px]">{dash}</td>}
       {isVisible('comment') && <td className="text-[12px]">{dash}</td>}
-      {isVisible('tags') && <td className="text-[12px]"></td>}
       {isVisible('project') && <td className="text-[12px]">{dash}</td>}
       <td></td>
     </tr>

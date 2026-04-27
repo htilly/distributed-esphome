@@ -273,7 +273,8 @@ Severity: only `required` accepted by the API in 1.7.0 (`preferred` rejected wit
 
 - [x] **14** *(1.7.0-dev.7)* — background refresh wiping in-progress edits. The `TagsEditDialog`'s seed-from-`initial` `useEffect` previously listed `initial` in its dep array, which fired on every parent SWR poll (1Hz) because the parent passes a fresh array reference each render even when values are unchanged — overwriting the user's typed text mid-edit. Dropped `initial` from the deps so the seed only fires on the open transition (false→true); save still uses the current text state, so the latest typed value is what's persisted.
 
-- [ ] 15 we don't need the little tag icon in front of each chip - wastes spaces 
+- [x] **15** *(1.7.0-dev.8)* — dropped the leading Lucide `Tag` icon from `TagChip`. Chip color + text already say "this is a tag"; the icon ate horizontal space in narrow table cells.
 
-- [ ] 16 can we give the tags colum more width, make the font bigger and move it next to name?
+- [x] **16** *(1.7.0-dev.8)* — Tags column moved to position 2 (right after Device on Devices tab; right after Hostname on Workers tab). Chip text bumped 10px → 12px, padding 0/1.5px → 0.5/2px, cell `min-width: 120px` so a single chip doesn't squeeze into illegibility. The `+ tags` empty-state placeholder also bumped to 12px so it reads consistently with the populated state.
 
+- [x] **17** *(1.7.0-dev.8)* — modal layout rebuilt around shadcn's structural slots. Title alone in `DialogHeader` (the header is `flex justify-between` and was previously fighting the `DialogDescription` for horizontal space — squashed both); description + chip-input + suggestions live in a padded body section; Cancel + Save anchored in `DialogFooter` (with the dark `--surface2` background that shadcn renders for footers). Floating × close button suppressed (`showCloseButton={false}`) since Cancel is the explicit dismiss path. New regression spec in `e2e/tags-modal-layout.spec.ts` (3 tests: structural slots present, footer below chip-input, dialog fits a 480×600 viewport with footer reachable). 

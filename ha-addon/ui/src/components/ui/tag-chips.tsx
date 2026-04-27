@@ -1,4 +1,4 @@
-import { Tag, X } from 'lucide-react';
+import { X } from 'lucide-react';
 
 /**
  * TG.5 / TG.6 — render a worker or device tag as a colored chip pill.
@@ -57,7 +57,12 @@ export function TagChip({ tag, onRemove, onClick }: ChipProps) {
   return (
     <span
       className={
-        'inline-flex items-center gap-0.5 rounded-full border px-1.5 py-px text-[10px] leading-none ' +
+        // Bug #15: drop the Lucide Tag icon — the chip color + text is
+        // already a strong "this is a tag" signal, the icon just ate
+        // horizontal space in narrow table cells.
+        // Bug #16: bumped to 12px / 1.5 line-height for legibility now
+        // that the column has more room.
+        'inline-flex items-center rounded-full border px-2 py-0.5 text-[12px] leading-tight ' +
         (interactive ? 'cursor-pointer hover:opacity-90 transition-opacity' : '')
       }
       style={s}
@@ -65,7 +70,6 @@ export function TagChip({ tag, onRemove, onClick }: ChipProps) {
       onClick={onClick}
       role={interactive ? 'button' : undefined}
     >
-      <Tag className="size-2.5" aria-hidden="true" />
       {tag}
       {onRemove && (
         <button
@@ -75,10 +79,10 @@ export function TagChip({ tag, onRemove, onClick }: ChipProps) {
             onRemove();
           }}
           aria-label={`Remove tag ${tag}`}
-          className="ml-0.5 inline-flex size-3 items-center justify-center rounded-full bg-white/20 hover:bg-white/40"
+          className="ml-1 inline-flex size-3.5 items-center justify-center rounded-full bg-white/20 hover:bg-white/40"
           tabIndex={-1}
         >
-          <X className="size-2" />
+          <X className="size-2.5" />
         </button>
       )}
     </span>

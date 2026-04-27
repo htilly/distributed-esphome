@@ -209,6 +209,31 @@ export function useDeviceColumns(options: Options) {
         sortingFn: 'alphanumeric',
       }
     ),
+    // Bug #16: Tags column placed immediately after Device so it's the
+    // first piece of metadata users see — matches how Pat thinks about
+    // the fleet ("kitchen devices", "office devices") rather than burying
+    // tags down by Comment / Project.
+    columnHelper.accessor(row => row.tags || '', {
+      id: 'tags',
+      header: 'Tags',
+      cell: ({ row: { original: t } }) => {
+        const parsed = parseDeviceTags(t.tags);
+        return (
+          <button
+            type="button"
+            onClick={() => onEditTags(t.target)}
+            className="cursor-pointer rounded-md border border-transparent px-1.5 py-0.5 text-left hover:border-[var(--border)] hover:bg-[var(--surface2)] min-w-[120px]"
+            aria-label={`Tags for ${stripYaml(t.target)}`}
+            title="Click to edit tags"
+          >
+            {parsed.length > 0
+              ? <TagChips tags={parsed} />
+              : <span className="text-[12px] text-[var(--text-muted)] italic">+ tags</span>}
+          </button>
+        );
+      },
+      enableSorting: false,
+    }),
     columnHelper.accessor(
       row => {
         if (activeJobsByTarget.has(row.target)) return 'a-upgrading';
@@ -514,27 +539,6 @@ export function useDeviceColumns(options: Options) {
         </span>
       ),
       sortingFn: 'alphanumeric',
-    }),
-    columnHelper.accessor(row => row.tags || '', {
-      id: 'tags',
-      header: 'Tags',
-      cell: ({ row: { original: t } }) => {
-        const parsed = parseDeviceTags(t.tags);
-        return (
-          <button
-            type="button"
-            onClick={() => onEditTags(t.target)}
-            className="cursor-pointer rounded-md border border-transparent px-1 py-px text-left hover:border-[var(--border)] hover:bg-[var(--surface2)]"
-            aria-label={`Tags for ${stripYaml(t.target)}`}
-            title="Click to edit tags"
-          >
-            {parsed.length > 0
-              ? <TagChips tags={parsed} />
-              : <span className="text-[10px] text-[var(--text-muted)] italic">+ tags</span>}
-          </button>
-        );
-      },
-      enableSorting: false,
     }),
     columnHelper.accessor(
       row => row.project_name ? (row.project_version ? `${row.project_name} ${row.project_version}` : row.project_name) : '',
