@@ -35,7 +35,7 @@ from protocol import (
     WorkerDiagnosticsUpload,
     WorkerLogAppend,
 )
-from scanner import create_bundle, get_esphome_version
+from scanner import create_bundle_async, get_esphome_version
 
 # Worker code bundled inside this container
 _CLIENT_CODE_DIR = Path("/app/client")
@@ -469,11 +469,12 @@ async def get_next_job(request: web.Request) -> web.Response:
     # ESPHome's ConfigBundleCreator. Runs off the event loop because
     # bundling re-parses YAML and runs the full validator — same
     # rationale as reseed_device_poller_from_config in main.py.
+    # Bug #111: scanner.create_bundle_async serialises concurrent
+    # bundle subprocesses around an asyncio.Lock so ESPHome's
+    # git.clone_or_update never sees two writers in the same
+    # `.esphome/{packages,external_components}/<sha8>/` directory.
     try:
-        loop = asyncio.get_running_loop()
-        bundle_bytes = await loop.run_in_executor(
-            None, create_bundle, cfg.config_dir, job.target,
-        )
+        bundle_bytes = await create_bundle_async(cfg.config_dir, job.target)
         bundle_b64 = base64.b64encode(bundle_bytes).decode("ascii")
     except Exception as exc:
         # BD.1: bundle creation wraps the full ESPHome validator; most
@@ -553,7 +554,6 @@ async def submit_job_result(request: web.Request) -> web.Response:
             try:
                 # Don't block the response on the device-info round-trip;
                 # fire-and-forget on the event loop.
-                import asyncio  # noqa: PLC0415
                 asyncio.create_task(device_poller.refresh_target(job.target))
             except Exception:
                 logger.exception("Failed to schedule post-OTA device refresh for %s", job.target)

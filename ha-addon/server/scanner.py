@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import subprocess
 import sys
@@ -459,6 +460,35 @@ def create_bundle(config_dir: str, target: str) -> bytes:
         target, len(data),
     )
     return data
+
+
+# Bug #111: serialise concurrent bundle creations.
+# ESPHome's git.clone_or_update has no inter-process lock — when multiple
+# bundle subprocesses race for the same `<config_dir>/.esphome/<domain>/<sha8>/`
+# clone target (because two queued jobs reference the same `packages:` /
+# `external_components:` git repo with cold caches), the losers observe a
+# partial-state tree and surface a different error per validation step:
+# "Could not find components folder for source", "<file> does not exist in
+# repository", or `AssertionError` from a half-merged packages-pass. Warm
+# caches dodge it because clone_or_update short-circuits on `is_dir()`.
+# A single server-wide asyncio.Lock around the bundle subprocess dispatch
+# eliminates the race at trivial cost: bundles take 0.1–3 s each, batches
+# are infrequent.
+_BUNDLE_LOCK = asyncio.Lock()
+
+
+async def create_bundle_async(config_dir: str, target: str) -> bytes:
+    """Concurrency-safe wrapper around :func:`create_bundle`.
+
+    Serialises bundle creation across overlapping job-claim handlers so
+    ESPHome's lock-free `git.clone_or_update` never sees two writers in
+    the same destination directory. Callers must use this from the
+    job-claim path; `create_bundle` itself is left synchronous so tests
+    that don't exercise the concurrency path can call it directly.
+    """
+    loop = asyncio.get_running_loop()
+    async with _BUNDLE_LOCK:
+        return await loop.run_in_executor(None, create_bundle, config_dir, target)
 
 
 # Cache resolved configs by (target, mtime) to avoid repeated git clones
