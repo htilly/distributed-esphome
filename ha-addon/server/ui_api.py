@@ -1759,6 +1759,13 @@ async def validate_config(request: web.Request) -> web.Response:
 _rendered_config_cache: "OrderedDict[tuple[str, int, int], tuple[bool, str]] | None" = None
 _RENDERED_CONFIG_CACHE_MAX = 32
 
+# ESPHome wraps `!secret` references in ANSI conceal escapes
+# (`\x1b[8m...\x1b[28m`) so terminals visually mask them; Monaco renders
+# the literal escape bytes as garbage text. Strip the full SGR family
+# (CSI ... letter) since `esphome config` may also emit colour codes
+# from its `_LOGGER` chatter that we want to clean before display.
+_ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
 
 def _get_rendered_cache() -> "OrderedDict[tuple[str, int, int], tuple[bool, str]]":
     """Lazy-init the module-level OrderedDict so test harnesses that
@@ -1902,14 +1909,14 @@ async def get_rendered_config(request: web.Request) -> web.Response:
         stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
         success = proc.returncode == 0
         if success:
-            output = stdout
+            output = _ANSI_SGR_RE.sub("", stdout)
         else:
             # On failure, the validation error lives in stderr (cv.Invalid
             # messages, traceback). stdout may also carry partial render
             # output from a YAML that started parsing then errored mid-
             # tree, so concatenate to give the user the full diagnostic
             # context. Stderr first because the actionable message lives there.
-            output = stderr + (stdout if stdout else "")
+            output = _ANSI_SGR_RE.sub("", stderr + (stdout if stdout else ""))
     except asyncio.TimeoutError:
         return web.json_response(
             {"success": False, "output": "Rendering timed out after 60 seconds", "cached": False},

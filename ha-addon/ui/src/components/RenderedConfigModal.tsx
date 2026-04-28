@@ -112,7 +112,7 @@ export function RenderedConfigModal({ target, displayName, onClose, monacoTheme 
           </span>
         </div>
 
-        <div className="px-4 pb-2 flex-1 min-h-0" style={{ minHeight: 400 }}>
+        <div className="px-4 pb-2 flex-1 min-h-0 flex flex-col">
           {loading && (
             <div className="text-[12px] text-[var(--text-muted)]">Rendering…</div>
           )}
@@ -138,23 +138,26 @@ export function RenderedConfigModal({ target, displayName, onClose, monacoTheme 
             </div>
           )}
           {!loading && !error && success && (
-            <Editor
-              height="60vh"
-              defaultLanguage="yaml"
-              value={output}
-              theme={monacoTheme}
-              options={{
-                readOnly: true,
-                domReadOnly: true,
-                minimap: { enabled: false },
-                lineNumbers: 'on',
-                wordWrap: 'on',
-                scrollBeyondLastLine: false,
-                renderWhitespace: 'none',
-                folding: true,
-                fontSize: 12,
-              }}
-            />
+            <div className="flex-1 min-h-0">
+              <Editor
+                height="100%"
+                defaultLanguage="yaml"
+                value={output}
+                theme={monacoTheme}
+                options={{
+                  readOnly: true,
+                  domReadOnly: true,
+                  minimap: { enabled: false },
+                  lineNumbers: 'on',
+                  wordWrap: 'on',
+                  scrollBeyondLastLine: false,
+                  renderWhitespace: 'none',
+                  folding: true,
+                  fontSize: 12,
+                  automaticLayout: true,
+                }}
+              />
+            </div>
           )}
         </div>
 
