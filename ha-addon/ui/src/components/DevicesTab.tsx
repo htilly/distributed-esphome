@@ -158,14 +158,19 @@ interface Props {
    * in flight (#32).
    */
   activeJobsByTarget: Map<string, Job>;
-  onCompile: (targets: string[] | 'all' | 'outdated') => void;
   /**
    * Per-row click handler for the Upgrade button (#16). Opens the
-   * UpgradeModal which collects worker + ESPHome version preferences. The
-   * onCompile prop is still used for the bulk Upgrade dropdown actions
-   * (Upgrade All, Upgrade Outdated, etc.) — those don't go through the modal.
+   * UpgradeModal which collects worker + ESPHome version preferences.
    */
   onUpgradeOne: (target: string) => void;
+  /**
+   * Bug #107: bulk-upgrade entry point. The four Upgrade dropdown
+   * items (All / Online / Outdated / Selected) materialise their target
+   * lists here and open the UpgradeModal so the user can choose
+   * worker/version/action just like the per-row flow. The chosen
+   * options apply uniformly across the whole set.
+   */
+  onUpgradeMany: (targets: string[], displayName: string) => void;
   onEdit: (target: string) => void;
   onLogs: (target: string) => void;
   onToast: (msg: string, type?: 'info' | 'success' | 'error') => void;
@@ -238,7 +243,7 @@ function formatAddressSourceTooltip(source: AddressSource | null | undefined): s
 // RenameModal is re-exported so App.tsx's existing import path still works.
 export { RenameModal };
 
-export function DevicesTab({ targets, devices, workers, streamerMode, activeJobsByTarget, onCompile, onUpgradeOne, onEdit, onLogs, onToast, onDelete, onRename, onSchedule, onNewDevice, onDuplicate, onOpenHistory, onOpenCompileHistory, onCommitChanges, onRefresh }: Props) {
+export function DevicesTab({ targets, devices, workers, streamerMode, activeJobsByTarget, onUpgradeOne, onUpgradeMany, onEdit, onLogs, onToast, onDelete, onRename, onSchedule, onNewDevice, onDuplicate, onOpenHistory, onOpenCompileHistory, onCommitChanges, onRefresh }: Props) {
   const [filter, setFilter] = useState('');
   // TG.5 filter pills — selected tag set, persisted to localStorage so the
   // "show me kitchen OR bedroom" filter sticks across reloads.
@@ -466,9 +471,11 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
 
   const selectedTargets = table.getSelectedRowModel().rows.map(r => r.original.target);
 
-  function handleCompileSelected() {
+  // Bug #107: route every bulk-upgrade entry point through the
+  // UpgradeModal so the user can pick worker/version/action up-front.
+  function handleUpgradeSelected() {
     if (selectedTargets.length === 0) return;
-    onCompile(selectedTargets);
+    onUpgradeMany(selectedTargets, `${selectedTargets.length} selected device${selectedTargets.length === 1 ? '' : 's'}`);
   }
   // QS.18: bulk schedule state + handlers + modal now live in DeviceTableActions.
 
@@ -545,26 +552,43 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="min-w-[180px]">
                 <DropdownMenuGroup>
-                  <DropdownMenuItem onClick={() => {
-                    const all = targets.map(t => t.target);
-                    if (all.length > 0) onCompile(all);
-                  }}>
+                  {/* Bug #107: every bulk-upgrade entry point opens the
+                      shared UpgradeModal — same worker / version /
+                      action picker as the per-row Upgrade button — and
+                      applies the chosen options uniformly across the
+                      affected set. */}
+                  <DropdownMenuItem
+                    onClick={() => {
+                      const all = targets.map(t => t.target);
+                      if (all.length > 0) onUpgradeMany(all, `all ${all.length} device${all.length === 1 ? '' : 's'}`);
+                    }}
+                    disabled={targets.length === 0}
+                  >
                     Upgrade All
                   </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => {
-                    const onlineTargets = targets.filter(t => t.online !== false).map(t => t.target);
-                    if (onlineTargets.length > 0) onCompile(onlineTargets);
-                  }}>
+                  <DropdownMenuItem
+                    onClick={() => {
+                      const onlineTargets = targets.filter(t => t.online !== false).map(t => t.target);
+                      if (onlineTargets.length > 0) onUpgradeMany(onlineTargets, `${onlineTargets.length} online device${onlineTargets.length === 1 ? '' : 's'}`);
+                    }}
+                    disabled={!targets.some(t => t.online !== false)}
+                  >
                     Upgrade All Online
                   </DropdownMenuItem>
                   <DropdownMenuItem
-                    onClick={() => onCompile('outdated')}
+                    onClick={() => {
+                      const outdated = targets.filter(t => t.needs_update).map(t => t.target);
+                      if (outdated.length > 0) onUpgradeMany(outdated, `${outdated.length} outdated device${outdated.length === 1 ? '' : 's'}`);
+                    }}
                     disabled={!targets.some(t => t.needs_update)}
                   >
                     Upgrade Outdated
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={handleCompileSelected}>
+                  <DropdownMenuItem
+                    onClick={handleUpgradeSelected}
+                    disabled={selectedTargets.length === 0}
+                  >
                     Upgrade Selected
                   </DropdownMenuItem>
                 </DropdownMenuGroup>

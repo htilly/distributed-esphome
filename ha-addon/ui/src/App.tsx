@@ -292,8 +292,11 @@ export default function App() {
   const [editorTarget, setEditorTarget] = useState<string | null>(null);
   const [connectModalOpen, setConnectModalOpen] = useState(false);
   const [connectModalPreset, setConnectModalPreset] = useState<import('./types').WorkerPreset | null>(null);
-  // #22: unified Upgrade modal. Stores target + display name + which mode to open in.
-  const [upgradeModalTarget, setUpgradeModalTarget] = useState<{ target: string; displayName: string; defaultMode: 'now' | 'schedule' } | null>(null);
+  // #22: unified Upgrade modal. Stores target list + display name + which mode to open in.
+  // Bug #107: the bulk Upgrade dropdown (Upgrade All / Online / Outdated /
+  // Selected) now routes through this modal too — `targets` carries the
+  // affected set; single-target callers wrap in a 1-element array.
+  const [upgradeModalTarget, setUpgradeModalTarget] = useState<{ targets: string[]; displayName: string; defaultMode: 'now' | 'schedule' } | null>(null);
   const [renameModalTarget, setRenameModalTarget] = useState<string | null>(null);
   // CD.4-CD.6: shared "create / duplicate" modal state. null = closed, object = open.
   // sourceTarget is set when duplicating an existing device.
@@ -364,29 +367,24 @@ export default function App() {
   // memoized so the columns hook (useDeviceColumns) can keep its memo cache
   // across SWR polls. Without useCallback they'd be fresh refs every render
   // and the columns block would rebuild on every 1Hz tick.
-  const handleCompile = useCallback(async (targets_: string[] | 'all' | 'outdated') => {
-    try {
-      const data = await compile(targets_);
-      addToast(`Queued ${data.enqueued} device(s)`, 'success');
-      switchTab('queue');
-      // Mutate BOTH queue and devices: queue so the new job appears on the
-      // queue tab immediately, devices so the orange "Upgrading" dot
-      // appears on the source row immediately (#11). Without the devices
-      // mutate the dot lags by up to one poll interval.
-      mutateQueue();
-      mutateDevices();
-    } catch (err) {
-      addToast('Error: ' + (err as Error).message, 'error');
-    }
-  }, [addToast, switchTab, mutateQueue, mutateDevices]);
 
   // #22: open the unified Upgrade modal. defaultMode controls whether it
   // opens on "Now" or "Schedule" tab.
   const handleOpenUpgradeModal = useCallback((target: string, defaultMode: 'now' | 'schedule' = 'now') => {
     const t = targets.find(x => x.target === target);
     const displayName = t?.friendly_name || stripYaml(target);
-    setUpgradeModalTarget({ target, displayName, defaultMode });
+    setUpgradeModalTarget({ targets: [target], displayName, defaultMode });
   }, [targets]);
+
+  // Bug #107: open the Upgrade modal for a multi-device set. Used by the
+  // four bulk-upgrade items in the Devices toolbar (All / Online /
+  // Outdated / Selected). Caller is responsible for materialising the
+  // target list and a human-readable displayName ("12 devices",
+  // "5 outdated devices", etc.).
+  const handleOpenUpgradeModalMany = useCallback((targets_: string[], displayName: string, defaultMode: 'now' | 'schedule' = 'now') => {
+    if (targets_.length === 0) return;
+    setUpgradeModalTarget({ targets: targets_, displayName, defaultMode });
+  }, []);
 
   async function handleUpgradeConfirm(params: {
     pinnedClientId: string | null;
@@ -402,12 +400,18 @@ export default function App() {
     if (!ctx) return;
     setUpgradeModalTarget(null);
     try {
-      // #12: if the user changed the version on a pinned device, update the pin first.
-      if (params.updatePin) {
-        await pinTargetVersion(ctx.target, params.updatePin);
+      // #12: if the user changed the version on a pinned device, update
+      // the pin first. Pin updates only happen in the single-target
+      // case — the modal suppresses the pin warning when there's no
+      // single device to compare against (multi-target sets have no
+      // shared "current pin" to bump).
+      if (params.updatePin && ctx.targets.length === 1) {
+        await pinTargetVersion(ctx.targets[0], params.updatePin);
       }
+      // Bug #107: bulk path enqueues the entire set in one POST so the
+      // server-side counter / toast reads correctly (`Queued N device(s)`).
       await compile(
-        [ctx.target],
+        ctx.targets,
         params.pinnedClientId ?? undefined,
         params.esphomeVersion ?? undefined,
         params.downloadOnly ?? false,
@@ -419,7 +423,7 @@ export default function App() {
         : params.workerTagFilter
           ? ` (workers ${params.workerTagFilter.op.replace('_', ' ')} [${params.workerTagFilter.tags.join(', ')}])`
           : '';
-      const pinSuffix = params.updatePin ? ` (pin updated to ${params.updatePin})` : '';
+      const pinSuffix = params.updatePin && ctx.targets.length === 1 ? ` (pin updated to ${params.updatePin})` : '';
       // FD.3: different toast verb when producing a downloadable binary
       // so the user understands the device won't be OTA'd this round.
       const verb = params.downloadOnly ? 'Compile-and-download queued for' : 'Queued';
@@ -808,8 +812,8 @@ export default function App() {
             workers={workers}
             streamerMode={streamerMode}
             activeJobsByTarget={activeJobsByTarget}
-            onCompile={handleCompile}
             onUpgradeOne={handleOpenUpgradeModal}
+            onUpgradeMany={handleOpenUpgradeModalMany}
             onEdit={setEditorTarget}
             onLogs={setDeviceLogTarget}
             onToast={addToast}
@@ -1101,12 +1105,17 @@ export default function App() {
         </DialogContent>
       </Dialog>
 
-      {/* #22: Unified Upgrade modal — handles both immediate upgrades and scheduling */}
+      {/* #22: Unified Upgrade modal — handles both immediate upgrades and scheduling.
+          Bug #107: now also handles multi-device sets — `t` is undefined when
+          there's no single device to read pin/schedule context from, which
+          implicitly suppresses the modal's pin warning + the "Remove existing
+          schedule" button. Schedule saves fan out across the target list. */}
       {upgradeModalTarget && (() => {
-        const t = targets.find(x => x.target === upgradeModalTarget.target);
+        const isMulti = upgradeModalTarget.targets.length > 1;
+        const t = isMulti ? undefined : targets.find(x => x.target === upgradeModalTarget.targets[0]);
         return (
           <UpgradeModal
-            target={upgradeModalTarget.target}
+            target={upgradeModalTarget.targets[0] ?? ''}
             displayName={upgradeModalTarget.displayName}
             workers={workers}
             esphomeVersions={esphomeVersions.available}
@@ -1120,8 +1129,11 @@ export default function App() {
             onUpgradeNow={handleUpgradeConfirm}
             onSaveSchedule={async (cron, version, tz) => {
               try {
-                await applyScheduleVersion(upgradeModalTarget.target, t?.pinned_version ?? null, version);
-                await setTargetSchedule(upgradeModalTarget.target, cron, tz);
+                await Promise.all(upgradeModalTarget.targets.map(async (target) => {
+                  const tt = targets.find(x => x.target === target);
+                  await applyScheduleVersion(target, tt?.pinned_version ?? null, version);
+                  await setTargetSchedule(target, cron, tz);
+                }));
                 addToast(`Schedule set for ${upgradeModalTarget.displayName}`, 'success');
                 setUpgradeModalTarget(null);
                 mutateDevices();
@@ -1132,8 +1144,11 @@ export default function App() {
             onSaveOnce={async (datetime, version) => {
               try {
                 const { setTargetScheduleOnce } = await import('./api/client');
-                await applyScheduleVersion(upgradeModalTarget.target, t?.pinned_version ?? null, version);
-                await setTargetScheduleOnce(upgradeModalTarget.target, datetime);
+                await Promise.all(upgradeModalTarget.targets.map(async (target) => {
+                  const tt = targets.find(x => x.target === target);
+                  await applyScheduleVersion(target, tt?.pinned_version ?? null, version);
+                  await setTargetScheduleOnce(target, datetime);
+                }));
                 addToast(`One-time upgrade scheduled for ${upgradeModalTarget.displayName}`, 'success');
                 setUpgradeModalTarget(null);
                 mutateDevices();
@@ -1142,8 +1157,11 @@ export default function App() {
               }
             }}
             onDeleteSchedule={async () => {
+              // Single-target only — the modal hides this button when
+              // there's no current schedule to remove (which is the
+              // multi-target case).
               try {
-                await deleteTargetSchedule(upgradeModalTarget.target);
+                await Promise.all(upgradeModalTarget.targets.map(target => deleteTargetSchedule(target)));
                 addToast(`Schedule removed for ${upgradeModalTarget.displayName}`, 'success');
                 setUpgradeModalTarget(null);
                 mutateDevices();

@@ -6,6 +6,16 @@ import {
   DropdownMenuGroup,
   DropdownMenuItem,
 } from '../ui/dropdown-menu';
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '../ui/dialog';
+import { Input } from '../ui/input';
+import { Button } from '../ui/button';
 import { UpgradeModal } from '../UpgradeModal';
 import { BulkTagsEditDialog } from '../BulkTagsEditDialog';
 import { commitFile, setTargetSchedule, updateTargetMeta } from '../../api/client';
@@ -54,6 +64,11 @@ export function DeviceTableActions({ selectedTargets, workers, targets, onToast,
   const [bulkScheduleOpen, setBulkScheduleOpen] = useState(false);
   const [bulkTagsOpen, setBulkTagsOpen] = useState(false);
   const [commitAllBusy, setCommitAllBusy] = useState(false);
+  // Bug #106: prompt for a commit message before fanning out the bulk
+  // commit. Open state + the entered message live here so the dialog
+  // stays cancellable without losing the typed text mid-edit.
+  const [commitAllOpen, setCommitAllOpen] = useState(false);
+  const [commitAllMessage, setCommitAllMessage] = useState('');
   const hasSelection = selectedTargets.length > 0;
   const versioningEnabled = useVersioningEnabled();
 
@@ -67,16 +82,27 @@ export function DeviceTableActions({ selectedTargets, workers, targets, onToast,
     [targets],
   );
 
+  function openCommitAll() {
+    if (dirtyTargets.length === 0) return;
+    setCommitAllMessage('');
+    setCommitAllOpen(true);
+  }
+
   async function handleCommitAll() {
     if (commitAllBusy || dirtyTargets.length === 0) return;
     setCommitAllBusy(true);
+    // Bug #106: pass the user-entered message through to commitFile so
+    // every file in the batch shares one author-supplied subject. Empty
+    // input → undefined → server falls back to the default
+    // "Manually committed from UI" marker (same as the per-row dialog).
+    const message = commitAllMessage.trim() || undefined;
     try {
       // Mirrors SettingsDrawer's "turn on auto-commit" flow: one commit
       // per file, swallow individual failures so a single broken target
       // doesn't strand the whole batch.
       const results = await Promise.all(
         dirtyTargets.map(t =>
-          commitFile(t)
+          commitFile(t, message)
             .then(r => ({ ok: true as const, target: t, committed: r.committed }))
             .catch(err => ({ ok: false as const, target: t, err: (err as Error).message })),
         ),
@@ -90,6 +116,8 @@ export function DeviceTableActions({ selectedTargets, workers, targets, onToast,
       } else {
         onToast('No files committed', 'error');
       }
+      setCommitAllOpen(false);
+      setCommitAllMessage('');
       onRefresh();
     } finally {
       setCommitAllBusy(false);
@@ -203,7 +231,7 @@ export function DeviceTableActions({ selectedTargets, workers, targets, onToast,
             </DropdownMenuItem>
             {versioningEnabled && (
               <DropdownMenuItem
-                onClick={handleCommitAll}
+                onClick={openCommitAll}
                 disabled={commitAllBusy || dirtyTargets.length === 0}
                 title={
                   dirtyTargets.length === 0
@@ -229,6 +257,48 @@ export function DeviceTableActions({ selectedTargets, workers, targets, onToast,
           onSave={applyBulkTagDiff}
         />
       )}
+
+      {/* Bug #106: commit-message prompt for the bulk "Commit all
+          uncommitted" flow. Mirrors the per-row "Commit changes…"
+          dialog in App.tsx so both surfaces feel the same. */}
+      <Dialog
+        open={commitAllOpen}
+        onOpenChange={(open) => { if (!open && !commitAllBusy) setCommitAllOpen(false); }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              Commit {dirtyTargets.length} uncommitted file{dirtyTargets.length === 1 ? '' : 's'}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="px-4 py-3 flex flex-col gap-2 text-sm text-[var(--text)]">
+            <p className="text-xs text-[var(--text-muted)]">
+              Optional commit message — applied to every file in the batch. Leave blank to use the default{' '}
+              <code className="font-mono text-xs">Manually committed from UI</code>.
+            </p>
+            <Input
+              type="text"
+              className="font-mono text-xs"
+              placeholder="Manually committed from UI"
+              value={commitAllMessage}
+              onChange={e => setCommitAllMessage(e.target.value)}
+              autoFocus
+            />
+          </div>
+          <DialogFooter>
+            <DialogClose>
+              <Button variant="secondary" size="sm" disabled={commitAllBusy}>Cancel</Button>
+            </DialogClose>
+            <Button
+              size="sm"
+              disabled={commitAllBusy || dirtyTargets.length === 0}
+              onClick={handleCommitAll}
+            >
+              {commitAllBusy ? 'Committing…' : 'Commit'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {bulkScheduleOpen && (
         <UpgradeModal
