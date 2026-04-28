@@ -11,7 +11,7 @@ import io
 import tarfile
 import uuid
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from aiohttp import web
@@ -458,7 +458,7 @@ async def test_claim_job_returns_job_payload(tmp_path):
         client_id = await _register(ta)
         await _enqueue_job(ta.queue, "device.yaml")
 
-        with patch("api.create_bundle", return_value=_make_test_bundle()):
+        with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())):
             resp = await ta.get(
                 "/api/v1/jobs/next",
                 headers={**AUTH_HEADERS, "X-Client-Id": client_id},
@@ -482,7 +482,7 @@ async def test_claim_job_transitions_to_working(tmp_path):
         client_id = await _register(ta)
         job = await _enqueue_job(ta.queue, "device.yaml")
 
-        with patch("api.create_bundle", return_value=_make_test_bundle()):
+        with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())):
             resp = await ta.get(
                 "/api/v1/jobs/next",
                 headers={**AUTH_HEADERS, "X-Client-Id": client_id},
@@ -671,7 +671,7 @@ async def test_faster_worker_gets_job_over_slower(tmp_path):
         await _enqueue_job(ta.queue, "device.yaml")
 
         # Slow worker polls first — should be deferred
-        with patch("api.create_bundle", return_value=_make_test_bundle()):
+        with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())):
             slow_resp = await ta.get(
                 "/api/v1/jobs/next",
                 headers={**AUTH_HEADERS, "X-Client-Id": slow_id},
@@ -679,7 +679,7 @@ async def test_faster_worker_gets_job_over_slower(tmp_path):
         assert slow_resp.status == 204  # deferred — faster worker is idle
 
         # Fast worker polls — should receive the job
-        with patch("api.create_bundle", return_value=_make_test_bundle()):
+        with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())):
             fast_resp = await ta.get(
                 "/api/v1/jobs/next",
                 headers={**AUTH_HEADERS, "X-Client-Id": fast_id},
@@ -701,7 +701,7 @@ async def test_only_worker_always_gets_job(tmp_path):
 
         await _enqueue_job(ta.queue, "device.yaml")
 
-        with patch("api.create_bundle", return_value=_make_test_bundle()):
+        with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())):
             resp = await ta.get(
                 "/api/v1/jobs/next",
                 headers={**AUTH_HEADERS, "X-Client-Id": client_id},
@@ -725,7 +725,7 @@ async def test_pinned_job_only_claimable_by_pinned_worker(tmp_path):
         await _enqueue_job(ta.queue, "device.yaml", pinned_client_id=id_b)
 
         # Worker-a must not receive it
-        with patch("api.create_bundle", return_value=_make_test_bundle()):
+        with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())):
             resp = await ta.get(
                 "/api/v1/jobs/next",
                 headers={**AUTH_HEADERS, "X-Client-Id": id_a},
@@ -733,7 +733,7 @@ async def test_pinned_job_only_claimable_by_pinned_worker(tmp_path):
         assert resp.status == 204
 
         # Worker-b must receive it
-        with patch("api.create_bundle", return_value=_make_test_bundle()):
+        with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())):
             resp = await ta.get(
                 "/api/v1/jobs/next",
                 headers={**AUTH_HEADERS, "X-Client-Id": id_b},
@@ -757,7 +757,7 @@ async def test_pinned_job_not_deferred_by_faster_worker(tmp_path):
         # Pin job to the slow worker
         await _enqueue_job(ta.queue, "device.yaml", pinned_client_id=slow_id)
 
-        with patch("api.create_bundle", return_value=_make_test_bundle()):
+        with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())):
             resp = await ta.get(
                 "/api/v1/jobs/next",
                 headers={**AUTH_HEADERS, "X-Client-Id": slow_id},
