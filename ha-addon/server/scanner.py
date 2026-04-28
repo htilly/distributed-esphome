@@ -350,8 +350,24 @@ def scan_configs(config_dir: str) -> list[str]:
 # explicitly. Overhead ~1-2 seconds per bundle on a 67-target fleet
 # is fine — bundle creation is on the job-claim path, not hot.
 _BUNDLE_SUBPROCESS_SCRIPT = r"""
+import logging
 import sys
 from pathlib import Path
+
+# Bug #112: silence ESPHome's internal _LOGGER chatter — INFO
+# ("Reading configuration..."), WARNING (e.g. the false-positive
+# 2026.4.3 deprecation warning that fires for dict-of-package-strings
+# shape, fixed upstream by PR #15605), DEBUG. Bundle stderr is
+# captured by scanner.create_bundle and surfaced verbatim to the UI's
+# Queue-tab Log modal; ESPHome's status chatter clutters the error
+# message and reads as if it were the cause of an unrelated failure.
+# Our explicit stderr writes below — and Python's default exception
+# handler — still reach the captured stream, which is exactly what
+# the UI should show.
+logging.getLogger("esphome").addHandler(logging.NullHandler())
+logging.getLogger("esphome").propagate = False
+logging.getLogger("esphome").setLevel(logging.CRITICAL + 1)
+
 from esphome.core import CORE
 from esphome.yaml_util import load_yaml
 from esphome.config import validate_config

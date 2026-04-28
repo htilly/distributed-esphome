@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import sys
 import tarfile
 from pathlib import Path
 
@@ -1409,4 +1410,46 @@ def test_resolve_failure_logs_warning(tmp_path, caplog):
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
     assert any("broken.yaml" in r.getMessage() for r in warnings), (
         f"expected WARNING mentioning broken.yaml, got: {[r.getMessage() for r in warnings]}"
+    )
+
+
+# --- Bug #112 — bundle subprocess stderr is clean (no esphome logger noise) -
+
+def test_bundle_subprocess_stderr_does_not_leak_esphome_logger_chatter():
+    """Bug #112: ESPHome's _LOGGER (esphome.* namespace) emits INFO /
+    WARNING chatter during validate_config — "INFO ESPHome 2026.4.3",
+    "INFO Reading configuration...", deprecation warnings, etc. Our
+    bundle subprocess captures stderr verbatim and surfaces it to the
+    UI's Queue-tab Log modal as the failure log; ESPHome's status
+    chatter clutters the message and reads as if it were the cause of
+    a failure. The fix is a NullHandler + propagate=False + suppressed
+    level on the `esphome` logger inside the subprocess script.
+
+    Test: invoke the script against a known-good fixture YAML and
+    assert stderr is empty. This catches a future regression where
+    someone removes the silencing or accidentally `print()`s diagnostic
+    output to stderr.
+    """
+    import subprocess as _sp
+
+    from scanner import _BUNDLE_SUBPROCESS_SCRIPT
+
+    proc = _sp.run(
+        [sys.executable, "-c", _BUNDLE_SUBPROCESS_SCRIPT, str(FIXTURES / "device1.yaml")],
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, (
+        f"bundle subprocess failed unexpectedly: stderr={proc.stderr.decode()!r}"
+    )
+    stderr = proc.stderr.decode("utf-8", errors="replace")
+    # The subprocess emits its own validation-error message via
+    # sys.stderr.write only on exit code 3 (validation errors). Exit 0
+    # should produce zero stderr — any byte means ESPHome's logger
+    # leaked through.
+    assert stderr == "", (
+        f"bundle subprocess on a healthy YAML wrote to stderr: {stderr!r}\n"
+        "ESPHome's _LOGGER namespace is leaking through the silencing "
+        "in scanner._BUNDLE_SUBPROCESS_SCRIPT — bug #112 regression."
     )
