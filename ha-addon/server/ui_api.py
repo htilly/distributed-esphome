@@ -1880,15 +1880,36 @@ async def get_rendered_config(request: web.Request) -> web.Response:
 
     logger.info("Rendering %s via %s config (direct subprocess)", filename, esphome_bin)
     try:
+        # Bug #113: capture stdout and stderr separately. ESPHome's
+        # `command_config` (esphome/__main__.py) writes the rendered
+        # YAML to stdout via `safe_print` and writes its `_LOGGER`
+        # status chatter ("INFO ESPHome 2026.4.3", "INFO Reading
+        # configuration...", "WARNING GPIO12 is a strapping PIN...",
+        # trailing "INFO Configuration is valid!") to stderr. Pre-#113
+        # we used `stderr=STDOUT` which merged them, so the modal
+        # showed the YAML buried between INFO/WARNING lines. Now we
+        # show the user just the YAML on success and surface stderr
+        # only when the render fails (where the diagnostic context
+        # belongs).
         proc = await asyncio.create_subprocess_exec(
             esphome_bin, "config", str(config_path),
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
+            stderr=asyncio.subprocess.PIPE,
             cwd=cfg.config_dir,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
-        output = stdout.decode("utf-8", errors="replace") if stdout else ""
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=60)
+        stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
+        stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
         success = proc.returncode == 0
+        if success:
+            output = stdout
+        else:
+            # On failure, the validation error lives in stderr (cv.Invalid
+            # messages, traceback). stdout may also carry partial render
+            # output from a YAML that started parsing then errored mid-
+            # tree, so concatenate to give the user the full diagnostic
+            # context. Stderr first because the actionable message lives there.
+            output = stderr + (stdout if stdout else "")
     except asyncio.TimeoutError:
         return web.json_response(
             {"success": False, "output": "Rendering timed out after 60 seconds", "cached": False},

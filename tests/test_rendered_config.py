@@ -286,6 +286,91 @@ async def test_rendered_config_failed_render_is_also_cached(tmp_path: Path, _ena
         await client.close()
 
 
+def _mocked_proc_split(stdout: bytes, stderr: bytes, returncode: int = 0):
+    """Like _mocked_proc but lets the test inject distinct stderr content
+    so #113's split-streams contract can be pinned."""
+    proc = MagicMock()
+    proc.communicate = AsyncMock(return_value=(stdout, stderr))
+    proc.returncode = returncode
+    return proc
+
+
+async def test_rendered_config_returns_only_stdout_on_success_not_stderr(tmp_path: Path, _enable_socket) -> None:
+    """Bug #113: the modal showed the rendered YAML buried between
+    ESPHome's INFO/WARNING log lines because pre-fix `ui_api` ran
+    `esphome config` with stderr=STDOUT. The fix captures the streams
+    separately and uses only stdout on success — INFO/WARNING chatter
+    on stderr must NOT bleed into `output`.
+    """
+    client, config_dir = await _make_app(tmp_path)
+    try:
+        _write_config(config_dir, "kitchen.yaml", "kitchen")
+        rendered_yaml = b"esphome:\n  name: kitchen\nesp8266:\n  board: d1_mini\n"
+        # The shape ESPHome's `command_config` produces: rendered YAML
+        # to stdout via safe_print; INFO chatter ("INFO ESPHome 2026.4.3",
+        # "INFO Reading configuration..."), validation warnings, and the
+        # trailing "INFO Configuration is valid!" all go to stderr via
+        # _LOGGER. None of those belong in the modal's success output.
+        stderr_chatter = (
+            b"INFO ESPHome 2026.4.3\n"
+            b"INFO Reading configuration /config/esphome/kitchen.yaml...\n"
+            b"WARNING GPIO12 is a strapping PIN and should only be used for I/O with care.\n"
+            b"INFO Configuration is valid!\n"
+        )
+        with patch(
+            "asyncio.create_subprocess_exec",
+            return_value=_mocked_proc_split(rendered_yaml, stderr_chatter, 0),
+        ):
+            resp = await client.get(
+                "/ui/api/targets/kitchen.yaml/rendered-config",
+                headers={"Authorization": "Bearer test-token"},
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["success"] is True
+            # The exact YAML and only the YAML — every byte of stderr
+            # chatter must stay out of `output`.
+            assert data["output"] == rendered_yaml.decode()
+            assert "INFO ESPHome" not in data["output"]
+            assert "Reading configuration" not in data["output"]
+            assert "WARNING GPIO12" not in data["output"]
+            assert "Configuration is valid" not in data["output"]
+    finally:
+        await client.close()
+
+
+async def test_rendered_config_surfaces_stderr_on_failure(tmp_path: Path, _enable_socket) -> None:
+    """Bug #113 corollary: when `esphome config` fails, the validator
+    error message lives in stderr (`cv.Invalid` traces, etc.). On the
+    failure path stderr is the actionable diagnostic and must reach
+    the modal."""
+    client, config_dir = await _make_app(tmp_path)
+    try:
+        _write_config(config_dir, "kitchen.yaml", "kitchen")
+        validator_error = b"INVALID: '!secret oven_password' could not be resolved\n"
+        # Pre-failure INFO chatter is fine alongside the actionable
+        # error here — the user is debugging a broken render and
+        # context helps. The contract is just that stderr's content
+        # reaches `output`.
+        stderr_blob = b"INFO ESPHome 2026.4.3\n" + validator_error
+        with patch(
+            "asyncio.create_subprocess_exec",
+            return_value=_mocked_proc_split(b"", stderr_blob, 1),
+        ):
+            resp = await client.get(
+                "/ui/api/targets/kitchen.yaml/rendered-config",
+                headers={"Authorization": "Bearer test-token"},
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["success"] is False
+            assert "could not be resolved" in data["output"], (
+                f"validator error from stderr missing on failure path: {data['output']!r}"
+            )
+    finally:
+        await client.close()
+
+
 async def test_rendered_config_logs_do_not_leak_output(tmp_path: Path, _enable_socket, caplog) -> None:
     """`!secret` values resolve to plaintext in the rendered output —
     the logger must never include the body, only the byte count."""
