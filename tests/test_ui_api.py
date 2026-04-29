@@ -651,6 +651,81 @@ async def test_compile_pinned_client_id(tmp_path):
         await ta.close()
 
 
+# ---------------------------------------------------------------------------
+# DM.3: per-job OTA address override
+# ---------------------------------------------------------------------------
+
+
+async def test_compile_address_override_stamps_job_ota_address(tmp_path, _enable_socket):
+    """DM.3: ``address`` body field overrides ``Job.ota_address``."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "a.yaml", "a")
+        resp = await ta.post(
+            "/ui/api/compile",
+            json={"targets": ["a.yaml"], "address": "192.168.42.7"},
+        )
+        assert resp.status == 200
+        jobs = ta.queue.get_all()
+        assert len(jobs) == 1
+        assert jobs[0].ota_address == "192.168.42.7"
+    finally:
+        await ta.close()
+
+
+async def test_compile_address_override_rejects_multi_target(tmp_path, _enable_socket):
+    """DM.3: address + multi-target is meaningless and 400's."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "a.yaml", "a")
+        _write_config(ta.config_dir, "b.yaml", "b")
+        resp = await ta.post(
+            "/ui/api/compile",
+            json={"targets": ["a.yaml", "b.yaml"], "address": "192.168.42.7"},
+        )
+        assert resp.status == 400
+        body = await resp.json()
+        assert "address override requires exactly one target" in body["error"]
+        assert ta.queue.get_all() == []
+    finally:
+        await ta.close()
+
+
+async def test_compile_address_too_long_returns_400(tmp_path, _enable_socket):
+    """DM.3: address bound at 253 chars (DNS hostname limit)."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "a.yaml", "a")
+        resp = await ta.post(
+            "/ui/api/compile",
+            json={"targets": ["a.yaml"], "address": "x" * 254},
+        )
+        assert resp.status == 400
+        body = await resp.json()
+        assert "address too long" in body["error"]
+    finally:
+        await ta.close()
+
+
+async def test_compile_address_empty_falls_through_to_auto_resolve(tmp_path, _enable_socket):
+    """DM.3: an empty/whitespace address is treated as "no override" — the
+    auto-resolved value (or none) is used as if the field was absent."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "a.yaml", "a")
+        resp = await ta.post(
+            "/ui/api/compile",
+            json={"targets": ["a.yaml"], "address": "   "},
+        )
+        assert resp.status == 200
+        jobs = ta.queue.get_all()
+        assert len(jobs) == 1
+        # No poller in test app + no override → ota_address is None.
+        assert jobs[0].ota_address is None
+    finally:
+        await ta.close()
+
+
 async def test_compile_invalid_json(tmp_path):
     ta = await _make_ui_app(tmp_path)
     try:

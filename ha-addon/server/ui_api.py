@@ -2324,6 +2324,28 @@ async def start_compile(request: web.Request) -> web.Response:
     # per-worker claim_next predicate) ignore routing rules for jobs
     # carrying this flag; the user's tag-filter / pin still applies.
     bypass_routing_rules = bool(body.get("bypass_routing_rules", False))
+    # DM.3: optional per-job OTA address override from the
+    # InstallToAddressModal. When set, must accompany a single-element
+    # ``targets`` array (multi-target + address is meaningless and 400's
+    # below). Goes through the same ``Job.ota_address`` plumbing the
+    # rename auto-recompile already uses (#65 / ui_api.py:2795 region),
+    # so no protocol change is needed.
+    address_override_raw = body.get("address")
+    address_override: str | None = None
+    if address_override_raw is not None:
+        if not isinstance(address_override_raw, str):
+            return web.json_response(
+                {"error": "address must be a string"}, status=400,
+            )
+        address_override = address_override_raw.strip()
+        if not address_override:
+            address_override = None
+        elif len(address_override) > 253:
+            # Same upper bound as a DNS hostname — anything longer can't
+            # be a real target.
+            return web.json_response(
+                {"error": "address too long (max 253 chars)"}, status=400,
+            )
     cfg = _cfg(request)
     queue = request.app["queue"]
     device_poller = request.app.get("device_poller")
@@ -2360,6 +2382,15 @@ async def start_compile(request: web.Request) -> web.Response:
     else:
         return web.json_response({"error": "Invalid targets value"}, status=400)
 
+    # DM.3: address override is single-target only (multi-target +
+    # address makes no sense — every device gets the same OTA target,
+    # which is wrong for any batch).
+    if address_override and len(selected) != 1:
+        return web.json_response(
+            {"error": "address override requires exactly one target"},
+            status=400,
+        )
+
     # Build a map of target → device IP for OTA addressing
     # Bug #18 (1.6.1): resolve_ota_address picks a real IP over a
     # stale ``.local`` fallback so static-IP devices can't regress
@@ -2371,6 +2402,11 @@ async def start_compile(request: web.Request) -> web.Response:
                 addr = device_poller.resolve_ota_address(dev.name)
                 if addr:
                     ota_addresses[dev.compile_target] = addr
+    # DM.3: per-job address override wins over the auto-resolved value
+    # for the single selected target. Stored on the job's ``ota_address``
+    # field so the worker uses it as ``--device <addr>`` for the OTA pass.
+    if address_override:
+        ota_addresses[selected[0]] = address_override
 
     run_id = str(uuid.uuid4())
     enqueued = 0

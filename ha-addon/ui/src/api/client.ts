@@ -370,6 +370,10 @@ export async function compile(
   // *this* job. The user's tag-filter / pin still applies — those are
   // their explicit constraint, not the rule's.
   bypassRoutingRules?: boolean,
+  // DM.3: per-job OTA address override. Goes through the same
+  // ``Job.ota_address`` field the rename auto-recompile already uses.
+  // Single-target only — server returns 400 on multi-target + address.
+  address?: string,
 ): Promise<CompileResponse> {
   const body: Record<string, unknown> = { targets };
   if (pinnedClientId) body.pinned_client_id = pinnedClientId;
@@ -379,6 +383,7 @@ export async function compile(
     body.worker_tag_filter = workerTagFilter;
   }
   if (bypassRoutingRules) body.bypass_routing_rules = true;
+  if (address && address.trim()) body.address = address.trim();
   return parseResponse<CompileResponse>(
     await apiFetch('./ui/api/compile', {
       method: 'POST',

@@ -193,6 +193,8 @@ interface Props {
   onViewRenderedConfig: (target: string) => void;
   /** DM.2: open the ICMP ping diagnostic modal. */
   onPing: (target: string) => void;
+  /** DM.3: open the install-to-specific-address modal. */
+  onInstallToAddress: (target: string) => void;
   /** Trigger an immediate SWR revalidation of the devices/targets data. */
   onRefresh: () => void;
 }
@@ -249,7 +251,7 @@ function formatAddressSourceTooltip(source: AddressSource | null | undefined): s
 // RenameModal is re-exported so App.tsx's existing import path still works.
 export { RenameModal };
 
-export function DevicesTab({ targets, devices, workers, streamerMode, activeJobsByTarget, onUpgradeOne, onUpgradeMany, onEdit, onLogs, onToast, onDelete, onRename, onSchedule, onNewDevice, onDuplicate, onOpenHistory, onOpenCompileHistory, onCommitChanges, onViewRenderedConfig, onPing, onRefresh }: Props) {
+export function DevicesTab({ targets, devices, workers, streamerMode, activeJobsByTarget, onUpgradeOne, onUpgradeMany, onEdit, onLogs, onToast, onDelete, onRename, onSchedule, onNewDevice, onDuplicate, onOpenHistory, onOpenCompileHistory, onCommitChanges, onViewRenderedConfig, onPing, onInstallToAddress, onRefresh }: Props) {
   const [filter, setFilter] = useState('');
   // TG.5 filter pills — selected tag set, persisted to localStorage so the
   // "show me kitchen OR bedroom" filter sticks across reloads.
@@ -479,6 +481,7 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
     onCommitChanges,
     onViewRenderedConfig,
     onPing,
+    onInstallToAddress,
     menuOpenTarget,
     setMenuOpenTarget,
     onEditTags: setTagsEditTarget,

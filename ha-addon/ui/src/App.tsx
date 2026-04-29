@@ -44,6 +44,7 @@ import { NewDeviceModal } from './components/NewDeviceModal';
 import { UpgradeModal } from './components/UpgradeModal';
 import { RenderedConfigModal } from './components/RenderedConfigModal';
 import PingDeviceModal from './components/PingDeviceModal';
+import InstallToAddressModal from './components/InstallToAddressModal';
 // ScheduleModal retired in #22 — absorbed into the unified UpgradeModal.
 import { SchedulesTab } from './components/SchedulesTab';
 import { EditorModal } from './components/EditorModal';
@@ -184,6 +185,8 @@ export default function App() {
   const [renderedConfigTarget, setRenderedConfigTarget] = useState<string | null>(null);
   // DM.2: target whose Ping modal is currently open (or null if none).
   const [pingTarget, setPingTarget] = useState<string | null>(null);
+  // DM.3: target whose Install-to-address modal is currently open.
+  const [installAddressTarget, setInstallAddressTarget] = useState<string | null>(null);
   // QS.6: SWR's default compare (stable-hash) already prevents re-renders
   // when polled data is structurally unchanged. The custom JSON.stringify
   // compare we used to have was strictly worse — O(n) serialization of the
@@ -888,6 +891,7 @@ export default function App() {
             onCommitChanges={(target) => { setCommitDialogMessage(''); setCommitDialogTarget(target); }}
             onViewRenderedConfig={(target) => setRenderedConfigTarget(target)}
             onPing={(target) => setPingTarget(target)}
+            onInstallToAddress={(target) => setInstallAddressTarget(target)}
             onRefresh={() => mutateDevices()}
           />
         )}
@@ -1281,6 +1285,21 @@ export default function App() {
           onToast={addToast}
         />
       )}
+
+      {/* DM.3: install-to-specific-address from the per-row hamburger.
+          Pre-fills with the device's resolved IP from the poller; the
+          user can edit before triggering the OTA. */}
+      {installAddressTarget && (() => {
+        const t = targets.find(x => x.target === installAddressTarget);
+        return (
+          <InstallToAddressModal
+            target={installAddressTarget}
+            defaultAddress={t?.ip_address ?? null}
+            onClose={() => setInstallAddressTarget(null)}
+            onToast={addToast}
+          />
+        );
+      })()}
 
       {renameModalTarget && (
         <RenameModal

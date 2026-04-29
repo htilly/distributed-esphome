@@ -81,6 +81,8 @@ interface Options {
   onViewRenderedConfig: (target: string) => void;
   /** DM.2: open the ICMP ping diagnostic modal. */
   onPing: (target: string) => void;
+  /** DM.3: open the install-to-specific-address modal. */
+  onInstallToAddress: (target: string) => void;
   /**
    * #2 followup to QS.16: per-row hamburger open state is owned by
    * DevicesTab (not Radix's internal state) so it survives row re-mounts
@@ -165,6 +167,7 @@ export function useDeviceColumns(options: Options) {
     onCommitChanges,
     onViewRenderedConfig,
     onPing,
+    onInstallToAddress,
     menuOpenTarget,
     setMenuOpenTarget,
     onEditTags,
@@ -685,6 +688,7 @@ export function useDeviceColumns(options: Options) {
           onCommitChanges={onCommitChanges}
           onViewRenderedConfig={onViewRenderedConfig}
           onPing={onPing}
+          onInstallToAddress={onInstallToAddress}
           onMenuOpenChange={(o) => setMenuOpenTarget(o ? t.target : null)}
         />
       ),
@@ -707,6 +711,7 @@ export function useDeviceColumns(options: Options) {
     onCommitChanges,
     onViewRenderedConfig,
     onPing,
+    onInstallToAddress,
     menuOpenTarget,
     setMenuOpenTarget,
     onEditTags,

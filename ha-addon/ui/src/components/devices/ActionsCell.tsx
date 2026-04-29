@@ -55,6 +55,8 @@ interface Props {
   onViewRenderedConfig: (target: string) => void;
   /** DM.2: open the ICMP ping diagnostic modal. */
   onPing: (target: string) => void;
+  /** DM.3: open the install-to-specific-address modal. */
+  onInstallToAddress: (target: string) => void;
   onMenuOpenChange: (open: boolean) => void;
 }
 
@@ -79,6 +81,7 @@ function ActionsCellImpl({
   onCommitChanges,
   onViewRenderedConfig,
   onPing,
+  onInstallToAddress,
   onMenuOpenChange,
 }: Props) {
   // DM.1: archived rows expose only the hamburger (Unarchive +
@@ -106,6 +109,7 @@ function ActionsCellImpl({
           onCommitChanges={onCommitChanges}
           onViewRenderedConfig={onViewRenderedConfig}
           onPing={onPing}
+          onInstallToAddress={onInstallToAddress}
           open={menuOpen}
           onOpenChange={onMenuOpenChange}
         />
@@ -156,6 +160,7 @@ function ActionsCellImpl({
         onCommitChanges={onCommitChanges}
         onViewRenderedConfig={onViewRenderedConfig}
         onPing={onPing}
+        onInstallToAddress={onInstallToAddress}
         open={menuOpen}
         onOpenChange={onMenuOpenChange}
       />

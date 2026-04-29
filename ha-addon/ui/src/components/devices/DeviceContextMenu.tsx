@@ -69,6 +69,8 @@ interface Props {
   onViewRenderedConfig: (target: string) => void;
   /** DM.2: open the ICMP ping diagnostic modal. */
   onPing: (target: string) => void;
+  /** DM.3: open the "Install to Specific Address" modal. */
+  onInstallToAddress: (target: string) => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
@@ -90,6 +92,7 @@ function DeviceContextMenuImpl({
   onCommitChanges,
   onViewRenderedConfig,
   onPing,
+  onInstallToAddress,
   open,
   onOpenChange,
 }: Props) {
@@ -207,6 +210,12 @@ function DeviceContextMenuImpl({
               the poller has resolved an address for. */}
           <DropdownMenuItem onClick={() => onPing(t.target)}>
             Ping device…
+          </DropdownMenuItem>
+          {/* DM.3: compile + OTA against a user-specified address.
+              Useful for recovery flows when mDNS is broken or the
+              device is on a different IP than the cached one. */}
+          <DropdownMenuItem onClick={() => onInstallToAddress(t.target)}>
+            Install to address…
           </DropdownMenuItem>
         </DropdownMenuGroup>
 
