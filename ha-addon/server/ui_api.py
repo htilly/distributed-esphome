@@ -217,6 +217,22 @@ async def get_file_history(request: web.Request) -> web.Response:
 
     from git_versioning import file_history  # noqa: PLC0415
     entries = file_history(Path(cfg.config_dir), filename, limit=limit, offset=offset)
+    # #211: enrich entries with firmware-availability info so the
+    # History panel can render a per-row Download chip when a stored
+    # binary still matches that commit's config_hash. The map is
+    # naturally sparse — most commits have no matching firmware.
+    history_dao = request.app.get("job_history")
+    if history_dao is not None and entries:
+        hashes = [str(e.get("hash") or "") for e in entries]
+        try:
+            firmware_by_hash = history_dao.latest_firmware_by_hash(filename, hashes)
+        except Exception:
+            firmware_by_hash = {}
+        for e in entries:
+            match = firmware_by_hash.get(str(e.get("hash") or ""))
+            if match:
+                e["firmware_job_id"] = match["job_id"]
+                e["firmware_variants"] = match["firmware_variants"]
     return web.json_response(entries)
 
 

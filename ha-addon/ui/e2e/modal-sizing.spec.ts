@@ -31,9 +31,10 @@ async function openLogModal(page: import('@playwright/test').Page) {
   await page.goto('/');
   await page.getByRole('button', { name: /Queue/ }).click();
   await expect(page.getByText('bedroom-light')).toBeVisible({ timeout: 5000 });
-  // Click the per-row "Log" button on a finished job.
+  // #209: per-row Log button moved into the row hamburger ("View log").
   const row = page.locator('#tab-queue tbody tr').filter({ hasText: 'bedroom-light' });
-  await row.getByRole('button', { name: 'Log' }).click();
+  await row.getByRole('button', { name: 'More actions' }).click();
+  await page.getByRole('menuitem', { name: 'View log' }).click();
   // xterm container appears once the log fetch resolves.
   await expect(page.locator('.xterm-container')).toBeVisible({ timeout: 5000 });
 }

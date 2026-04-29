@@ -25,8 +25,8 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from './ui/dropdown-menu';
-import { FirmwareDownloadMenu } from './FirmwareDownloadMenu';
 import { QueueHistoryDialog } from './QueueHistoryDialog';
+import { QueueRowMenu } from './queue/QueueRowMenu';
 import { TagChips } from './ui/tag-chips';
 
 interface Props {
@@ -51,6 +51,13 @@ interface Props {
    *  ``job.blocked_reason.rule_id`` (empty string if the reason
    *  surfaces a synthetic combined-rules placeholder). */
   onOpenRoutingRule: (ruleId: string) => void;
+  /** #209: device-section actions mirrored into the per-row hamburger.
+   *  Same handlers the Devices-tab row hamburger uses. */
+  onToast: (msg: string, type?: 'info' | 'success' | 'error') => void;
+  onLogs: (target: string) => void;
+  onOpenCompileHistory: (target: string) => void;
+  onPing: (target: string) => void;
+  onInstallToAddress: (target: string) => void;
 }
 
 const STATE_ORDER: Record<string, number> = {
@@ -95,6 +102,11 @@ export function QueueTab({
   onEdit,
   onOpenHistoryDiff,
   onOpenRoutingRule,
+  onToast,
+  onLogs,
+  onOpenCompileHistory,
+  onPing,
+  onInstallToAddress,
 }: Props) {
   // QS.27: persist sort across reloads via localStorage.
   const [sorting, setSorting] = usePersistedState<SortingState>(
@@ -105,13 +117,13 @@ export function QueueTab({
   const [filter, setFilter] = useState('');
   // JH.7: fleet-wide history modal open state.
   const [historyOpen, setHistoryOpen] = useState(false);
-  // #71: lift the Download dropdown's open state out of the row cell so
-  // it survives the 1 Hz SWR poll. TanStack Table re-instantiates column
-  // cells on data change, and any state kept inside the `<DropdownMenu>`
-  // would be torn down mid-click. Keyed by job id so only one dropdown
-  // is open at a time. Same pattern we used for the Devices-tab
-  // hamburger in #2 (1.4.1-dev.3) — see Design Judgment in CLAUDE.md.
-  const [downloadMenuOpenJobId, setDownloadMenuOpenJobId] = useState<string | null>(null);
+  // #209: lift the per-row hamburger open state out of the row cell so
+  // it survives the 1 Hz SWR poll. TanStack re-instantiates row cells
+  // on data change; menu state kept inside the `<DropdownMenu>` would
+  // be torn down mid-click. Same pattern we use for the Devices-tab
+  // hamburger (#2) and the Devices-tab Download menu (#71). Keyed by
+  // job id so only one menu is open at a time.
+  const [actionMenuOpenJobId, setActionMenuOpenJobId] = useState<string | null>(null);
   // Bug #112: hide the "Commit" column entirely when versioning is off.
   // The column renders short git hashes that are clickable links into the
   // History drawer — both are meaningless when there's no history to link
@@ -518,24 +530,19 @@ export function QueueTab({
         // via /ui/api/jobs/{id}/log when the modal opens.
         const hasLog = job.state !== 'pending';
         const canRetry = isJobRetryable(job);
-        const canCancel = inProgress;
         // FD.8 / #69: Download dropdown offers each stored firmware
         // variant (factory for ESP32 first-flash; ota for OTA / ESP8266)
         // plus a gzip toggle. Fallback to a single-item variants=["firmware"]
         // list for pre-#69 blobs still on disk after an upgrade.
-        // Bug #9 (1.6.1): the worker now archives every successful
-        // compile on the server, so the Download button is no longer
-        // gated on ``download_only`` — any successful compile with a
-        // stored binary can offer Download in the live Queue too.
         const canDownload = job.state === 'success' && !!job.has_firmware;
         const variants = (job.firmware_variants && job.firmware_variants.length > 0)
           ? job.firmware_variants
           : (canDownload ? ['firmware'] : []);
+        // #209: only Rerun + Clear stay inline. Cancel/Log/Download/Edit
+        // and the device-section actions move into the hamburger.
+        const target = targets.find(t => t.target === job.target) || null;
         return (
-          <div className="flex gap-1">
-            {canCancel && (
-              <Button variant="destructive" size="sm" onClick={() => onCancel([job.id])}>Cancel</Button>
-            )}
+          <div className="flex gap-1 items-center">
             {canRetry && (
               // Bug #108: every "redo this job" action reads as "Rerun" in
               // the UI; success rows keep success-green, failure rows
@@ -549,27 +556,38 @@ export function QueueTab({
                 Rerun
               </Button>
             )}
-            {canDownload && variants.length > 0 && (
-              <FirmwareDownloadMenu
-                jobId={job.id}
-                variants={variants}
-                open={downloadMenuOpenJobId === job.id}
-                onOpenChange={(open) => setDownloadMenuOpenJobId(open ? job.id : null)}
-              />
-            )}
-            {hasLog && (
-              <Button variant="secondary" size="sm" onClick={() => onOpenLog(job.id)}>Log</Button>
-            )}
-            <Button variant="secondary" size="sm" onClick={() => onEdit(job.target)}>Edit</Button>
             {isJobFinished(job) && (
               <Button variant="secondary" size="sm" onClick={() => onClear([job.id])}>Clear</Button>
             )}
+            <QueueRowMenu
+              job={job}
+              target={target}
+              inProgress={inProgress}
+              hasLog={hasLog}
+              canDownload={canDownload}
+              variants={variants}
+              open={actionMenuOpenJobId === job.id}
+              onOpenChange={(o) => setActionMenuOpenJobId(o ? job.id : null)}
+              onCancel={(id) => onCancel([id])}
+              onOpenLog={onOpenLog}
+              onEdit={onEdit}
+              onToast={onToast}
+              onLogs={onLogs}
+              onOpenCompileHistory={onOpenCompileHistory}
+              onPing={onPing}
+              onInstallToAddress={onInstallToAddress}
+            />
           </div>
         );
       },
     }),
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [workers, onCancel, onRetry, onClear, onOpenLog, onEdit, onOpenHistoryDiff, onOpenRoutingRule, targetNameMap, downloadMenuOpenJobId, versioningEnabled]);
+  ], [
+    workers, targets, onCancel, onRetry, onClear, onOpenLog, onEdit,
+    onOpenHistoryDiff, onOpenRoutingRule, targetNameMap,
+    actionMenuOpenJobId, versioningEnabled,
+    onToast, onLogs, onOpenCompileHistory, onPing, onInstallToAddress,
+  ]);
 
   const table = useReactTable({
     data: filteredQueue,

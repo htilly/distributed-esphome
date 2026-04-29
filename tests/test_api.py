@@ -770,6 +770,49 @@ async def test_pinned_job_not_deferred_by_faster_worker(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Bug #210 — selection_reason="only_eligible_worker" must NOT fire when
+# other workers were eligible-by-tag but happened to be fully booked.
+# Pre-fix path attributed busy-blocked competitors as "rules narrowed
+# the field" so untagged jobs surfaced "Only eligible by tag" in the UI.
+# ---------------------------------------------------------------------------
+
+async def test_busy_other_workers_do_not_trigger_only_eligible_reason(tmp_path, _enable_socket):
+    """Two online workers, no routing rules, the second one is fully booked.
+    The free worker should claim with reason ``first_available`` — not
+    ``only_eligible_worker``, because the busy worker IS eligible by tag.
+    """
+    ta = await _make_app(tmp_path)
+    try:
+        free_id = await _register(ta, hostname="free",
+                                   system_info={"perf_score": 50, "cpu_usage": 0})
+        busy_id = await _register(ta, hostname="busy",
+                                   system_info={"perf_score": 50, "cpu_usage": 0})
+        # Default max_parallel_jobs == 1 — fill the busy worker's only slot.
+        busy_filler = await _enqueue_job(ta.queue, "filler.yaml")
+        claimed = await ta.queue.claim_next(busy_id)
+        assert claimed is not None and claimed.id == busy_filler.id
+
+        # New untagged job, no routing rules in play.
+        await _enqueue_job(ta.queue, "device.yaml")
+
+        with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())):
+            resp = await ta.get(
+                "/api/v1/jobs/next",
+                headers={**AUTH_HEADERS, "X-Client-Id": free_id},
+            )
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["target"] == "device.yaml"
+
+        # The freshly claimed job should carry the busy-aware reason —
+        # "first_available", not the misleading "only_eligible_worker".
+        job = next(j for j in ta.queue.get_all() if j.target == "device.yaml")
+        assert job.selection_reason == "first_available"
+    finally:
+        await ta.close()
+
+
+# ---------------------------------------------------------------------------
 # 11. Job log streaming (HTTP batch POST)
 # ---------------------------------------------------------------------------
 

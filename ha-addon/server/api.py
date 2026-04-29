@@ -371,12 +371,15 @@ async def get_next_job(request: web.Request) -> web.Response:
     # Count other candidate workers so we can pick the most informative
     # reason when we don't defer.
     other_candidate_count = 0
-    # Bug #99: separately count *eligible* other candidates — workers
-    # that are eligible for at least one of the same PENDING jobs we
-    # are. When this is zero but other_candidate_count > 0, the
-    # routing rules narrowed the field to just us and the reason
-    # should reflect that, not "first_available" / "first to poll".
-    eligible_other_candidate_count = 0
+    # Bug #99: count *eligible* other candidates — workers that are
+    # eligible-by-tag for at least one of the same PENDING jobs we are.
+    # Bug #210: this count must be busy-independent so we don't
+    # misattribute "all other workers were fully booked" as
+    # ``only_eligible_worker``. ``eligible_other_count_any`` tracks
+    # tag-eligibility regardless of free slots; ``eligible_other_free_count``
+    # adds the busy filter and drives the deferral logic below.
+    eligible_other_count_any = 0
+    eligible_other_free_count = 0
     defer_beats_me_on_jobs = False
     defer_beats_me_on_perf = False
     if worker:
@@ -405,26 +408,26 @@ async def get_next_job(request: web.Request) -> web.Response:
             other_cpu = other_info.get("cpu_usage")
             other_effective = other_perf * (1 - (other_cpu or 0) / 100)
             other_free = other_active < other.max_parallel_jobs
-            if not other_free:
-                continue  # fully busy, ignore
-            # Bug #98: skip "other" as a deferral candidate when they
-            # aren't eligible for any of the jobs *we* could take. A
-            # faster-but-ineligible worker deferring loop leaves the
-            # job stranded.
-            # Bug #99: also use this filter to count "real" eligible
-            # alternatives — drives the new ``only_eligible_worker``
-            # reason when the rule has narrowed the field to just us.
+            # Bug #98 / #99 / #210: tag-eligibility is computed BEFORE
+            # the busy-skip so the reason hint can distinguish "rules
+            # narrowed the field" from "others are eligible but busy".
+            # Bug #98 (deferral loop) still gates on free-AND-eligible.
             if my_eligible_pending:
                 other_check = build_claim_eligibility(request.app, list(other.tags or []))
-                if not any(
+                is_other_eligible = any(
                     other_check(j)
                     and (not j.pinned_client_id or j.pinned_client_id == other.client_id)
                     for j in my_eligible_pending
-                ):
-                    continue
-                eligible_other_candidate_count += 1
+                )
             else:
-                eligible_other_candidate_count += 1
+                is_other_eligible = True
+            if is_other_eligible:
+                eligible_other_count_any += 1
+            if not other_free:
+                continue  # fully busy, ignore for deferral logic below
+            if not is_other_eligible:
+                continue  # eligible-but-ineligible-for-our-jobs — skip deferral
+            eligible_other_free_count += 1
             # Rule 1: another worker has fewer jobs — let them catch up
             if other_active < my_active:
                 should_defer = True
@@ -445,10 +448,13 @@ async def get_next_job(request: web.Request) -> web.Response:
     # job (returns None if nothing matches).
     if other_candidate_count == 0:
         selection_reason_hint = "only_online_worker"
-    elif eligible_other_candidate_count == 0 and my_eligible_pending:
+    elif eligible_other_count_any == 0 and my_eligible_pending:
         # Bug #99: other workers are online, but the routing rules
         # disqualified all of them for the jobs in our queue. The
         # reason isn't "first to poll" — it's "rule narrowed to me".
+        # Bug #210: count is busy-independent so a fleet where every
+        # other worker is eligible-but-fully-booked falls through to
+        # ``first_available`` rather than misreporting as ``only_eligible``.
         selection_reason_hint = "only_eligible_worker"
     elif defer_beats_me_on_jobs:
         selection_reason_hint = "fewer_jobs_than_others"

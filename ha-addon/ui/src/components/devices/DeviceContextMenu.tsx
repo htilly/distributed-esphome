@@ -9,8 +9,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
 } from '../ui/dropdown-menu';
-import { getApiKey, restartDevice } from '../../api/client';
-import { stripYaml } from '../../utils';
+import { DeviceMenuSection } from './DeviceMenuSection';
 import { useVersioningEnabled } from '../../hooks/useVersioning';
 import type { Target } from '../../types';
 
@@ -104,25 +103,6 @@ function DeviceContextMenuImpl({
   // API Key).
   const versioningEnabled = useVersioningEnabled();
 
-  async function handleCopyApiKey() {
-    try {
-      const key = await getApiKey(t.target);
-      await navigator.clipboard.writeText(key);
-      onToast('API key copied!', 'success');
-    } catch {
-      onToast('No API key found', 'info');
-    }
-  }
-
-  async function handleRestart() {
-    try {
-      await restartDevice(t.target);
-      onToast(`Restarting ${stripYaml(t.target)}...`, 'success');
-    } catch (err) {
-      onToast('Restart failed: ' + (err as Error).message, 'error');
-    }
-  }
-
   // DM.1: archived rows expose ONLY Unarchive + Permanently delete.
   // All other actions (Live Logs, Restart, Compile, Pin, Rename,
   // Duplicate, Commit changes, etc.) are meaningless when the YAML
@@ -179,45 +159,16 @@ function DeviceContextMenuImpl({
            only the close animation is suppressed. */
         className="min-w-[200px] w-max max-w-[320px] data-[state=closed]:!animate-none"
       >
-        <DropdownMenuGroup>
-          <DropdownMenuLabel>Device</DropdownMenuLabel>
-          <DropdownMenuItem onClick={() => onLogs(t.target)}>Live Logs</DropdownMenuItem>
-          {/* JH.5: per-device past-compiles drawer. Reads from the
-              persistent /ui/api/history table so the view survives
-              queue coalescing + clears. */}
-          <DropdownMenuItem onClick={() => onOpenCompileHistory(t.target)}>
-            Compile history…
-          </DropdownMenuItem>
-          {/* #14: grayed out when the YAML doesn't expose a restart button. */}
-          <DropdownMenuItem
-            onClick={handleRestart}
-            disabled={!t.has_restart_button}
-            title={t.has_restart_button ? undefined : "No restart button in this device's YAML — add `button: [{platform: restart}]` to enable."}
-          >
-            Restart
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            onClick={handleCopyApiKey}
-            disabled={!t.has_api_key}
-            /* UX.11: disable-don't-fail tooltips explain why the item
-               is disabled + what YAML change enables it. */
-            title={t.has_api_key ? undefined : "This device has no `api:` block with an encryption key. Add `api: { encryption: { key: ... } }` to enable."}
-          >
-            Copy API Key
-          </DropdownMenuItem>
-          {/* DM.2: ICMP ping diagnostic. Opens a modal with a one-shot
-              ping run + RTT/loss summary. Available for any device
-              the poller has resolved an address for. */}
-          <DropdownMenuItem onClick={() => onPing(t.target)}>
-            Ping device…
-          </DropdownMenuItem>
-          {/* DM.3: compile + OTA against a user-specified address.
-              Useful for recovery flows when mDNS is broken or the
-              device is on a different IP than the cached one. */}
-          <DropdownMenuItem onClick={() => onInstallToAddress(t.target)}>
-            Install to address…
-          </DropdownMenuItem>
-        </DropdownMenuGroup>
+        {/* #209: shared "Device" section so the Devices-tab hamburger
+            and the Queue-tab hamburger render the exact same actions. */}
+        <DeviceMenuSection
+          target={t}
+          onToast={onToast}
+          onLogs={onLogs}
+          onOpenCompileHistory={onOpenCompileHistory}
+          onPing={onPing}
+          onInstallToAddress={onInstallToAddress}
+        />
 
         <DropdownMenuSeparator />
 

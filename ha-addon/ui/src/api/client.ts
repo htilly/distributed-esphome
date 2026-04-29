@@ -166,6 +166,11 @@ export interface FileHistoryEntry {
   message: string;
   lines_added: number;
   lines_removed: number;
+  // #211: when a successful compile at this commit still has its
+  // firmware binary on disk, the server attaches the job id + the
+  // available variants so the History panel can render a Download chip.
+  firmware_job_id?: string;
+  firmware_variants?: string[];
 }
 
 export interface FileStatus {

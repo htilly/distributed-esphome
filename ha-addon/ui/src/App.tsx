@@ -916,6 +916,12 @@ export default function App() {
             // TG.9: BLOCKED-badge click opens the routing-rules editor
             // pre-selected to the rule that fired.
             onOpenRoutingRule={(ruleId) => setRoutingRulesEditId(ruleId)}
+            // #209: device-section actions mirrored from the Devices tab.
+            onToast={addToast}
+            onLogs={setDeviceLogTarget}
+            onOpenCompileHistory={(target) => setCompileHistoryTarget(target)}
+            onPing={(target) => setPingTarget(target)}
+            onInstallToAddress={(target) => setInstallAddressTarget(target)}
           />
         )}
         {activeTab === 'workers' && (

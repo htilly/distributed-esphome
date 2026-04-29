@@ -1102,14 +1102,20 @@ def get_archived_device_metadata(config_dir: str, filename: str) -> dict:
 
     #203: archived rows used to come back with every attribute set to None
     so the Devices tab couldn't show their tags / area / comment / project,
-    and the tag-filter pills lost the archived rows' tags entirely. We
-    re-read the archived YAML (raw — no ESPHome resolution; the file may
-    reference deleted secrets / packages) and return the same shape
-    :func:`get_device_metadata` returns. Comment-block fields (tags,
-    pinned_version, schedule) come back via :func:`read_device_meta`;
-    YAML-literal fields (friendly_name, device_name, comment, area,
-    project_name, project_version, has_web_server) come back via the raw
-    loader's ``_fill_missing_metadata`` path.
+    and the tag-filter pills lost the archived rows' tags entirely.
+    Comment-block fields (tags, pinned_version, schedule) come back via
+    :func:`read_device_meta`; YAML-literal fields (friendly_name,
+    device_name, comment, area, project_name, project_version,
+    has_web_server) come back via either the full ESPHome resolver or
+    the raw loader fallback.
+
+    #212: archived YAMLs that compose their ``esphome:`` block via
+    ``packages:`` / ``<<: !include common.yaml`` would lose their
+    friendly_name when the raw loader couldn't see through the include.
+    We attempt :func:`_resolve_esphome_config` first (which handles
+    packages + includes the same way ``esphome compile`` does) and
+    silently fall back to the raw loader when resolution fails — the
+    archive may reference deleted secrets or packages, which is fine.
     """
     result = _empty_metadata()
     archived_target = f".archive/{filename}"
@@ -1121,9 +1127,13 @@ def get_archived_device_metadata(config_dir: str, filename: str) -> dict:
         result["schedule_last_run"] = device_meta.get("schedule_last_run")
         result["schedule_once"] = device_meta.get("schedule_once")
         result["tags"] = device_meta.get("tags")
-    raw_config = _load_raw_yaml(config_dir, archived_target)
-    if raw_config is not None:
-        _fill_missing_metadata(raw_config, result)
+    config = _resolve_esphome_config(config_dir, archived_target)
+    if config is not None:
+        _extract_metadata(config, result)
+    if config is None or result["friendly_name"] is None or result["area"] is None:
+        raw_config = _load_raw_yaml(config_dir, archived_target)
+        if raw_config is not None:
+            _fill_missing_metadata(raw_config, result)
     return result
 
 

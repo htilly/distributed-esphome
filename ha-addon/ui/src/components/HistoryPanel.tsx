@@ -17,6 +17,7 @@ import {
 } from '@/api/client';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { FirmwareDownloadMenu } from './FirmwareDownloadMenu';
 import {
   Sheet,
   SheetBody,
@@ -214,6 +215,11 @@ export function HistoryPanel({
   // native window.confirm (which looks like a Jetsons-era browser
   // popup). Holds the entry under review; null = closed.
   const [restoreCandidate, setRestoreCandidate] = useState<FileHistoryEntry | null>(null);
+  // #211: lift the per-row firmware Download dropdown's open state out of
+  // the row cell so it survives SWR refreshes — same pattern the Devices
+  // tab and Queue tab use (#2, #71). Keyed by commit hash so only one
+  // dropdown is open at a time.
+  const [downloadMenuOpenHash, setDownloadMenuOpenHash] = useState<string | null>(null);
 
   async function handleRollback(entry: FileHistoryEntry) {
     if (!filename) return;
@@ -391,6 +397,10 @@ export function HistoryPanel({
                   entry={entry}
                   isFrom={fromHash === entry.hash}
                   isTo={toHash === entry.hash}
+                  downloadMenuOpen={downloadMenuOpenHash === entry.hash}
+                  onDownloadMenuOpenChange={(o) =>
+                    setDownloadMenuOpenHash(o ? entry.hash : null)
+                  }
                   onClick={(e) => {
                     if (e.shiftKey) {
                       setFromHash(entry.hash);
@@ -532,6 +542,8 @@ function CommitRow({
   onRestore,
   disabled,
   restoreNoop = false,
+  downloadMenuOpen,
+  onDownloadMenuOpenChange,
 }: {
   entry: FileHistoryEntry;
   isFrom: boolean;
@@ -542,6 +554,9 @@ function CommitRow({
   onRestore: () => void;
   disabled: boolean;
   restoreNoop?: boolean;
+  /** #211: per-row firmware Download menu open state, controlled by the panel. */
+  downloadMenuOpen: boolean;
+  onDownloadMenuOpenChange: (open: boolean) => void;
 }) {
   const when = formatRelativeTime(entry.date);
   // Bug 22: absolute local time alongside the relative one. Short form
@@ -576,6 +591,19 @@ function CommitRow({
         <span className="text-red-400">-{entry.lines_removed}</span>
       </span>
       <div className="flex gap-1 ml-1" onClick={e => e.stopPropagation()}>
+        {/* #211: when a stored firmware binary still matches this
+            commit's config_hash, surface a Download chip alongside
+            From / To / Restore. Same icon-only treatment the
+            Compile-history drawer uses to keep the row width tight. */}
+        {entry.firmware_job_id && entry.firmware_variants && entry.firmware_variants.length > 0 && (
+          <FirmwareDownloadMenu
+            jobId={entry.firmware_job_id}
+            variants={entry.firmware_variants}
+            open={downloadMenuOpen}
+            onOpenChange={onDownloadMenuOpenChange}
+            size="icon"
+          />
+        )}
         <Button
           type="button"
           size="sm"

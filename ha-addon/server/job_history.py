@@ -469,6 +469,59 @@ class JobHistoryDAO:
                 r["firmware_variants"] = []
         return rows
 
+    def latest_firmware_by_hash(
+        self, target: str, hashes: Iterable[str],
+    ) -> dict[str, dict[str, object]]:
+        """#211 — Map config_hash → most-recent successful job_id + variants.
+
+        Used by ``/ui/api/files/<file>/history`` so the History panel can
+        surface a Download chip on rows whose firmware binary is still on
+        disk. Only rows with ``state='success'`` and ``has_firmware=1``
+        are considered; binaries evicted by the retention task surface as
+        ``firmware_variants=[]`` and the UI suppresses the chip.
+
+        Returns ``{hash: {"job_id", "firmware_variants"}}`` for the
+        subset of *hashes* that have a matching firmware-bearing job.
+        Hashes without a match are absent from the result.
+        """
+        self.init()
+        result: dict[str, dict[str, object]] = {}
+        if not self._initialized:
+            return result
+        hash_set = {h for h in hashes if h}
+        if not hash_set:
+            return result
+        # SQLite doesn't take Python sets; spell out a placeholder list.
+        placeholders = ",".join("?" * len(hash_set))
+        sql = (
+            "SELECT id, config_hash, finished_at FROM jobs "
+            "WHERE target = ? AND state = 'success' AND has_firmware = 1 "
+            f"AND config_hash IN ({placeholders}) "
+            "ORDER BY finished_at DESC, submitted_at DESC"
+        )
+        params: list[object] = [target, *hash_set]
+        with self._connect() as conn:
+            cur = conn.execute(sql, params)
+            rows = [dict(r) for r in cur.fetchall()]
+        try:
+            from firmware_storage import list_variants  # noqa: PLC0415
+        except Exception:
+            list_variants = None  # type: ignore[assignment]
+        for r in rows:
+            h = r.get("config_hash")
+            if not h or h in result:
+                continue  # ORDER BY puts newest first — keep that one
+            variants: list[str] = []
+            if list_variants is not None:
+                try:
+                    variants = list_variants(str(r["id"]))
+                except Exception:
+                    variants = []
+            if not variants:
+                continue  # binary evicted — skip the row
+            result[str(h)] = {"job_id": str(r["id"]), "firmware_variants": variants}
+        return result
+
     def get(self, job_id: str) -> dict[str, object] | None:
         """Return a single history row keyed by *job_id*, or ``None``.
 
