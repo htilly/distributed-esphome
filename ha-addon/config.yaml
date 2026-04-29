@@ -1,5 +1,5 @@
 name: "ESPHome Fleet"
-version: "1.7.0-dev.45"
+version: "1.7.0-dev.46"
 slug: "esphome_dist_server"
 description: "A modern Home Assistant UI for ESPHome — git-backed config history with rollback, live compile queue, per-device version pinning, scheduled OTA, optional distributed compilation. Works whether you have 3 or 300 devices."
 url: "https://github.com/weirded/distributed-esphome"
@@ -89,8 +89,14 @@ discovery:
 # GitHub #45: exclude the local worker's ESPHome version cache + build
 # artifacts from HA backups. These are large (~50-200MB per target) and
 # fully reproducible — they'll be rebuilt on first compile after restore.
+# Bug #199: also exclude /data/firmware/ — compiled .bin archives kept
+# for the History tab's Download button. ~100% of the partial-addon
+# backup payload today (237 MB on hass-4 for ~480 retained jobs); they
+# regenerate from YAML on Compile / Rerun, so a restore never blocks
+# on them. Pairs with #198's 2-day on-disk retention.
 backup_exclude:
   - esphome-versions
+  - firmware
 
 map:
   # HI.9: need write access to /config/custom_components/esphome_fleet/

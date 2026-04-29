@@ -881,14 +881,34 @@ def _staged_paths(config_dir: Path) -> set[str]:
     non-zero even when the intended paths are in the index — see the
     hass-4 WARNING on 2026-04-19. Empty set on any failure (treated as
     "nothing known to be staged").
+
+    #197: uses ``--name-status`` (not ``--name-only``) so a rename
+    contributes BOTH the source and the destination path. With
+    ``--name-only`` git collapses ``R100\\tsrc\\tdst`` to just ``dst``,
+    which made ``archive_and_commit`` filter out the staged deletion
+    of the source — ``git commit -- dst`` then committed only the
+    addition and left the deletion dangling in the index, so the
+    next ``git status`` showed ``D  src``. Including the source path
+    lets the commit see both halves of the rename together so the
+    commit lands atomically with no leftover index entries.
     """
     diff = _run(
-        ["git", "diff", "--cached", "--name-only"],
+        ["git", "diff", "--cached", "--name-status"],
         cwd=config_dir, check=False,
     )
     if diff.returncode != 0:
         return set()
-    return {line for line in diff.stdout.splitlines() if line}
+    paths: set[str] = set()
+    for line in diff.stdout.splitlines():
+        if not line:
+            continue
+        # ``--name-status`` lines: ``<status>\t<path>`` or, for renames
+        # / copies, ``R100\t<src>\t<dst>``. Splitting on tab handles
+        # both shapes; we want every path that follows the status.
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            paths.update(p for p in parts[1:] if p)
+    return paths
 
 
 async def archive_and_commit(config_dir: Path, relpath: str) -> bool:
