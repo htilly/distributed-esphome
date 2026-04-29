@@ -102,6 +102,12 @@
     },
     "invalid_worker_device": {
       "message": "The selected worker is not an ESPHome Fleet build worker."
+    },
+    "no_targets_match_tags": {
+      "message": "No managed devices match the supplied tag expression."
+    },
+    "tags_match_multiple": {
+      "message": "The tag expression matches {count} devices ({matches}); validate accepts a single target. Use compile for a fleet-wide run."
     }
   }
 }

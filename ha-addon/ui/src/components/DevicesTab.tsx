@@ -32,6 +32,7 @@ import { getAriaSort } from './ui/sort-header';
 import { DeleteModal, RenameModal } from './devices/DeviceTableModals';
 import { useDeviceColumns } from './devices/useDeviceColumns';
 import { DeviceTableActions } from './devices/DeviceTableActions';
+import { hasDriftedConfig } from './devices/drift';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -617,6 +618,22 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
                     disabled={!targets.some(t => t.needs_update)}
                   >
                     Upgrade Outdated
+                  </DropdownMenuItem>
+                  {/* 115: "Upgrade Changed" — devices whose YAML has
+                      drifted from what's currently flashed. Shares the
+                      `hasDriftedConfig` helper with the per-row drift
+                      indicator so the menu picks the same set the user
+                      already sees marked. Distinct from "Outdated" (the
+                      latter is firmware-version mismatch; this is
+                      configuration drift). */}
+                  <DropdownMenuItem
+                    onClick={() => {
+                      const changed = targets.filter(hasDriftedConfig).map(t => t.target);
+                      if (changed.length > 0) onUpgradeMany(changed, `${changed.length} changed device${changed.length === 1 ? '' : 's'}`);
+                    }}
+                    disabled={!targets.some(hasDriftedConfig)}
+                  >
+                    Upgrade Changed
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem

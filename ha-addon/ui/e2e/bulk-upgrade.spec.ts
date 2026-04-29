@@ -54,6 +54,38 @@ test.describe('Bug #107 — bulk Upgrade items open the UpgradeModal', () => {
     await page.keyboard.press('Escape');
   });
 
+  // 115 — "Upgrade Changed": filters by hasDriftedConfig (config_drifted
+  // _since_flash || config_modified). Distinct from Upgrade Outdated
+  // (firmware-version mismatch).
+  test('Upgrade Changed is disabled when no targets have config drift', async ({ page }) => {
+    await upgradeTrigger(page).click();
+    await expect(page.getByRole('menuitem', { name: /^Upgrade Changed$/ })).toHaveAttribute('aria-disabled', 'true');
+    await page.keyboard.press('Escape');
+  });
+
+  test('Upgrade Changed opens the modal with only drifted devices in the title', async ({ page }) => {
+    // Mark exactly one fixture target as drifted so the title lands on
+    // "1 changed device".
+    await page.route('**/ui/api/targets', route => {
+      const drifted = fixtureTargets.map((t, i) => ({
+        ...t,
+        config_drifted_since_flash: i === 0 ? true : null,
+      }));
+      route.fulfill({ json: drifted });
+    });
+    await page.reload();
+    await expect(page.getByText('Living Room Sensor')).toBeVisible({ timeout: 5000 });
+
+    await upgradeTrigger(page).click();
+    const item = page.getByRole('menuitem', { name: /^Upgrade Changed$/ });
+    await expect(item).not.toHaveAttribute('aria-disabled', 'true');
+    await item.click();
+
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole('heading', { name: /Upgrade — 1 changed device$/ })).toBeVisible();
+  });
+
   test('Upgrade Selected enqueues a single compile POST containing every checked target', async ({ page }) => {
     let postedTargets: unknown = null;
     await page.route('**/ui/api/compile', route => {
