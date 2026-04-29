@@ -726,6 +726,34 @@ export async function restartDevice(filename: string): Promise<void> {
   );
 }
 
+// DM.2: ICMP ping result returned by /ui/api/targets/{filename}/ping.
+// Worst-case ~3.8 s wall time on an unreachable host; resolve_ota_address
+// resolution is the same one the OTA path uses so we hit what an upload
+// would target.
+export interface PingResult {
+  target: string;
+  address: string;
+  ran_at: number;
+  is_alive: boolean;
+  packets_sent: number;
+  packets_received: number;
+  packet_loss: number;
+  min_rtt: number;
+  avg_rtt: number;
+  max_rtt: number;
+  jitter: number;
+}
+
+export async function pingDevice(filename: string): Promise<PingResult> {
+  return parseResponse<PingResult>(
+    await apiFetch(
+      `./ui/api/targets/${encodeURIComponent(filename)}/ping`,
+      { method: 'POST' },
+    ),
+    'pinging device',
+  );
+}
+
 export async function renameTarget(
   filename: string,
   newName: string,

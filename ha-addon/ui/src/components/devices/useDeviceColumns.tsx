@@ -79,6 +79,8 @@ interface Options {
   onCommitChanges: (target: string) => void;
   /** RC.1: open the read-only rendered-config viewer. */
   onViewRenderedConfig: (target: string) => void;
+  /** DM.2: open the ICMP ping diagnostic modal. */
+  onPing: (target: string) => void;
   /**
    * #2 followup to QS.16: per-row hamburger open state is owned by
    * DevicesTab (not Radix's internal state) so it survives row re-mounts
@@ -162,6 +164,7 @@ export function useDeviceColumns(options: Options) {
     onOpenCompileHistory,
     onCommitChanges,
     onViewRenderedConfig,
+    onPing,
     menuOpenTarget,
     setMenuOpenTarget,
     onEditTags,
@@ -681,6 +684,7 @@ export function useDeviceColumns(options: Options) {
           onOpenCompileHistory={onOpenCompileHistory}
           onCommitChanges={onCommitChanges}
           onViewRenderedConfig={onViewRenderedConfig}
+          onPing={onPing}
           onMenuOpenChange={(o) => setMenuOpenTarget(o ? t.target : null)}
         />
       ),
@@ -702,6 +706,7 @@ export function useDeviceColumns(options: Options) {
     onOpenCompileHistory,
     onCommitChanges,
     onViewRenderedConfig,
+    onPing,
     menuOpenTarget,
     setMenuOpenTarget,
     onEditTags,

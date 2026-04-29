@@ -3097,6 +3097,93 @@ async def restart_device(request: web.Request) -> web.Response:
         )
 
 
+@routes.post("/ui/api/targets/{filename}/ping")
+async def ping_device(request: web.Request) -> web.Response:
+    """DM.2: ICMP ping a device and return RTT / loss stats.
+
+    Resolves the target's address through ``device_poller.resolve_ota_address``
+    so the ping target matches what an OTA upload would hit (real IP from
+    mDNS / static-IP override beats a stale ``.local`` hostname per #18).
+    Runs ``icmplib.async_ping(host, count=10, interval=0.2, timeout=2,
+    privileged=False)`` — unprivileged ICMP via ``net.ipv4.ping_group_range``,
+    which the HA add-on container and the standalone Docker container both
+    inherit. No new dependencies (icmplib already pinned for the
+    device_poller's ping fallback). Worst-case wall time for an unreachable
+    host is `(count-1)*interval + timeout` ≈ 3.8 s — batch UX, no streaming.
+
+    Returns: flat dict with ``is_alive``, ``packets_sent``, ``packets_received``,
+    ``packet_loss``, ``min_rtt``, ``avg_rtt``, ``max_rtt``, ``jitter``, plus
+    ``target``, ``address``, ``ran_at``. Errors:
+      - 404 ``no_resolved_address`` — poller has no address for this device
+        (ESPHome device never came up on mDNS, no ``use_address`` override).
+      - 404 ``unknown_target`` — the YAML filename doesn't match any device
+        the poller has seen.
+    """
+    import time as _time  # noqa: PLC0415
+
+    filename = request.match_info["filename"]
+    device_poller = request.app.get("device_poller")
+    if device_poller is None:
+        return web.json_response(
+            {"error": "device poller unavailable"}, status=503,
+        )
+
+    # Find the device that compiles to this YAML — same lookup pattern as
+    # the restart endpoint above. We look up by ``compile_target`` so the
+    # filename-to-device mapping is authoritative against the live poll.
+    dev = None
+    for d in device_poller.get_devices():
+        if d.compile_target == filename:
+            dev = d
+            break
+    if dev is None:
+        return web.json_response(
+            {"error": "unknown_target", "target": filename}, status=404,
+        )
+
+    address = device_poller.resolve_ota_address(dev.name)
+    if not address:
+        return web.json_response(
+            {
+                "error": "no_resolved_address",
+                "target": filename,
+                "device_name": dev.name,
+            },
+            status=404,
+        )
+
+    logger.info(
+        "Ping: target=%s name=%s address=%s (count=10, interval=0.2s, timeout=2s)",
+        filename, dev.name, address,
+    )
+
+    try:
+        from icmplib import async_ping  # noqa: PLC0415
+        host = await async_ping(
+            address, count=10, interval=0.2, timeout=2, privileged=False,
+        )
+    except Exception as exc:
+        logger.warning("Ping %s (%s) failed: %s", filename, address, exc)
+        return web.json_response(
+            {"error": "ping_failed", "detail": str(exc), "target": filename, "address": address},
+            status=500,
+        )
+
+    return web.json_response({
+        "target": filename,
+        "address": address,
+        "ran_at": _time.time(),
+        "is_alive": bool(host.is_alive),
+        "packets_sent": int(host.packets_sent),
+        "packets_received": int(host.packets_received),
+        "packet_loss": float(host.packet_loss),
+        "min_rtt": float(host.min_rtt),
+        "avg_rtt": float(host.avg_rtt),
+        "max_rtt": float(host.max_rtt),
+        "jitter": float(host.jitter),
+    })
+
+
 @routes.post("/ui/api/retry")
 async def retry_jobs(request: web.Request) -> web.Response:
     """Re-enqueue failed/timed_out jobs.

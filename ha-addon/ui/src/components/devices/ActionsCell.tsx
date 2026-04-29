@@ -53,6 +53,8 @@ interface Props {
   onCommitChanges: (target: string) => void;
   /** RC.1: open the read-only rendered-config viewer. */
   onViewRenderedConfig: (target: string) => void;
+  /** DM.2: open the ICMP ping diagnostic modal. */
+  onPing: (target: string) => void;
   onMenuOpenChange: (open: boolean) => void;
 }
 
@@ -76,6 +78,7 @@ function ActionsCellImpl({
   onOpenCompileHistory,
   onCommitChanges,
   onViewRenderedConfig,
+  onPing,
   onMenuOpenChange,
 }: Props) {
   // DM.1: archived rows expose only the hamburger (Unarchive +
@@ -102,6 +105,7 @@ function ActionsCellImpl({
           onOpenCompileHistory={onOpenCompileHistory}
           onCommitChanges={onCommitChanges}
           onViewRenderedConfig={onViewRenderedConfig}
+          onPing={onPing}
           open={menuOpen}
           onOpenChange={onMenuOpenChange}
         />
@@ -151,6 +155,7 @@ function ActionsCellImpl({
         onOpenCompileHistory={onOpenCompileHistory}
         onCommitChanges={onCommitChanges}
         onViewRenderedConfig={onViewRenderedConfig}
+        onPing={onPing}
         open={menuOpen}
         onOpenChange={onMenuOpenChange}
       />

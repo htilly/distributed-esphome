@@ -1746,3 +1746,152 @@ async def test_set_esphome_version_rejects_missing_version(tmp_path):
         assert resp.status == 400
     finally:
         await ta.close()
+
+
+# ---------------------------------------------------------------------------
+# DM.2: ICMP ping diagnostic
+# ---------------------------------------------------------------------------
+
+
+async def test_ping_returns_503_when_no_device_poller(tmp_path, _enable_socket):
+    """Without a device_poller hung off the app, ping has no way to find devices."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        resp = await ta.post("/ui/api/targets/device1.yaml/ping")
+        assert resp.status == 503
+    finally:
+        await ta.close()
+
+
+async def test_ping_returns_404_for_unknown_target(tmp_path, _enable_socket):
+    """A YAML the poller has never seen returns ``unknown_target``."""
+    from datetime import datetime
+    from device_poller import DevicePoller
+
+    ta = await _make_ui_app(tmp_path)
+    try:
+        poller = DevicePoller()
+        ta.client.server.app._state["device_poller"] = poller
+        resp = await ta.post("/ui/api/targets/missing.yaml/ping")
+        assert resp.status == 404
+        body = await resp.json()
+        assert body["error"] == "unknown_target"
+        assert body["target"] == "missing.yaml"
+        # Silence the unused-import warning for the date stub used elsewhere.
+        _ = datetime.now()
+    finally:
+        await ta.close()
+
+
+async def test_ping_returns_404_when_no_resolved_address(tmp_path, _enable_socket):
+    """Device exists but resolve_ota_address returned None."""
+    from datetime import datetime
+    from device_poller import Device, DevicePoller
+
+    ta = await _make_ui_app(tmp_path)
+    try:
+        poller = DevicePoller()
+        # ip_address=None and no override → resolve_ota_address returns None.
+        poller._devices["device1"] = Device(
+            name="device1",
+            ip_address=None,
+            online=False,
+            last_seen=datetime.now(),
+            compile_target="device1.yaml",
+        )
+        ta.client.server.app._state["device_poller"] = poller
+
+        resp = await ta.post("/ui/api/targets/device1.yaml/ping")
+        assert resp.status == 404
+        body = await resp.json()
+        assert body["error"] == "no_resolved_address"
+        assert body["target"] == "device1.yaml"
+        assert body["device_name"] == "device1"
+    finally:
+        await ta.close()
+
+
+async def test_ping_success_returns_stats(tmp_path, monkeypatch, _enable_socket):
+    """Happy path: poller has the device, async_ping returns alive host."""
+    from datetime import datetime
+    from device_poller import Device, DevicePoller
+
+    ta = await _make_ui_app(tmp_path)
+    try:
+        poller = DevicePoller()
+        poller._devices["device1"] = Device(
+            name="device1",
+            ip_address="192.168.1.42",
+            online=True,
+            last_seen=datetime.now(),
+            compile_target="device1.yaml",
+        )
+        ta.client.server.app._state["device_poller"] = poller
+
+        # Stub icmplib.async_ping with a fake Host object whose attrs match
+        # the real shape so the handler's coercions stay honest.
+        class _FakeHost:
+            is_alive = True
+            packets_sent = 10
+            packets_received = 9
+            packet_loss = 0.1
+            min_rtt = 1.2
+            avg_rtt = 2.5
+            max_rtt = 10.0
+            jitter = 0.8
+
+        async def _fake_ping(*args, **kwargs):
+            return _FakeHost()
+
+        import icmplib
+        monkeypatch.setattr(icmplib, "async_ping", _fake_ping)
+
+        resp = await ta.post("/ui/api/targets/device1.yaml/ping")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["target"] == "device1.yaml"
+        assert body["address"] == "192.168.1.42"
+        assert body["is_alive"] is True
+        assert body["packets_sent"] == 10
+        assert body["packets_received"] == 9
+        assert body["packet_loss"] == 0.1
+        assert body["min_rtt"] == 1.2
+        assert body["avg_rtt"] == 2.5
+        assert body["max_rtt"] == 10.0
+        assert body["jitter"] == 0.8
+        assert isinstance(body["ran_at"], (int, float))
+    finally:
+        await ta.close()
+
+
+async def test_ping_returns_500_when_icmplib_raises(tmp_path, monkeypatch, _enable_socket):
+    """Network/permission failure in icmplib surfaces as 500 ``ping_failed``."""
+    from datetime import datetime
+    from device_poller import Device, DevicePoller
+
+    ta = await _make_ui_app(tmp_path)
+    try:
+        poller = DevicePoller()
+        poller._devices["device1"] = Device(
+            name="device1",
+            ip_address="192.168.1.42",
+            online=True,
+            last_seen=datetime.now(),
+            compile_target="device1.yaml",
+        )
+        ta.client.server.app._state["device_poller"] = poller
+
+        async def _boom(*args, **kwargs):
+            raise OSError("permission denied (no CAP_NET_RAW)")
+
+        import icmplib
+        monkeypatch.setattr(icmplib, "async_ping", _boom)
+
+        resp = await ta.post("/ui/api/targets/device1.yaml/ping")
+        assert resp.status == 500
+        body = await resp.json()
+        assert body["error"] == "ping_failed"
+        assert "permission denied" in body["detail"]
+        assert body["address"] == "192.168.1.42"
+    finally:
+        await ta.close()

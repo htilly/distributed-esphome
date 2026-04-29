@@ -43,6 +43,7 @@ import { DevicesTab, RenameModal } from './components/DevicesTab';
 import { NewDeviceModal } from './components/NewDeviceModal';
 import { UpgradeModal } from './components/UpgradeModal';
 import { RenderedConfigModal } from './components/RenderedConfigModal';
+import PingDeviceModal from './components/PingDeviceModal';
 // ScheduleModal retired in #22 — absorbed into the unified UpgradeModal.
 import { SchedulesTab } from './components/SchedulesTab';
 import { EditorModal } from './components/EditorModal';
@@ -181,6 +182,8 @@ export default function App() {
   // open and discards the output on close — the response carries
   // plaintext !secret values, so we never persist it.
   const [renderedConfigTarget, setRenderedConfigTarget] = useState<string | null>(null);
+  // DM.2: target whose Ping modal is currently open (or null if none).
+  const [pingTarget, setPingTarget] = useState<string | null>(null);
   // QS.6: SWR's default compare (stable-hash) already prevents re-renders
   // when polled data is structurally unchanged. The custom JSON.stringify
   // compare we used to have was strictly worse — O(n) serialization of the
@@ -884,6 +887,7 @@ export default function App() {
             onOpenCompileHistory={(target) => setCompileHistoryTarget(target)}
             onCommitChanges={(target) => { setCommitDialogMessage(''); setCommitDialogTarget(target); }}
             onViewRenderedConfig={(target) => setRenderedConfigTarget(target)}
+            onPing={(target) => setPingTarget(target)}
             onRefresh={() => mutateDevices()}
           />
         )}
@@ -1268,6 +1272,15 @@ export default function App() {
           />
         );
       })()}
+
+      {/* DM.2: ICMP ping diagnostic for the per-row hamburger entry. */}
+      {pingTarget && (
+        <PingDeviceModal
+          target={pingTarget}
+          onClose={() => setPingTarget(null)}
+          onToast={addToast}
+        />
+      )}
 
       {renameModalTarget && (
         <RenameModal

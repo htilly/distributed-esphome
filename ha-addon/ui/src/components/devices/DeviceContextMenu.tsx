@@ -67,6 +67,8 @@ interface Props {
   /** RC.1: open the read-only modal showing the YAML *as ESPHome will
    *  compile it* (substitutions / packages / !secret resolved). */
   onViewRenderedConfig: (target: string) => void;
+  /** DM.2: open the ICMP ping diagnostic modal. */
+  onPing: (target: string) => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
@@ -87,6 +89,7 @@ function DeviceContextMenuImpl({
   onOpenCompileHistory,
   onCommitChanges,
   onViewRenderedConfig,
+  onPing,
   open,
   onOpenChange,
 }: Props) {
@@ -198,6 +201,12 @@ function DeviceContextMenuImpl({
             title={t.has_api_key ? undefined : "This device has no `api:` block with an encryption key. Add `api: { encryption: { key: ... } }` to enable."}
           >
             Copy API Key
+          </DropdownMenuItem>
+          {/* DM.2: ICMP ping diagnostic. Opens a modal with a one-shot
+              ping run + RTT/loss summary. Available for any device
+              the poller has resolved an address for. */}
+          <DropdownMenuItem onClick={() => onPing(t.target)}>
+            Ping device…
           </DropdownMenuItem>
         </DropdownMenuGroup>
 
