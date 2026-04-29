@@ -51,6 +51,7 @@ OPTIONS_FILE = Path("/data/options.json")
 IMPORT_FROM_OPTIONS: tuple[str, ...] = (
     "job_history_retention_days",
     "firmware_cache_max_gb",
+    "firmware_retention_days",
     "job_log_retention_days",
     "job_timeout",
     "ota_timeout",
@@ -121,6 +122,14 @@ class AppSettings:
     git_author_email: str = "ha@distributed-esphome.local"
     job_history_retention_days: int = 365
     firmware_cache_max_gb: float = 2.0
+    # Bug #198: time-based eviction for /data/firmware/. The cache_max_gb
+    # ceiling rarely fires in practice — at typical fleet activity the
+    # firmware dir sits well under 2 GiB, so a year of binaries pile up
+    # waiting for a budget pass that never comes (and ride along in
+    # every HA backup). 2 days is enough for the most common
+    # "compile-now-flash-later" use case while keeping the on-disk
+    # footprint bounded to the recent past. 0 = unlimited.
+    firmware_retention_days: int = 2
     job_log_retention_days: int = 30
     # --- Fields migrated from Supervisor options.json in 1.6 (SP.8) ---
     # Shared Bearer token used by workers and (when require_ha_auth is
@@ -266,6 +275,9 @@ _VALIDATORS: dict[str, Callable[[Any, str], Any]] = {
     "job_history_retention_days": _validate_int_range(0, 3650),
     # Hard floor at 0.1 GB so a typo ("0") doesn't nuke cached firmware.
     "firmware_cache_max_gb": _validate_float_range(0.1, 1024.0),
+    # Bug #198: 0 = unlimited; 3650 = 10y. Same shape as the other two
+    # retention knobs.
+    "firmware_retention_days": _validate_int_range(0, 3650),
     # 0 = unlimited; 3650 = 10y.
     "job_log_retention_days": _validate_int_range(0, 3650),
     # --- SP.8 migrated fields ---

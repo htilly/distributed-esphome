@@ -113,7 +113,8 @@ CONTRACTS: list[tuple[str, Any, Any, set[str]]] = [
         {
             "auto_commit_on_save", "git_author_name", "git_author_email",
             "job_history_retention_days", "firmware_cache_max_gb",
-            "job_log_retention_days", "server_token", "job_timeout",
+            "firmware_retention_days", "job_log_retention_days",
+            "server_token", "job_timeout",
             "ota_timeout", "worker_offline_threshold",
             "device_poll_interval", "require_ha_auth",
         },

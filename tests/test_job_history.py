@@ -228,8 +228,10 @@ def test_dao_retention_deletes_old_rows_only(tmp_path: Path) -> None:
     dao.record_terminal(_make_job(job_id="ancient", finished_offset=-400 * 86400))
 
     # Retention window of 365 days: only the ancient one is past cutoff.
-    deleted = dao.evict_older_than(365)
-    assert deleted == 1
+    # Bug #198: evict_older_than now returns the evicted IDs so the
+    # caller can clean up coupled artifacts (firmware `.bin`).
+    evicted = dao.evict_older_than(365)
+    assert evicted == ["ancient"]
     remaining = [r["id"] for r in dao.query()]
     assert remaining == ["recent"]
 
@@ -238,8 +240,8 @@ def test_dao_retention_noop_when_days_non_positive(tmp_path: Path) -> None:
     dao = JobHistoryDAO(db_path=tmp_path / "history.db")
     dao.record_terminal(_make_job(finished_offset=-10 * 86400))
     # 0 and negatives are treated as "unlimited retention".
-    assert dao.evict_older_than(0) == 0
-    assert dao.evict_older_than(-7) == 0
+    assert dao.evict_older_than(0) == []
+    assert dao.evict_older_than(-7) == []
     assert len(dao.query()) == 1
 
 

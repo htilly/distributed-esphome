@@ -652,27 +652,37 @@ class JobHistoryDAO:
     # Retention (JH.3)
     # ------------------------------------------------------------------
 
-    def evict_older_than(self, days: int) -> int:
+    def evict_older_than(self, days: int) -> list[str]:
         """Delete rows with ``finished_at`` older than *days* days ago.
 
-        Returns the count deleted. No-op and returns 0 when days <= 0.
+        Returns the IDs of evicted rows so the caller can clean up
+        coupled artifacts (firmware `.bin` blobs) — bug #198. No-op and
+        returns ``[]`` when days <= 0.
         """
         if days <= 0:
-            return 0
+            return []
         self.init()
         if not self._initialized:
-            return 0
+            return []
         cutoff = int(datetime.now(timezone.utc).timestamp()) - days * 86400
         with self._connect() as conn:
-            cur = conn.execute(
+            # SELECT before DELETE so we can return the evicted IDs;
+            # both run inside the same connection so the transaction
+            # remains atomic if a concurrent writer races.
+            evicted = [
+                str(row[0]) for row in conn.execute(
+                    "SELECT id FROM jobs WHERE finished_at IS NOT NULL AND finished_at < ?",
+                    (cutoff,),
+                ).fetchall()
+            ]
+            conn.execute(
                 "DELETE FROM jobs WHERE finished_at IS NOT NULL AND finished_at < ?",
                 (cutoff,),
             )
             conn.commit()
-            deleted = cur.rowcount or 0
-        if deleted:
+        if evicted:
             logger.info(
                 "Evicted %d job-history row(s) older than %d day(s)",
-                deleted, days,
+                len(evicted), days,
             )
-        return deleted
+        return evicted

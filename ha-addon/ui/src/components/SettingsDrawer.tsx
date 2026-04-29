@@ -262,6 +262,15 @@ export function SettingsDrawer({ open, onOpenChange, dirtyTargets = [], onReques
                   onCommit={v => patch({ firmware_cache_max_gb: v })}
                 />
                 <IntRow
+                  label="Firmware retention (days)"
+                  help="Delete cached firmware binaries older than this. Active queue jobs are protected. 0 = unlimited."
+                  min={0}
+                  max={3650}
+                  defaultValue={2}
+                  value={data.firmware_retention_days}
+                  onCommit={v => patch({ firmware_retention_days: v })}
+                />
+                <IntRow
                   label="Job log retention (days)"
                   help="How long to keep per-job build logs on disk. 0 = unlimited."
                   min={0}

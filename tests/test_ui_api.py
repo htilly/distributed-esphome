@@ -1267,6 +1267,7 @@ async def test_get_settings_returns_defaults_on_fresh_boot(tmp_path, _settings_i
             "git_author_email": "ha@distributed-esphome.local",
             "job_history_retention_days": 365,
             "firmware_cache_max_gb": 2.0,
+            "firmware_retention_days": 2,
             "job_log_retention_days": 30,
             "job_timeout": 600,
             "ota_timeout": 120,

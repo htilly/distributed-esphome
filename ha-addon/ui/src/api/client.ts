@@ -266,6 +266,9 @@ export interface AppSettings {
   git_author_email: string;
   job_history_retention_days: number;
   firmware_cache_max_gb: number;
+  // Bug #198: time-based eviction for /data/firmware (in days).
+  // 0 = unlimited; default 2.
+  firmware_retention_days: number;
   job_log_retention_days: number;
   // SP.8 — moved from Supervisor options.json in 1.6.
   server_token: string;
