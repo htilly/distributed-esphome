@@ -121,19 +121,31 @@ export default function PingDeviceModal({ target, onClose, onToast }: Props) {
                   via {result.address}
                 </span>
               </div>
-              <table className="text-[12px] w-full">
-                <tbody>
-                  <tr><td className="pr-3 py-0.5 text-[var(--text-muted)]">Packets sent</td><td className="tabular-nums">{result.packets_sent}</td></tr>
-                  <tr><td className="pr-3 py-0.5 text-[var(--text-muted)]">Packets received</td><td className="tabular-nums">{result.packets_received}</td></tr>
-                  <tr><td className="pr-3 py-0.5 text-[var(--text-muted)]">Packet loss</td><td className="tabular-nums">{(result.packet_loss * 100).toFixed(1)}%</td></tr>
-                  <tr><td className="pr-3 py-0.5 text-[var(--text-muted)]">RTT min / avg / max</td>
-                    <td className="tabular-nums">
-                      {result.min_rtt.toFixed(2)} / {result.avg_rtt.toFixed(2)} / {result.max_rtt.toFixed(2)} ms
-                    </td>
-                  </tr>
-                  <tr><td className="pr-3 py-0.5 text-[var(--text-muted)]">Jitter</td><td className="tabular-nums">{result.jitter.toFixed(2)} ms</td></tr>
-                </tbody>
-              </table>
+              {/* #213: stacked label/value rows — table layout was
+                  squishing the muted labels into a single character per
+                  line whenever the RTT values widened the value column,
+                  and forcing a horizontal scrollbar on narrow modals.
+                  A two-line key:value layout keeps labels readable at
+                  any width, lets long RTT triples wrap cleanly, and
+                  loses no information. */}
+              <dl className="text-[12px] grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-0.5">
+                <dt className="text-[var(--text-muted)] whitespace-nowrap">Packets sent</dt>
+                <dd className="tabular-nums">{result.packets_sent}</dd>
+
+                <dt className="text-[var(--text-muted)] whitespace-nowrap">Packets received</dt>
+                <dd className="tabular-nums">{result.packets_received}</dd>
+
+                <dt className="text-[var(--text-muted)] whitespace-nowrap">Packet loss</dt>
+                <dd className="tabular-nums">{(result.packet_loss * 100).toFixed(1)}%</dd>
+
+                <dt className="text-[var(--text-muted)] whitespace-nowrap">RTT min / avg / max</dt>
+                <dd className="tabular-nums break-words">
+                  {result.min_rtt.toFixed(2)} / {result.avg_rtt.toFixed(2)} / {result.max_rtt.toFixed(2)} ms
+                </dd>
+
+                <dt className="text-[var(--text-muted)] whitespace-nowrap">Jitter</dt>
+                <dd className="tabular-nums">{result.jitter.toFixed(2)} ms</dd>
+              </dl>
             </>
           )}
         </div>
