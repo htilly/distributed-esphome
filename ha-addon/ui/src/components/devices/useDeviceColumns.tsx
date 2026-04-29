@@ -269,6 +269,24 @@ export function useDeviceColumns(options: Options) {
       header: 'Tags',
       cell: ({ row: { original: t } }) => {
         const parsed = parseDeviceTags(t.tags);
+        // Bug #201: archived rows render tag chips read-only — editing
+        // tags on a YAML that lives in `.archive/` would write metadata
+        // the active fleet ignores, and the per-row hamburger already
+        // collapses to Unarchive + Permanently delete for the same
+        // reason.
+        if (t.archived) {
+          return (
+            <span
+              className="inline-block rounded-md border border-transparent px-1.5 py-0.5 min-w-[120px]"
+              aria-label={`Tags for ${stripYaml(t.target)} (archived, read-only)`}
+              title="Tags are read-only on archived devices — Unarchive first to edit."
+            >
+              {parsed.length > 0
+                ? <TagChips tags={parsed} />
+                : <span className="text-[12px] text-[var(--text-muted)] italic">—</span>}
+            </span>
+          );
+        }
         return (
           <button
             type="button"

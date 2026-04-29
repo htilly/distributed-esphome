@@ -72,6 +72,23 @@ export function DeviceTableActions({ selectedTargets, workers, targets, onToast,
   const hasSelection = selectedTargets.length > 0;
   const versioningEnabled = useVersioningEnabled();
 
+  // Bug #201: archived devices can't be tag-edited (matches the per-row
+  // hamburger which collapses to Unarchive + Permanently delete, and the
+  // Tags-cell button which is read-only on archived rows). Filter the
+  // bulk-tag selection so an "Edit Tags…" with mixed active+archived
+  // selection only writes to the active rows; "Edit Tags…" disables when
+  // every selected row is archived.
+  const editableTagTargets = useMemo(() => {
+    const archivedSet = new Set(targets.filter(t => t.archived).map(t => t.target));
+    return selectedTargets.filter(name => !archivedSet.has(name));
+  }, [selectedTargets, targets]);
+  const archivedSelectedCount = selectedTargets.length - editableTagTargets.length;
+  const tagEditDisabled = editableTagTargets.length === 0;
+  let tagEditTitle: string | undefined;
+  if (!hasSelection) tagEditTitle = 'Check one or more devices in the table first';
+  else if (tagEditDisabled) tagEditTitle = 'Tags can’t be edited on archived devices';
+  else if (archivedSelectedCount > 0) tagEditTitle = `${archivedSelectedCount} archived row${archivedSelectedCount === 1 ? '' : 's'} skipped — tags can’t be edited on archived devices`;
+
   // Bug #103: surface a fleet-wide "commit any uncommitted YAML" action
   // for the case where the user edited configs outside the addon (CLI,
   // file share, another editor) and ended up with a pile of dirty
@@ -130,7 +147,9 @@ export function DeviceTableActions({ selectedTargets, workers, targets, onToast,
   // suggestion pool (all device + worker tags). Memoized on the inputs
   // so the 1Hz SWR poll on the parent doesn't recompute on every render.
   const tagsAggregate = useMemo(() => {
-    const selectedTags: string[][] = selectedTargets.map(name => {
+    // Bug #201: aggregate over editableTagTargets (active rows only) so
+    // the dialog's "common" / "partial" reflect what we'll actually write.
+    const selectedTags: string[][] = editableTagTargets.map(name => {
       const t = targets.find(x => x.target === name);
       return parseTags(t?.tags);
     });
@@ -152,11 +171,13 @@ export function DeviceTableActions({ selectedTargets, workers, targets, onToast,
     for (const tg of targets) for (const t of parseTags(tg.tags)) pool.add(t);
     for (const w of workers) if (w.tags) for (const t of w.tags) pool.add(t);
     return { common, partial, suggestions: Array.from(pool).sort() };
-  }, [selectedTargets, targets, workers]);
+  }, [editableTagTargets, targets, workers]);
 
   async function applyBulkTagDiff(diff: { add: string[]; remove: string[] }) {
-    // Per-target: existing - removeMatching + addNew
-    await Promise.all(selectedTargets.map(async (name) => {
+    // Per-target: existing - removeMatching + addNew. Bug #201: archived
+    // rows are skipped (filtered into editableTagTargets above) so we
+    // never write tag metadata into a YAML that lives in `.archive/`.
+    await Promise.all(editableTagTargets.map(async (name) => {
       const t = targets.find(x => x.target === name);
       const existing = parseTags(t?.tags);
       const removeSet = new Set(diff.remove);
@@ -168,8 +189,12 @@ export function DeviceTableActions({ selectedTargets, workers, targets, onToast,
       const value: string | null = next.length > 0 ? next.join(',') : null;
       await updateTargetMeta(name, { tags: value });
     }));
+    const n = editableTagTargets.length;
+    const skippedSuffix = archivedSelectedCount > 0
+      ? ` (${archivedSelectedCount} archived skipped)`
+      : '';
     onToast(
-      `Updated tags on ${selectedTargets.length} device${selectedTargets.length === 1 ? '' : 's'}`,
+      `Updated tags on ${n} device${n === 1 ? '' : 's'}${skippedSuffix}`,
       'success',
     );
     onRefresh();
@@ -224,8 +249,8 @@ export function DeviceTableActions({ selectedTargets, workers, targets, onToast,
             </DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => setBulkTagsOpen(true)}
-              disabled={!hasSelection}
-              title={!hasSelection ? 'Check one or more devices in the table first' : undefined}
+              disabled={!hasSelection || tagEditDisabled}
+              title={tagEditTitle}
             >
               Edit Tags…
             </DropdownMenuItem>
@@ -250,7 +275,9 @@ export function DeviceTableActions({ selectedTargets, workers, targets, onToast,
         <BulkTagsEditDialog
           open={bulkTagsOpen}
           onOpenChange={setBulkTagsOpen}
-          count={selectedTargets.length}
+          // Bug #201: count reflects the editable (non-archived) subset
+          // — that's what we'll actually write tags to.
+          count={editableTagTargets.length}
           common={tagsAggregate.common}
           partial={tagsAggregate.partial}
           suggestions={tagsAggregate.suggestions}

@@ -5,7 +5,8 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
-  DialogDescription,
+  DialogFooter,
+  DialogClose,
 } from './ui/dialog';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -68,19 +69,18 @@ export default function InstallToAddressModal({ target, defaultAddress, onClose,
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
-      <DialogContent style={{ maxWidth: 480 }}>
+      <DialogContent>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Wifi className="size-4" aria-hidden="true" />
             Install {stripYaml(target)} to address…
           </DialogTitle>
-          <DialogDescription>
+        </DialogHeader>
+        <div className="px-4 py-3 flex flex-col gap-2 text-sm text-[var(--text)]">
+          <p className="text-xs text-[var(--text-muted)]">
             Compile and OTA-flash this device, overriding the auto-resolved
             address with the one you enter below.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="px-1 pb-2">
+          </p>
           <Label htmlFor="install-address">OTA address</Label>
           <Input
             id="install-address"
@@ -92,44 +92,42 @@ export default function InstallToAddressModal({ target, defaultAddress, onClose,
             aria-invalid={!isValid && trimmed.length > 0}
           />
           {initial ? (
-            <div className="text-[11px] text-[var(--text-muted)] mt-1">
+            <div className="text-[11px] text-[var(--text-muted)]">
               Auto-resolved: <code>{initial}</code> — edit to override.
             </div>
           ) : (
-            <div className="text-[11px] text-[var(--text-muted)] mt-1">
+            <div className="text-[11px] text-[var(--text-muted)]">
               No auto-resolved address — enter the device's IP or hostname.
             </div>
           )}
           {!isValid && trimmed.length > 0 && (
-            <div className="text-[11px] text-[var(--danger)] mt-1">
+            <div className="text-[11px] text-[var(--danger)]">
               Invalid address. Use letters, digits, dots, hyphens, underscores or colons.
             </div>
           )}
-        </div>
-
-        {confirming && edited && (
-          <div className="rounded-md border border-[var(--warn)] bg-[var(--warn-bg)] p-3 text-[12px] mb-2">
-            <div className="font-medium">Override the auto-resolved address?</div>
-            <div className="mt-1 text-[var(--text-muted)]">
-              You're about to OTA <strong>{stripYaml(target)}</strong> to{' '}
-              <code>{trimmed}</code> instead of the discovered{' '}
-              {initial ? <code>{initial}</code> : 'address'}. Click <strong>Install</strong> again to confirm.
+          {confirming && edited && (
+            <div className="rounded-md border border-[var(--warn)] bg-[var(--warn-bg)] p-3 text-[12px]">
+              <div className="font-medium">Override the auto-resolved address?</div>
+              <div className="mt-1 text-[var(--text-muted)]">
+                You're about to OTA <strong>{stripYaml(target)}</strong> to{' '}
+                <code>{trimmed}</code> instead of the discovered{' '}
+                {initial ? <code>{initial}</code> : 'address'}. Click <strong>Install</strong> again to confirm.
+              </div>
             </div>
-          </div>
-        )}
-
-        <div className="flex items-center justify-end gap-2">
-          <Button variant="secondary" size="sm" onClick={onClose} disabled={busy}>
-            Cancel
-          </Button>
+          )}
+        </div>
+        <DialogFooter>
+          <DialogClose>
+            <Button variant="secondary" size="sm" disabled={busy}>Cancel</Button>
+          </DialogClose>
           <Button
             size="sm"
             onClick={handlePrimary}
             disabled={!isValid || busy}
           >
-            {busy ? 'Queuing…' : confirming && edited ? 'Install' : 'Install'}
+            {busy ? 'Queuing…' : 'Install'}
           </Button>
-        </div>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );
