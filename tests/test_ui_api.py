@@ -473,6 +473,116 @@ async def test_archive_permanent_delete(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# DM.1: /ui/api/targets merges archived rows + archive flag on every row
+# ---------------------------------------------------------------------------
+
+async def test_targets_marks_active_rows_archived_false(tmp_path, _enable_socket):
+    """DM.1: every active row carries archived=False so the UI can
+    render rows uniformly (opacity-50 / reduced action menu drives off
+    this single flag)."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "alpha.yaml", "alpha")
+        resp = await ta.get("/ui/api/targets")
+        data = await resp.json()
+        active = [t for t in data if t["target"] == "alpha.yaml"]
+        assert len(active) == 1
+        assert active[0]["archived"] is False
+    finally:
+        await ta.close()
+
+
+async def test_targets_includes_archived_rows(tmp_path, _enable_socket):
+    """DM.1: archived YAMLs land in /ui/api/targets so the Devices tab
+    can render them inline (toggleable via the column picker). Each
+    archived row has archived=True plus archived_at/archived_size."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "alpha.yaml", "alpha")
+        _write_config(ta.config_dir, "beta.yaml", "beta")
+        # Archive beta
+        resp = await ta.delete("/ui/api/targets/beta.yaml")
+        assert resp.status == 200
+
+        resp = await ta.get("/ui/api/targets")
+        data = await resp.json()
+        rows_by_name = {t["target"]: t for t in data}
+
+        assert "alpha.yaml" in rows_by_name
+        assert rows_by_name["alpha.yaml"]["archived"] is False
+
+        assert "beta.yaml" in rows_by_name
+        beta = rows_by_name["beta.yaml"]
+        assert beta["archived"] is True
+        assert isinstance(beta["archived_at"], (int, float))
+        assert beta["archived_size"] > 0
+    finally:
+        await ta.close()
+
+
+async def test_targets_archived_rows_minimal_fields(tmp_path, _enable_socket):
+    """DM.1: archived rows must carry the structural fields the UI
+    expects (online/running_version null, no schedule, etc.) — the
+    poller / scheduler / queue do not see them, so live-state fields
+    are explicitly null."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "device1.yaml", "device1")
+        await ta.delete("/ui/api/targets/device1.yaml")
+
+        resp = await ta.get("/ui/api/targets")
+        data = await resp.json()
+        archived = [t for t in data if t["archived"]]
+        assert len(archived) == 1
+        row = archived[0]
+        assert row["target"] == "device1.yaml"
+        assert row["online"] is None
+        assert row["running_version"] is None
+        assert row["schedule"] is None
+        assert row["schedule_enabled"] is False
+        assert row["last_compile"] is None
+    finally:
+        await ta.close()
+
+
+async def test_archive_evicts_device_from_poller(tmp_path, _enable_socket):
+    """DM.1: archiving a target must evict the matching entry from the
+    device poller so the freshly-archived row freezes at last_seen=now
+    instead of staying ``online`` for the 4 h TTL window. Mirrors the
+    eviction the rename path already does. Origin: spec note in
+    WORKITEMS-1.7.0 DM.1."""
+    from datetime import datetime
+    from device_poller import Device, DevicePoller
+
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "device1.yaml", "device1")
+
+        poller = DevicePoller()
+        poller._devices["device1"] = Device(
+            name="device1",
+            ip_address="192.168.1.42",
+            online=True,
+            last_seen=datetime.now(),
+            compile_target="device1.yaml",
+        )
+        # The TestServer wraps the app in a frozen state by start; mutate
+        # via the underlying _state dict to avoid the deprecation noise
+        # while the test still hangs the poller off the same key the
+        # handler reads.
+        ta.client.server.app._state["device_poller"] = poller
+        assert "device1" in poller._devices
+
+        resp = await ta.delete("/ui/api/targets/device1.yaml")
+        assert resp.status == 200
+        assert "device1" not in poller._devices, (
+            "archive should evict the device from the poller"
+        )
+    finally:
+        await ta.close()
+
+
+# ---------------------------------------------------------------------------
 # compile
 # ---------------------------------------------------------------------------
 

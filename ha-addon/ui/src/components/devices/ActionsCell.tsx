@@ -39,6 +39,10 @@ interface Props {
   /** Bug #3: archive the target without showing the Delete confirmation
    *  modal — archived configs are restorable from Settings. */
   onArchive: (target: string) => void;
+  /** DM.1: restore an archived row back to the live config dir. */
+  onUnarchive: (target: string) => void;
+  /** DM.1: open the two-step "permanently delete from archive" dialog. */
+  onPermanentDelete: (target: string) => void;
   onPin: (target: string) => void;
   onUnpin: (target: string) => void;
   /** AV.6: open the per-file History panel. */
@@ -64,6 +68,8 @@ function ActionsCellImpl({
   onRequestRename,
   onRequestDelete,
   onArchive,
+  onUnarchive,
+  onPermanentDelete,
   onPin,
   onUnpin,
   onOpenHistory,
@@ -72,6 +78,37 @@ function ActionsCellImpl({
   onViewRenderedConfig,
   onMenuOpenChange,
 }: Props) {
+  // DM.1: archived rows expose only the hamburger (Unarchive +
+  // Permanently delete). Upgrade / Edit are meaningless when the YAML
+  // sits in ``.archive/`` — Upgrade can't compile a non-tracked
+  // target, Edit would open the editor against a path the save
+  // endpoint doesn't accept. Drop both for archived rows.
+  if (t.archived) {
+    return (
+      <div style={rowStyle}>
+        <DeviceContextMenu
+          target={t}
+          onToast={onToast}
+          onRename={onRequestRename}
+          onDuplicate={(tg) => onDuplicate(tg.target)}
+          onDelete={onRequestDelete}
+          onArchive={onArchive}
+          onUnarchive={onUnarchive}
+          onPermanentDelete={onPermanentDelete}
+          onLogs={onLogs}
+          onPin={onPin}
+          onUnpin={onUnpin}
+          onOpenHistory={onOpenHistory}
+          onOpenCompileHistory={onOpenCompileHistory}
+          onCommitChanges={onCommitChanges}
+          onViewRenderedConfig={onViewRenderedConfig}
+          open={menuOpen}
+          onOpenChange={onMenuOpenChange}
+        />
+      </div>
+    );
+  }
+
   // Bug #32: highlight the Upgrade button when the YAML has drifted.
   // `hasDriftedConfig` is the single source of truth shared with the
   // "config changed" badge in useDeviceColumns — see ./drift.ts for the
@@ -105,6 +142,8 @@ function ActionsCellImpl({
         onDuplicate={(tg) => onDuplicate(tg.target)}
         onDelete={onRequestDelete}
         onArchive={onArchive}
+        onUnarchive={onUnarchive}
+        onPermanentDelete={onPermanentDelete}
         onLogs={onLogs}
         onPin={onPin}
         onUnpin={onUnpin}
@@ -133,7 +172,9 @@ function propsEqual(prev: Props, next: Props): boolean {
     a.has_uncommitted_changes === b.has_uncommitted_changes &&
     // Bug #32: new config-drift signals that drive Upgrade button color.
     a.config_drifted_since_flash === b.config_drifted_since_flash &&
-    a.config_modified === b.config_modified
+    a.config_modified === b.config_modified &&
+    // DM.1: ``archived`` flips the entire actions cell shape — must invalidate.
+    a.archived === b.archived
   );
 }
 

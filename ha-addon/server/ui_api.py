@@ -877,8 +877,65 @@ async def get_targets(request: web.Request) -> web.Response:
                     else None
                 )
             ),
+            # DM.1: archived flag on every active row so the UI can
+            # apply ``opacity-50`` + reduced action menu uniformly. Rows
+            # produced by ``scan_archived`` below carry archived=True.
+            "archived": False,
         }
         result.append(entry)
+
+    # DM.1: merge archived rows so the Devices tab can render them
+    # inline (toggleable via the column-picker "Show archived devices"
+    # entry). The poller / scheduler / routing engine / queue continue
+    # to see only active targets — archived is purely a UI surface.
+    from scanner import scan_archived  # noqa: PLC0415
+    for arch in scan_archived(cfg.config_dir):
+        result.append({
+            "target": arch["filename"],
+            "friendly_name": None,
+            "device_name": None,
+            "comment": None,
+            "area": None,
+            "project_name": None,
+            "project_version": None,
+            "online": None,
+            "running_version": None,
+            "compilation_time": None,
+            "config_modified": None,
+            "needs_update": None,
+            "ip_address": None,
+            "address_source": None,
+            "last_seen": None,
+            "server_version": server_version,
+            "has_api_key": False,
+            "has_web_server": False,
+            "has_restart_button": False,
+            "ha_configured": False,
+            "ha_connected": False,
+            "ha_device_id": None,
+            "mac_address": None,
+            "network_type": None,
+            "network_static_ip": False,
+            "network_ipv6": False,
+            "network_ap_fallback": False,
+            "network_matter": False,
+            "esp_type": None,
+            "bluetooth_proxy": "off",
+            "pinned_version": None,
+            "schedule": None,
+            "schedule_enabled": False,
+            "schedule_last_run": None,
+            "schedule_once": None,
+            "schedule_tz": None,
+            "tags": None,
+            "has_uncommitted_changes": False,
+            "last_flashed_config_hash": None,
+            "config_drifted_since_flash": None,
+            "last_compile": None,
+            "archived": True,
+            "archived_at": arch["archived_at"],
+            "archived_size": arch["size"],
+        })
 
     return web.json_response(result)
 
@@ -2614,6 +2671,23 @@ async def delete_target(request: web.Request) -> web.Response:
     # Invalidate config cache for the deleted file
     from scanner import _config_cache  # noqa: PLC0415
     _config_cache.pop(filename, None)
+
+    # DM.1: evict the just-archived device from the poller so the UI's
+    # archived row freezes at last_seen=now rather than staying "online"
+    # for ~4 h until the TTL prune fires. Mirrors the eviction in
+    # ``rename_target`` above. Skipped on permanent-delete because the
+    # row vanishes from the table entirely in that case.
+    if archive:
+        device_poller = request.app.get("device_poller")
+        if device_poller:
+            stale_name = None
+            for d in device_poller.get_devices():
+                if d.compile_target == filename:
+                    stale_name = d.name
+                    break
+            if stale_name and stale_name in device_poller._devices:
+                del device_poller._devices[stale_name]
+                logger.debug("Evicted device %s after archive of %s", stale_name, filename)
 
     logger.info("Deleted config %s (archive=%s)%s", filename, archive, _who(request))
     if not archive:

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import useSWR from 'swr';
+import { mutate as mutateGlobal } from 'swr';
 import { Settings2 } from 'lucide-react';
 import {
   useReactTable,
@@ -11,11 +11,11 @@ import {
   type RowSelectionState,
 } from '@tanstack/react-table';
 import {
-  getArchivedConfigs,
+  deleteArchivedConfig,
   pinTargetVersion,
+  restoreArchivedConfig,
   unpinTargetVersion,
   updateTargetMeta,
-  type ArchivedConfig,
 } from '../api/client';
 import { TagsEditDialog } from './TagsEditDialog';
 import { TagFilterBar } from './TagFilterBar';
@@ -28,7 +28,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from './ui/dialog';
-import { ArchivedDevicesList } from './ArchivedDevicesList';
 import { getAriaSort } from './ui/sort-header';
 import { DeleteModal, RenameModal } from './devices/DeviceTableModals';
 import { useDeviceColumns } from './devices/useDeviceColumns';
@@ -262,31 +261,24 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
   // TG.5 inline edit — same lift-out-of-row pattern. ``null`` = closed.
   const [tagsEditTarget, setTagsEditTarget] = useState<string | null>(null);
   const [showUnmanaged, setShowUnmanaged] = useState(() => localStorage.getItem('showUnmanaged') !== 'false');
-  // #62: Devices-toolbar Archive button → shadcn Dialog wrapping the
-  // shared ArchivedDevicesList component. State lives here rather
-  // than in App.tsx because the button's local to this tab.
-  const [archiveOpen, setArchiveOpen] = useState(false);
+  // DM.1: in-tab archived toggle replaces the standalone
+  // ArchivedDevicesList surface. Off by default so a fresh install
+  // doesn't show archived rows; the column picker has a "Show archived
+  // devices" entry that flips this. Persisted to localStorage so the
+  // preference survives reloads (matching the showUnmanaged pattern).
+  const [showArchived, setShowArchived] = useState(() => localStorage.getItem('devices-show-archived') === 'true');
   // #70: "Duplicate existing device" picker state. Opened from the
   // "Add device ▾" dropdown. Shows a list of existing targets the
   // user can pick to duplicate; selection calls onDuplicate() which
   // routes back to the NewDeviceModal in duplicate mode.
   const [duplicatePickerOpen, setDuplicatePickerOpen] = useState(false);
-  // #73: watch archive count so we can (a) gray out the "Restore from
-  // archive" menu item when the archive is empty and (b) auto-close
-  // the archive dialog once the user restores or permanently-deletes
-  // its last item. Both this hook and ArchivedDevicesList subscribe to
-  // the same SWR key, so SWR dedupes the request and a mutate() from
-  // the list re-renders both. revalidateOnFocus stays off to match
-  // the list's config.
-  const { data: archivedConfigs } = useSWR<ArchivedConfig[]>(
-    'archived-configs',
-    getArchivedConfigs,
-    { revalidateOnFocus: false },
-  );
-  const archiveEmpty = !archivedConfigs || archivedConfigs.length === 0;
-  useEffect(() => {
-    if (archiveOpen && archiveEmpty) setArchiveOpen(false);
-  }, [archiveOpen, archiveEmpty]);
+  // DM.1: per-row "permanently delete" two-step confirm. Mirrors the
+  // existing DeleteModal flow but scoped to archived rows (the
+  // restore-and-delete vocabulary is different, so the modal text is
+  // tailored). ``null`` = closed; otherwise the archived filename
+  // pending confirmation.
+  const [permanentDeleteTarget, setPermanentDeleteTarget] = useState<string | null>(null);
+  const [permanentDeleteBusy, setPermanentDeleteBusy] = useState(false);
 
   // VP.4 / QS.20: pin/unpin version from the hamburger menu. Memoized so
   // useDeviceColumns' dep array can actually cache — the hook re-runs only
@@ -317,6 +309,41 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
     }
   }, [onToast]);
 
+  // DM.1: archived-row actions. Restore moves the YAML back under
+  // /config/esphome/; permanent-delete opens the two-step confirm
+  // dialog. The /ui/api/archive* endpoints stay in place for one
+  // release as a soft-deprecate so external scripts don't break.
+  const handleUnarchive = useCallback(async (target: string) => {
+    try {
+      await restoreArchivedConfig(target);
+      onToast(`Restored ${stripYaml(target)}`, 'success');
+      // The targets endpoint now drops the archived row + adds an
+      // active one; the SWR poll will pick that up but a forced
+      // refresh keeps the UI snappy. Plus invalidate the lingering
+      // archived-configs SWR key (still used by the version banner).
+      onRefresh();
+      mutateGlobal('archived-configs');
+    } catch (err) {
+      onToast('Unarchive failed: ' + (err as Error).message, 'error');
+    }
+  }, [onToast, onRefresh]);
+
+  const handlePermanentDeleteConfirm = useCallback(async () => {
+    if (!permanentDeleteTarget) return;
+    setPermanentDeleteBusy(true);
+    try {
+      await deleteArchivedConfig(permanentDeleteTarget);
+      onToast(`Permanently deleted ${stripYaml(permanentDeleteTarget)}`, 'success');
+      onRefresh();
+      mutateGlobal('archived-configs');
+      setPermanentDeleteTarget(null);
+    } catch (err) {
+      onToast('Delete failed: ' + (err as Error).message, 'error');
+    } finally {
+      setPermanentDeleteBusy(false);
+    }
+  }, [permanentDeleteTarget, onToast, onRefresh]);
+
   // Persist column visibility and unmanaged toggle to localStorage
   useEffect(() => {
     saveColumnVisibility(columnVisibility);
@@ -324,6 +351,9 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
   useEffect(() => {
     localStorage.setItem('showUnmanaged', String(showUnmanaged));
   }, [showUnmanaged]);
+  useEffect(() => {
+    localStorage.setItem('devices-show-archived', String(showArchived));
+  }, [showArchived]);
 
   // Build a set of device names that are already shown as managed targets
   // to prevent duplicates when compile_target mapping has a race condition
@@ -367,8 +397,14 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
   }, [targets]);
 
   // Filter targets before passing to TanStack (filter state owned here, not in TanStack)
+  // DM.1: archived rows are included in the data set when the toggle is
+  // on. They render in their own group below the active rows
+  // (sorted-by-archived_at-desc), so their inclusion in the TanStack
+  // data set is purely so the table can render them with the same
+  // column flexRender pipeline.
   const filteredTargets = useMemo(() => {
-    const sorted = [...targets].sort((a, b) => a.target.localeCompare(b.target));
+    const visible = showArchived ? targets : targets.filter(t => !t.archived);
+    const sorted = [...visible].sort((a, b) => a.target.localeCompare(b.target));
     // TG.5 filter pills: OR-logic across selected tags. A row matches
     // when it has *any* of the selected tags. Empty selection = no
     // filter (show everything). Applied before the search-box text
@@ -400,7 +436,7 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
         t.tags,
       )
     );
-  }, [targets, filter, tagFilter]);
+  }, [targets, filter, tagFilter, showArchived]);
 
   const filteredUnmanaged = useMemo(() => {
     // TG.5: an active pill filter means "show me devices with these
@@ -441,12 +477,16 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
     setMenuOpenTarget,
     onEditTags: setTagsEditTarget,
     // Bug #3: Archive directly without opening the Delete confirmation
-    // modal. The configs are restorable from Settings → Archived devices,
-    // so a confirm step here just slows down a non-destructive action.
+    // modal. The configs are restorable from the column-picker "Show
+    // archived devices" toggle (DM.1 retired the separate dialog), so
+    // a confirm step here just slows down a non-destructive action.
     onArchive: (target: string) => {
       onDelete(target, true);
-      onToast(`Archived ${stripYaml(target)} — restore from Settings → Archived devices`, 'info');
+      onToast(`Archived ${stripYaml(target)} — restore from the column picker → Show archived`, 'info');
     },
+    // DM.1: archived-row actions.
+    onUnarchive: handleUnarchive,
+    onPermanentDelete: setPermanentDeleteTarget,
   });
 
 
@@ -516,11 +556,10 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
             )}
           </div>
           <div className="actions">
-            {/* #70: "Add device ▾" dropdown consolidates the three ways
-                a device lands in the fleet — blank-slate new, duplicate
-                from an existing YAML, or restore from the soft-delete
-                archive. Replaces the separate "+ New Device" + "Archive…"
-                buttons. */}
+            {/* DM.1: "Restore from archive…" entry retired. Archived
+                devices are now visible in the table itself via the
+                column picker → Show archived devices toggle, and
+                Unarchive lives on each archived row's hamburger. */}
             <DropdownMenu>
               <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg border border-transparent bg-primary px-2.5 h-7 text-[0.8rem] font-medium text-primary-foreground hover:bg-primary/80 cursor-pointer">
                 Add device <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
@@ -536,14 +575,6 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
                     title={targets.length === 0 ? "No existing devices to duplicate" : undefined}
                   >
                     Duplicate existing device…
-                  </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem
-                    onClick={() => setArchiveOpen(true)}
-                    disabled={archiveEmpty}
-                    title={archiveEmpty ? "Archive is empty — delete a device to populate it" : undefined}
-                  >
-                    Restore from archive…
                   </DropdownMenuItem>
                 </DropdownMenuGroup>
               </DropdownMenuContent>
@@ -637,6 +668,16 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
                   >
                     Show unmanaged devices
                   </DropdownMenuCheckboxItem>
+                  {/* DM.1: in-tab archived toggle — replaces the
+                      separate ArchivedDevicesList surface. When on,
+                      archived rows render below active rows at
+                      opacity-50. */}
+                  <DropdownMenuCheckboxItem
+                    checked={showArchived}
+                    onCheckedChange={() => setShowArchived(v => !v)}
+                  >
+                    Show archived devices
+                  </DropdownMenuCheckboxItem>
                 </DropdownMenuGroup>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -676,15 +717,48 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
                 </tr>
               ) : (
                 <>
-                  {table.getRowModel().rows.map(row => (
-                    <tr key={row.id}>
-                      {row.getVisibleCells().map(cell => (
-                        <td key={cell.id}>
-                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
+                  {/* DM.1: split TanStack rows into two groups so
+                      archived rows always sort below active rows
+                      (regardless of which column the user clicked to
+                      sort), and so each archived row carries
+                      ``opacity-50`` + the ``data-archived`` hook the
+                      e2e suite asserts on. The active group respects
+                      whatever column sort TanStack produced; the
+                      archived group is re-sorted by archived_at desc
+                      so the most recently archived sits at the top. */}
+                  {(() => {
+                    const allRows = table.getRowModel().rows;
+                    const activeRows = allRows.filter(r => !r.original.archived);
+                    const archivedRows = allRows
+                      .filter(r => r.original.archived)
+                      .sort((a, b) => (b.original.archived_at ?? 0) - (a.original.archived_at ?? 0));
+                    return (
+                      <>
+                        {activeRows.map(row => (
+                          <tr key={row.id}>
+                            {row.getVisibleCells().map(cell => (
+                              <td key={cell.id}>
+                                {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                        {archivedRows.map(row => (
+                          <tr
+                            key={row.id}
+                            data-archived="true"
+                            className="opacity-50"
+                          >
+                            {row.getVisibleCells().map(cell => (
+                              <td key={cell.id}>
+                                {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </>
+                    );
+                  })()}
                   {showUnmanaged && filteredUnmanaged.map(d => (
                     <UnmanagedRow key={d.name} device={d} isVisible={isVisible} />
                   ))}
@@ -764,16 +838,45 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
 
       {/* QS.18: bulk schedule UpgradeModal moved into DeviceTableActions. */}
 
-      {/* #62: Archive modal — toolbar "Archive…" button opens a Dialog
-          that wraps the shared ArchivedDevicesList. Same list the
-          Settings drawer renders; only the entry point differs. */}
-      <Dialog open={archiveOpen} onOpenChange={setArchiveOpen}>
+      {/* DM.1: per-row "permanently delete" confirm — destructive. Two
+          steps because once the file leaves ``.archive/`` (and the
+          tracked-history ``git rm``) there's no UI undo. Mirrors the
+          exact copy the retired ArchivedDevicesList used to surface so
+          the move from "separate panel" to "in-tab toggle" is
+          UX-neutral. */}
+      <Dialog
+        open={permanentDeleteTarget !== null}
+        onOpenChange={(o) => { if (!o && !permanentDeleteBusy) setPermanentDeleteTarget(null); }}
+      >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Archived devices</DialogTitle>
+            <DialogTitle>
+              Delete {permanentDeleteTarget} from the archive?
+            </DialogTitle>
           </DialogHeader>
-          <div className="px-4 pb-4 pt-2">
-            <ArchivedDevicesList />
+          <div className="px-4 py-3 text-sm text-[var(--text)]">
+            <p>
+              This removes the file from the archive directory. The device's prior contents
+              stay in the config's git history — a git operator can recover them if needed.
+            </p>
+          </div>
+          <div className="flex justify-end gap-2 px-4 pb-4">
+            <button
+              type="button"
+              onClick={() => setPermanentDeleteTarget(null)}
+              disabled={permanentDeleteBusy}
+              className="inline-flex items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface2)] px-2.5 h-7 text-[0.8rem] font-medium text-[var(--text)] hover:bg-[var(--surface3)] disabled:opacity-50 cursor-pointer"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handlePermanentDeleteConfirm}
+              disabled={permanentDeleteBusy}
+              className="inline-flex items-center gap-1 rounded-lg border border-transparent bg-destructive px-2.5 h-7 text-[0.8rem] font-medium text-destructive-foreground hover:bg-destructive/80 disabled:opacity-50 cursor-pointer"
+            >
+              Delete
+            </button>
           </div>
         </DialogContent>
       </Dialog>

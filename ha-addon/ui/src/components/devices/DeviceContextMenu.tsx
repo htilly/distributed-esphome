@@ -47,6 +47,13 @@ interface Props {
    *  dialog, since archived devices can be restored from Settings →
    *  Archived devices. */
   onArchive: (target: string) => void;
+  /** DM.1: restore an archived row back to the active config dir.
+   *  Only invoked from rows where ``target.archived === true``. */
+  onUnarchive: (target: string) => void;
+  /** DM.1: permanently delete an archived YAML. Two-step ``Dialog``
+   *  confirmation is owned by DevicesTab, so this just opens that
+   *  dialog (no immediate destructive call). */
+  onPermanentDelete: (target: string) => void;
   onLogs: (target: string) => void;
   onPin: (target: string) => void;
   onUnpin: (target: string) => void;
@@ -71,6 +78,8 @@ function DeviceContextMenuImpl({
   onDuplicate,
   onDelete,
   onArchive,
+  onUnarchive,
+  onPermanentDelete,
   onLogs,
   onPin,
   onUnpin,
@@ -106,6 +115,43 @@ function DeviceContextMenuImpl({
     } catch (err) {
       onToast('Restart failed: ' + (err as Error).message, 'error');
     }
+  }
+
+  // DM.1: archived rows expose ONLY Unarchive + Permanently delete.
+  // All other actions (Live Logs, Restart, Compile, Pin, Rename,
+  // Duplicate, Commit changes, etc.) are meaningless when the YAML
+  // sits in ``.archive/`` — the poller / scheduler / queue do not see
+  // archived targets, so any of those would either no-op or 404. Drop
+  // the whole "Device" / "Config" sections and render a minimal menu.
+  if (t.archived) {
+    return (
+      <DropdownMenu open={open} onOpenChange={onOpenChange}>
+        <DropdownMenuTrigger
+          className="action-menu-trigger cursor-pointer inline-flex items-center justify-center"
+          aria-label="More actions"
+          title="More actions"
+        >
+          <MoreVertical className="size-4" />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          className="min-w-[200px] w-max max-w-[320px] data-[state=closed]:!animate-none"
+        >
+          <DropdownMenuGroup>
+            <DropdownMenuLabel>Archived</DropdownMenuLabel>
+            <DropdownMenuItem onClick={() => onUnarchive(t.target)}>
+              Unarchive
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              variant="destructive"
+              onClick={() => onPermanentDelete(t.target)}
+            >
+              Permanently delete…
+            </DropdownMenuItem>
+          </DropdownMenuGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    );
   }
 
   return (
@@ -238,7 +284,9 @@ function propsEqual(prev: Props, next: Props): boolean {
     a.has_api_key === b.has_api_key &&
     a.pinned_version === b.pinned_version &&
     // Bug #16: dirty state controls the "Commit changes…" item's visibility.
-    a.has_uncommitted_changes === b.has_uncommitted_changes
+    a.has_uncommitted_changes === b.has_uncommitted_changes &&
+    // DM.1: ``archived`` flips the entire menu shape — must invalidate.
+    a.archived === b.archived
   );
 }
 

@@ -311,13 +311,8 @@ export function SettingsDrawer({ open, onOpenChange, dirtyTargets = [], onReques
                   onCommit={v => patch({ device_poll_interval: v })}
                 />
               </Section>
-              {/* #92: Archived-devices section lived here briefly
-                  (CF.2). It moved into the Devices-tab "Add device ▾"
-                  dropdown (#70's "Restore from archive…") where Pat
-                  actually expects to find it — an archived device is a
-                  device-lifecycle concern, not a server-settings one.
-                  Section removed here to avoid two entry points with
-                  the same list (which would diverge). */}
+              {/* DM.1: archived devices live inline in the Devices
+                  tab — toggle column picker → Show archived devices. */}
               {/* #109: Diagnostics — one-click thread dump of the
                   server process. Intentionally plain — no knobs, no
                   tabs-within-tabs; the whole flow is click → download

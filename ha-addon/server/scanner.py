@@ -328,6 +328,38 @@ def scan_configs(config_dir: str) -> list[str]:
     return results
 
 
+def scan_archived(config_dir: str) -> list[dict]:
+    """List archived YAML config files under ``<config_dir>/.archive/``.
+
+    DM.1: Replaces the standalone ``ArchivedDevicesList`` surface with an
+    in-tab toggle on the Devices tab. The Devices endpoint merges the
+    output of this helper into its response so the frontend can render
+    archived rows alongside active ones (display-only — the poller /
+    scheduler / routing engine / queue continue to see only active
+    targets via :func:`scan_configs`).
+
+    Returns a list of ``{filename, size, archived_at}`` dicts sorted by
+    filename. Missing directory → empty list (a fresh install with
+    nothing archived yet is not an error).
+    """
+    archive_dir = Path(config_dir) / ".archive"
+    if not archive_dir.is_dir():
+        return []
+    results: list[dict] = []
+    for f in sorted(archive_dir.iterdir()):
+        if f.suffix.lower() in (".yaml", ".yml") and f.is_file():
+            try:
+                stat = f.stat()
+            except OSError:
+                continue
+            results.append({
+                "filename": f.name,
+                "size": stat.st_size,
+                "archived_at": stat.st_mtime,
+            })
+    return results
+
+
 # Subprocess-executed inside the ESPHome venv by create_bundle(). Runs
 # validate_config + ConfigBundleCreator in a FRESH Python process and
 # writes the tar.gz to stdout. Fresh-process isolation is required

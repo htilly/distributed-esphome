@@ -18,6 +18,7 @@ from scanner import (
     get_device_address,
     get_device_metadata,
     get_esphome_version,
+    scan_archived,
     scan_configs,
 )
 
@@ -148,6 +149,87 @@ def test_scan_dir_with_only_secrets(tmp_path):
     (tmp_path / "secrets.yaml").write_text("key: val")
     targets = scan_configs(str(tmp_path))
     assert targets == []
+
+
+# ---------------------------------------------------------------------------
+# scan_archived — DM.1. Lists YAMLs under ``<config_dir>/.archive/`` so
+# the Devices endpoint can merge archived rows into its response and the
+# UI can render them inline (toggleable via the column picker).
+# ---------------------------------------------------------------------------
+
+def test_scan_archived_no_archive_dir(tmp_path):
+    """Fresh install with nothing archived → empty list, not an error."""
+    assert scan_archived(str(tmp_path)) == []
+
+
+def test_scan_archived_returns_yaml_files(tmp_path):
+    archive = tmp_path / ".archive"
+    archive.mkdir()
+    (archive / "alpha.yaml").write_text("esphome:\n  name: alpha\n")
+    (archive / "beta.yml").write_text("esphome:\n  name: beta\n")
+    rows = scan_archived(str(tmp_path))
+    names = {r["filename"] for r in rows}
+    assert names == {"alpha.yaml", "beta.yml"}
+
+
+def test_scan_archived_skips_non_yaml(tmp_path):
+    archive = tmp_path / ".archive"
+    archive.mkdir()
+    (archive / "device.yaml").write_text("esphome:\n  name: device\n")
+    (archive / "README.md").write_text("notes")
+    (archive / "key.bin").write_text("x")
+    rows = scan_archived(str(tmp_path))
+    assert [r["filename"] for r in rows] == ["device.yaml"]
+
+
+def test_scan_archived_includes_size_and_archived_at(tmp_path):
+    archive = tmp_path / ".archive"
+    archive.mkdir()
+    body = "esphome:\n  name: alpha\n"
+    p = archive / "alpha.yaml"
+    p.write_text(body)
+    rows = scan_archived(str(tmp_path))
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["filename"] == "alpha.yaml"
+    assert row["size"] == len(body.encode("utf-8"))
+    # archived_at is the file mtime as epoch seconds (float).
+    assert isinstance(row["archived_at"], float)
+    assert row["archived_at"] == p.stat().st_mtime
+
+
+def test_scan_archived_round_trip_with_scan_configs(tmp_path):
+    """Round-trip: an active YAML moved to .archive/ disappears from
+    scan_configs and appears in scan_archived."""
+    src = tmp_path / "device.yaml"
+    src.write_text("esphome:\n  name: device\n")
+    assert "device.yaml" in scan_configs(str(tmp_path))
+    assert scan_archived(str(tmp_path)) == []
+
+    archive = tmp_path / ".archive"
+    archive.mkdir()
+    src.rename(archive / "device.yaml")
+    assert "device.yaml" not in scan_configs(str(tmp_path))
+    rows = scan_archived(str(tmp_path))
+    assert [r["filename"] for r in rows] == ["device.yaml"]
+
+
+def test_scan_archived_sorted(tmp_path):
+    archive = tmp_path / ".archive"
+    archive.mkdir()
+    for n in ("zebra.yaml", "alpha.yaml", "mango.yaml"):
+        (archive / n).write_text("x")
+    rows = scan_archived(str(tmp_path))
+    assert [r["filename"] for r in rows] == sorted(r["filename"] for r in rows)
+
+
+def test_scan_archived_ignores_subdirectory(tmp_path):
+    archive = tmp_path / ".archive"
+    nested = archive / "subdir"
+    nested.mkdir(parents=True)
+    (nested / "buried.yaml").write_text("x")
+    rows = scan_archived(str(tmp_path))
+    assert rows == []
 
 
 # ---------------------------------------------------------------------------

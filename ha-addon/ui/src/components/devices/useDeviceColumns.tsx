@@ -1,8 +1,10 @@
 import { useMemo } from 'react';
-import { Calendar, Clock, ExternalLink, GitBranch, Pin } from 'lucide-react';
+import { Archive, Calendar, Clock, ExternalLink, GitBranch, Pin } from 'lucide-react';
 import { createColumnHelper } from '@tanstack/react-table';
 import type { AddressSource, Job, Target } from '../../types';
 import { stripYaml, timeAgo, haDeepLink, formatCronHuman, fmtEpochRelative, fmtEpochAbsolute } from '../../utils';
+// DM.1: archived rows use the relative formatter for "archived 3 days ago"
+// hover/text. Imported above already through the ../../utils barrel.
 import { getJobBadge } from '../../utils/jobState';
 import { StatusDot } from '../StatusDot';
 import { SortHeader } from '../ui/sort-header';
@@ -62,6 +64,11 @@ interface Options {
   onRequestDelete: (target: string) => void;
   /** Bug #3: Archive — first-order hamburger action, no modal. */
   onArchive: (target: string) => void;
+  /** DM.1: restore an archived row back to ``/config/esphome/``. */
+  onUnarchive: (target: string) => void;
+  /** DM.1: open the two-step permanently-delete dialog for an
+   *  archived row. The dialog itself lives in DevicesTab. */
+  onPermanentDelete: (target: string) => void;
   onPin: (target: string) => void;
   onUnpin: (target: string) => void;
   /** AV.6: open the per-file History panel from the row hamburger menu. */
@@ -159,6 +166,8 @@ export function useDeviceColumns(options: Options) {
     setMenuOpenTarget,
     onEditTags,
     onArchive,
+    onUnarchive,
+    onPermanentDelete,
   } = options;
 
   return useMemo(() => [
@@ -201,6 +210,18 @@ export function useDeviceColumns(options: Options) {
           <>
             <span className="device-name">
               {t.friendly_name || t.device_name || stripYaml(t.target)}
+              {/* DM.1: archived chip — distinguishes the row at a glance
+                  even with the row-wide opacity-50; same hover gives
+                  the relative archived-at timestamp. */}
+              {t.archived && (
+                <span
+                  className="ml-1.5 inline-flex items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--surface2)] px-1.5 py-0 text-[10px] text-[var(--text-muted)] align-text-bottom"
+                  title={t.archived_at ? `Archived ${fmtEpochRelative(t.archived_at)}` : 'Archived'}
+                >
+                  <Archive className="size-3" aria-hidden />
+                  Archived
+                </span>
+              )}
               {t.schedule && t.schedule_enabled && (
                 <span title={`Recurring schedule: ${t.schedule}`} className="ml-1 inline-flex align-text-bottom opacity-70">
                   <Clock className="size-3" aria-label="Recurring schedule" />
@@ -637,6 +658,8 @@ export function useDeviceColumns(options: Options) {
           onRequestRename={onRequestRename}
           onRequestDelete={onRequestDelete}
           onArchive={onArchive}
+          onUnarchive={onUnarchive}
+          onPermanentDelete={onPermanentDelete}
           onPin={onPin}
           onUnpin={onUnpin}
           onOpenHistory={onOpenHistory}
@@ -668,5 +691,7 @@ export function useDeviceColumns(options: Options) {
     setMenuOpenTarget,
     onEditTags,
     onArchive,
+    onUnarchive,
+    onPermanentDelete,
   ]);
 }

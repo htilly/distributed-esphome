@@ -186,6 +186,19 @@ export interface Target {
    * with the native ESPHome integration's device row.
    */
   mac_address?: string | null;
+  /**
+   * DM.1: True when the row represents a YAML in `<config>/.archive/`.
+   * Active rows always carry `archived: false`. Archived rows render
+   * at opacity-50, sort below all active rows by `archived_at` desc,
+   * and expose only Unarchive + Permanently delete in their action
+   * menu. The poller / scheduler / routing engine / queue do not see
+   * these rows — archived is purely a UI surface.
+   */
+  archived?: boolean;
+  /** DM.1: epoch seconds (float) the YAML was moved into `.archive/`. Only present when `archived` is true. */
+  archived_at?: number;
+  /** DM.1: file size in bytes of the archived YAML. Only present when `archived` is true. */
+  archived_size?: number;
 }
 
 /**
