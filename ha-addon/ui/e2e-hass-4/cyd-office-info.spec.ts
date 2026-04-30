@@ -126,10 +126,12 @@ test.describe.serial('cyd-office-info hass-4 smoke', () => {
     const queueRow = await findQueueRow(page);
     await expect(queueRow).toBeVisible({ timeout: 30_000 });
 
-    // Open the log modal by clicking the row's Log button
-    const logBtn = queueRow.getByRole('button', { name: /^log$/i });
-    await expect(logBtn).toBeVisible({ timeout: 30_000 });
-    await logBtn.click();
+    // #209: per-row Log button moved into the row hamburger as
+    // "View log". Open the hamburger first, then click the menu item.
+    const moreBtn = queueRow.getByRole('button', { name: 'More actions' });
+    await expect(moreBtn).toBeVisible({ timeout: 30_000 });
+    await moreBtn.click();
+    await page.getByRole('menuitem', { name: 'View log' }).click();
 
     // The log modal contains an xterm.js terminal — the screen renders text
     // into a div with class "xterm-screen". Wait for it to render and stream
