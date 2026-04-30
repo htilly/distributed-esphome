@@ -59,16 +59,24 @@ echo "==> Target:            $STANDALONE_HOST:$STANDALONE_COMPOSE_DIR/config-esp
 echo "==> Files:             $FLEET_TARGETS"
 
 # -----------------------------------------------------------------------
-# 1. Sanity: every file exists on source, target dir exists on dest.
+# 1. Sanity: figure out which FLEET_TARGETS exist on the source host,
+#    warn (don't fail) on missing entries, and ensure the dest dir is
+#    in place.
 # -----------------------------------------------------------------------
 MISSING=""
+AVAILABLE=""
 for f in $FLEET_TARGETS; do
-  if ! ssh "${SSH_OPTS_SRC[@]}" "$FLEET_SOURCE_HOST" "test -e '$FLEET_SOURCE_DIR/$f'" 2>/dev/null; then
+  if ssh "${SSH_OPTS_SRC[@]}" "$FLEET_SOURCE_HOST" "test -e '$FLEET_SOURCE_DIR/$f'" 2>/dev/null; then
+    AVAILABLE="$AVAILABLE $f"
+  else
     MISSING="$MISSING $f"
   fi
 done
 if [[ -n "$MISSING" ]]; then
-  echo "    ERROR: missing on source host:$MISSING" >&2
+  echo "    warning: skipping missing on source host:$MISSING" >&2
+fi
+if [[ -z "${AVAILABLE// /}" ]]; then
+  echo "    ERROR: no FLEET_TARGETS exist on $FLEET_SOURCE_HOST:$FLEET_SOURCE_DIR" >&2
   exit 1
 fi
 
@@ -82,9 +90,9 @@ fi
 # -----------------------------------------------------------------------
 echo ""
 echo "==> Streaming fleet tarball ..."
-# shellcheck disable=SC2029  # $FLEET_TARGETS must expand locally
+# shellcheck disable=SC2029  # $AVAILABLE must expand locally
 ssh "${SSH_OPTS_SRC[@]}" "$FLEET_SOURCE_HOST" \
-    "cd '$FLEET_SOURCE_DIR' && tar cz $FLEET_TARGETS" \
+    "cd '$FLEET_SOURCE_DIR' && tar cz $AVAILABLE" \
   | ssh "${SSH_OPTS_DST[@]}" "$STANDALONE_HOST" \
     "cd '$STANDALONE_COMPOSE_DIR/config-esphome' && tar xzf -"
 
