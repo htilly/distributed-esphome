@@ -45,7 +45,7 @@ from sysinfo import collect_system_info
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.7.0-dev.59"
+CLIENT_VERSION = "1.7.0-dev.60"
 
 
 def _read_image_version() -> Optional[str]:
@@ -361,6 +361,46 @@ def _restart_self() -> None:
     """Restart the worker process in-place (preserving env vars)."""
     logger.info("Restarting worker process...")
     os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+def _wipe_broken_toolchain(pio_dir: str) -> bool:
+    """#214: when a compile fails with ``cc1: posix_spawnp: No such file
+    or directory``, the PlatformIO toolchain in *pio_dir* is in a
+    broken state — typically the user's Mac worker `macdaddy.localdomain`
+    in production, where some prior `cc1` was lost (partial extract,
+    Spotlight reindex, backup tool, anything). PlatformIO's own
+    "Check for working C compiler" notices the breakage and bails, but
+    PIO does NOT recover — it just keeps the broken tree on disk and
+    every subsequent compile fails identically. The fix is operator-
+    visible (Clean Cache used to wipe ``pio-slot-N`` end-to-end before
+    the #214 preservation patch); make the worker self-heal instead so
+    the user doesn't have to babysit it.
+
+    This wipes ``pio_dir/packages/`` (the toolchain home — re-fetched
+    by PlatformIO on the next compile via curl/tar, ~5–10 min on a
+    cold network). The PIO core dir itself, the per-target slot dirs,
+    and the shared cache are all left alone — we surgically remove
+    only what we know is broken.
+
+    Returns True if the wipe ran, False if the packages dir doesn't
+    exist (nothing to recover).
+    """
+    import shutil
+    packages = os.path.join(pio_dir, "packages")
+    if not os.path.isdir(packages):
+        logger.warning("[#214] no packages/ under %s — nothing to wipe", pio_dir)
+        return False
+    try:
+        logger.warning(
+            "[#214] wiping broken PlatformIO toolchain at %s — next compile will "
+            "re-download (~5–10 min cold). Triggered by cc1/posix_spawnp ENOENT.",
+            packages,
+        )
+        shutil.rmtree(packages, ignore_errors=False)
+        return True
+    except Exception as exc:
+        logger.warning("[#214] toolchain wipe failed on %s: %s", packages, exc)
+        return False
 
 
 def _log_toolchain_state(pio_dir: str, reason: str) -> None:
@@ -1272,6 +1312,27 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
                 env=subprocess_env,
                 job_id=job_id,
             )
+            # #214: same self-heal as the OTA path — see the comment on
+            # the run_cmd retry block below for context.
+            cc1_signature = "posix_spawnp" in compile_log and (
+                "cc1" in compile_log or "C compiler" in compile_log
+            )
+            if not compile_ok and cc1_signature:
+                _log_toolchain_state(pio_dir, "download_only compile failed with cc1/posix_spawnp ENOENT")
+                if _wipe_broken_toolchain(pio_dir):
+                    _flush_log_text(
+                        job_id,
+                        "\n--- #214 self-heal: PlatformIO toolchain was broken. "
+                        "Wiped pio-slot/packages/ and retrying compile. ---\n",
+                    )
+                    compile_log, compile_ok = _run_subprocess(
+                        compile_cmd,
+                        cwd=build_dir,
+                        timeout=timeout_seconds,
+                        label="compile (retry after toolchain wipe)",
+                        env=subprocess_env,
+                        job_id=job_id,
+                    )
             if not compile_ok:
                 _submit_result(job_id, "failed", log=None, ota_result=None)
                 return
@@ -1331,12 +1392,36 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
         )
 
         # #214: when the compile failed with the cc1 / posix_spawnp ENOENT
-        # symptom, dump the toolchain layout to the worker log so the next
-        # reproduction has actionable context (which file is missing, free
-        # disk, active job count). Cheap to do on the failure path; no-op
-        # on the happy path.
-        if not run_ok and ("posix_spawnp" in run_log or "cc1" in run_log):
+        # symptom, the PlatformIO toolchain on this worker is broken in
+        # steady state — verified live in #214's home-lab repro, where the
+        # same `pio-slot-1/packages/toolchain-xtensa-esp-elf` is missing
+        # `cc1` across every job that lands on `macdaddy.localdomain`.
+        # PlatformIO doesn't self-recover, so the worker has to: dump the
+        # toolchain layout for the log, wipe `packages/`, and retry the
+        # compile once so the next attempt re-extracts a fresh toolchain
+        # via curl/tar (~5–10 min on a cold link). The retry happens
+        # in-process before we submit "failed", so the original job
+        # succeeds on the second try and the operator never has to babysit
+        # the worker manually.
+        cc1_signature = "posix_spawnp" in run_log and ("cc1" in run_log or "C compiler" in run_log)
+        if not run_ok and cc1_signature:
             _log_toolchain_state(pio_dir, "compile failed with cc1/posix_spawnp ENOENT")
+            if _wipe_broken_toolchain(pio_dir):
+                _flush_log_text(
+                    job_id,
+                    "\n--- #214 self-heal: PlatformIO toolchain was broken (cc1: "
+                    "posix_spawnp ENOENT). Wiped pio-slot/packages/ and retrying "
+                    "compile — the toolchain re-download takes 5–10 min on cold "
+                    "networks, so subsequent jobs may queue behind this one. ---\n",
+                )
+                run_log, run_ok = _run_subprocess(
+                    run_cmd,
+                    cwd=build_dir,
+                    timeout=total_timeout,
+                    label="compile+OTA (retry after toolchain wipe)",
+                    env=subprocess_env,
+                    job_id=job_id,
+                )
 
         if run_ok:
             # #45: compile succeeded — sync the slot's .pio/.esphome back to

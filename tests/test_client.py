@@ -708,3 +708,55 @@ def test_clean_build_cache_removes_unprotected_dirs(tmp_path, monkeypatch):
     client_module._clean_build_cache()
 
     assert list(tmp_path.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# #214 — _wipe_broken_toolchain — when a compile fails with cc1 ENOENT,
+# the worker auto-heals by removing the broken PlatformIO toolchain so
+# the next compile re-extracts. Live repro on macdaddy.localdomain in
+# the home-lab fleet: 3-of-65 jobs in a "Compile All Online" run failed
+# with `xtensa-esp-elf-gcc: fatal error: cannot execute 'cc1':
+# posix_spawnp: No such file or directory`, all on the same worker's
+# pio-slot-1.
+# ---------------------------------------------------------------------------
+
+def test_wipe_broken_toolchain_removes_packages_dir(tmp_path):
+    import client as client_module  # noqa: PLC0415
+
+    pio_dir = tmp_path / "pio-slot-1"
+    packages = pio_dir / "packages" / "toolchain-xtensa-esp-elf" / "bin"
+    packages.mkdir(parents=True)
+    (packages / "xtensa-esp-elf-gcc").write_text("broken-binary")
+    # PIO core dir's own siblings should be untouched.
+    (pio_dir / "tmp").mkdir()
+    (pio_dir / "tmp" / "scratch").write_text("keep")
+
+    assert client_module._wipe_broken_toolchain(str(pio_dir)) is True
+    assert not (pio_dir / "packages").exists()
+    # Sibling untouched.
+    assert (pio_dir / "tmp" / "scratch").read_text() == "keep"
+
+
+def test_wipe_broken_toolchain_noop_when_packages_missing(tmp_path):
+    """Tolerate the case where there's no packages/ to wipe."""
+    import client as client_module  # noqa: PLC0415
+
+    pio_dir = tmp_path / "pio-slot-1"
+    pio_dir.mkdir()
+
+    assert client_module._wipe_broken_toolchain(str(pio_dir)) is False
+
+
+def test_wipe_broken_toolchain_swallows_rmtree_failure(tmp_path, monkeypatch):
+    """A read-only filesystem mid-rmtree must not propagate — the worker
+    still needs to submit ``failed`` and move on."""
+    import client as client_module  # noqa: PLC0415
+
+    pio_dir = tmp_path / "pio-slot-1"
+    (pio_dir / "packages").mkdir(parents=True)
+
+    def fake_rmtree(path, ignore_errors=False):
+        raise PermissionError("read-only fs")
+
+    monkeypatch.setattr(client_module.shutil, "rmtree", fake_rmtree)
+    assert client_module._wipe_broken_toolchain(str(pio_dir)) is False
