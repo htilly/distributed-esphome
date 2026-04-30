@@ -242,6 +242,18 @@ export function UpgradeModal({
     return true;
   });
 
+  // #215: collapse the version picker into a two-radio surface ("Current"
+  // vs "Other"). The search box + scrollable list + show-betas only
+  // unfolds when the user picks "Other", which removes ~80 vertical
+  // pixels of clutter from the common case where the default version
+  // is fine. ``versionMode === 'other'`` is also implied when a non-
+  // default version was pre-seeded (rerun seed, existing pin) so the
+  // modal opens to the picker the user previously interacted with.
+  type VersionMode = 'current' | 'other';
+  const initialVersionMode: VersionMode =
+    selectedVersion && selectedVersion !== defaultEsphomeVersion ? 'other' : 'current';
+  const [versionMode, setVersionMode] = useState<VersionMode>(initialVersionMode);
+
   // UX.8 + #79: One 4-option action radio. `Schedule Upgrade` was
   // earlier a single radio with a nested Recurring/Once sub-toggle —
   // that sub-toggle is now promoted into two first-class radios so
@@ -433,9 +445,62 @@ export function UpgradeModal({
         </DialogHeader>
         <div className="p-[18px] flex flex-col gap-4">
 
-          {/* Shared: Worker + Version (hidden in scheduleOnly mode) */}
+          {/* #215: Action → Worker → Version order. Action goes first
+              because it's the verb that drives every other decision
+              (Upgrade vs Download vs Schedule), Worker narrows who
+              runs it, Version is the fine-grain knob most users leave
+              at the default. */}
           {!scheduleOnly && (
             <>
+              {/* UX.8 + #79: single Action radio (4 options). Schedule is
+                  split into recurring vs one-time so there's no nested
+                  sub-toggle inside the schedule form. `whitespace-nowrap`
+                  on the label rows stops "Schedule Recurring" from
+                  wrapping onto two lines (#78). */}
+              <div className="flex flex-col gap-1.5">
+                <Label>Action</Label>
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
+                  <input
+                    type="radio"
+                    name="upgrade-action"
+                    checked={action === 'upgrade-now'}
+                    onChange={() => setAction('upgrade-now')}
+                  />
+                  Upgrade Now
+                  <span className="text-[11px] text-[var(--text-muted)]">— compile + OTA flash</span>
+                </label>
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
+                  <input
+                    type="radio"
+                    name="upgrade-action"
+                    checked={action === 'download-now'}
+                    onChange={() => setAction('download-now')}
+                  />
+                  Download Now
+                  <span className="text-[11px] text-[var(--text-muted)]">— compile only, no OTA; grab the .bin from the Queue tab</span>
+                </label>
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
+                  <input
+                    type="radio"
+                    name="upgrade-action"
+                    checked={action === 'schedule-recurring'}
+                    onChange={() => setAction('schedule-recurring')}
+                  />
+                  Schedule Recurring
+                  <span className="text-[11px] text-[var(--text-muted)]">— run the OTA upgrade on a cron</span>
+                </label>
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
+                  <input
+                    type="radio"
+                    name="upgrade-action"
+                    checked={action === 'schedule-once'}
+                    onChange={() => setAction('schedule-once')}
+                  />
+                  Schedule Once
+                  <span className="text-[11px] text-[var(--text-muted)]">— run the OTA upgrade at a specific timestamp</span>
+                </label>
+              </div>
+
               {/* Bug #97: worker-selection radio. "Any" lets routing
                   rules + the scheduler decide; "Specific" pins to one
                   worker (legacy behaviour); "Tag expression" adds a
@@ -443,7 +508,7 @@ export function UpgradeModal({
                   claim_next eligibility. The three are mutually
                   exclusive at the UI level so the user has one source
                   of truth. */}
-              <div className="flex flex-col gap-1.5">
+              <div className="flex flex-col gap-1.5 pt-2 border-t border-[var(--border)]">
                 <Label>Worker</Label>
                 <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
                   <input
@@ -510,42 +575,68 @@ export function UpgradeModal({
                 )}
               </div>
 
-              <div>
+              {/* #215: collapsed version picker. The radio surface keeps
+                  the common "stick with the current version" case to
+                  one short line; the search box + scrollable list +
+                  show-betas only unfold under "Other". */}
+              <div className="flex flex-col gap-1.5 pt-2 border-t border-[var(--border)]">
                 <Label>ESPHome version</Label>
-                <input
-                  type="text"
-                  value={versionSearch}
-                  onChange={e => setVersionSearch(e.target.value)}
-                  placeholder="Search versions..."
-                  className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface2)] px-2.5 py-1 text-[12px] text-[var(--text)] outline-none placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] mb-1"
-                />
-                {/* #73: scrollable list matching the header dropdown style */}
-                <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] overflow-y-auto" style={{ maxHeight: 160 }}>
-                  <button
-                    type="button"
-                    className={`w-full text-left px-2.5 py-1.5 text-[12px] cursor-pointer hover:bg-[var(--surface2)] ${selectedVersion === '' ? 'text-[var(--accent)] font-semibold' : 'text-[var(--text)]'}`}
-                    onClick={() => setSelectedVersion('')}
-                  >
-                    Current{defaultEsphomeVersion ? ` (${defaultEsphomeVersion})` : ''}
-                  </button>
-                  {filteredVersions.map(v => (
-                    <button
-                      key={v}
-                      type="button"
-                      className={`w-full text-left px-2.5 py-1.5 text-[12px] cursor-pointer hover:bg-[var(--surface2)] ${selectedVersion === v ? 'text-[var(--accent)] font-semibold' : 'text-[var(--text)]'}`}
-                      onClick={() => setSelectedVersion(v)}
-                    >
-                      {v}
-                    </button>
-                  ))}
-                  {filteredVersions.length === 0 && (
-                    <div className="px-2.5 py-1.5 text-[12px] text-[var(--text-muted)]">No matches</div>
-                  )}
-                </div>
-                <label className="flex items-center gap-1.5 mt-1 text-[11px] text-[var(--text-muted)] cursor-pointer">
-                  <input type="checkbox" checked={showBetas} onChange={e => setShowBetas(e.target.checked)} />
-                  Show betas
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
+                  <input
+                    type="radio"
+                    name="upgrade-version-mode"
+                    checked={versionMode === 'current'}
+                    onChange={() => {
+                      setVersionMode('current');
+                      setSelectedVersion('');
+                    }}
+                  />
+                  Current{defaultEsphomeVersion ? ` (${defaultEsphomeVersion})` : ''}
+                  <span className="text-[11px] text-[var(--text-muted)]">— use the server-default version at compile time</span>
                 </label>
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
+                  <input
+                    type="radio"
+                    name="upgrade-version-mode"
+                    checked={versionMode === 'other'}
+                    onChange={() => setVersionMode('other')}
+                  />
+                  Other
+                  {versionMode === 'other' && selectedVersion && (
+                    <span className="text-[11px] text-[var(--accent)]">— {selectedVersion}</span>
+                  )}
+                </label>
+                {versionMode === 'other' && (
+                  <div className="ml-5">
+                    <input
+                      type="text"
+                      value={versionSearch}
+                      onChange={e => setVersionSearch(e.target.value)}
+                      placeholder="Search versions..."
+                      className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface2)] px-2.5 py-1 text-[12px] text-[var(--text)] outline-none placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] mb-1"
+                    />
+                    {/* #73: scrollable list matching the header dropdown style */}
+                    <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] overflow-y-auto" style={{ maxHeight: 160 }}>
+                      {filteredVersions.map(v => (
+                        <button
+                          key={v}
+                          type="button"
+                          className={`w-full text-left px-2.5 py-1.5 text-[12px] cursor-pointer hover:bg-[var(--surface2)] ${selectedVersion === v ? 'text-[var(--accent)] font-semibold' : 'text-[var(--text)]'}`}
+                          onClick={() => setSelectedVersion(v)}
+                        >
+                          {v}
+                        </button>
+                      ))}
+                      {filteredVersions.length === 0 && (
+                        <div className="px-2.5 py-1.5 text-[12px] text-[var(--text-muted)]">No matches</div>
+                      )}
+                    </div>
+                    <label className="flex items-center gap-1.5 mt-1 text-[11px] text-[var(--text-muted)] cursor-pointer">
+                      <input type="checkbox" checked={showBetas} onChange={e => setShowBetas(e.target.checked)} />
+                      Show betas
+                    </label>
+                  </div>
+                )}
               </div>
 
               {/* Pin warning */}
@@ -577,57 +668,6 @@ export function UpgradeModal({
                 </div>
               )}
             </>
-          )}
-
-          {/* UX.8 + #79: single Action radio (4 options). Schedule is split
-              into recurring vs one-time so there's no nested sub-toggle
-              inside the schedule form. `whitespace-nowrap` on the label
-              rows stops "Schedule Recurring" from wrapping onto two lines
-              (#78). */}
-          {!scheduleOnly && (
-            <div className="flex flex-col gap-1.5 pt-2 border-t border-[var(--border)]">
-              <Label>Action</Label>
-              <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
-                <input
-                  type="radio"
-                  name="upgrade-action"
-                  checked={action === 'upgrade-now'}
-                  onChange={() => setAction('upgrade-now')}
-                />
-                Upgrade Now
-                <span className="text-[11px] text-[var(--text-muted)]">— compile + OTA flash</span>
-              </label>
-              <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
-                <input
-                  type="radio"
-                  name="upgrade-action"
-                  checked={action === 'download-now'}
-                  onChange={() => setAction('download-now')}
-                />
-                Download Now
-                <span className="text-[11px] text-[var(--text-muted)]">— compile only, no OTA; grab the .bin from the Queue tab</span>
-              </label>
-              <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
-                <input
-                  type="radio"
-                  name="upgrade-action"
-                  checked={action === 'schedule-recurring'}
-                  onChange={() => setAction('schedule-recurring')}
-                />
-                Schedule Recurring
-                <span className="text-[11px] text-[var(--text-muted)]">— run the OTA upgrade on a cron</span>
-              </label>
-              <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
-                <input
-                  type="radio"
-                  name="upgrade-action"
-                  checked={action === 'schedule-once'}
-                  onChange={() => setAction('schedule-once')}
-                />
-                Schedule Once
-                <span className="text-[11px] text-[var(--text-muted)]">— run the OTA upgrade at a specific timestamp</span>
-              </label>
-            </div>
           )}
 
           {/* Schedule options (only visible when a schedule-* action is active) */}
