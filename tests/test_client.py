@@ -720,25 +720,46 @@ def test_clean_build_cache_removes_unprotected_dirs(tmp_path, monkeypatch):
 # pio-slot-1.
 # ---------------------------------------------------------------------------
 
-def test_wipe_broken_toolchain_removes_packages_dir(tmp_path):
+def test_wipe_broken_toolchain_removes_packages_and_penv(tmp_path):
     import client as client_module  # noqa: PLC0415
 
     pio_dir = tmp_path / "pio-slot-1"
     packages = pio_dir / "packages" / "toolchain-xtensa-esp-elf" / "bin"
     packages.mkdir(parents=True)
     (packages / "xtensa-esp-elf-gcc").write_text("broken-binary")
+    # #220: penv/ is also wiped — covers the `penv/bin/esptool: not found`
+    # / `Missing framework-…-libs package` failure modes that the cc1-only
+    # wipe missed.
+    penv_bin = pio_dir / "penv" / "bin"
+    penv_bin.mkdir(parents=True)
+    (penv_bin / "esptool").write_text("broken-script")
     # PIO core dir's own siblings should be untouched.
-    (pio_dir / "tmp").mkdir()
-    (pio_dir / "tmp" / "scratch").write_text("keep")
+    (pio_dir / "dist").mkdir()
+    (pio_dir / "dist" / "downloaded.tar.gz").write_text("keep — saves a re-download")
+    (pio_dir / "appstate.json").write_text("keep")
 
     assert client_module._wipe_broken_toolchain(str(pio_dir)) is True
     assert not (pio_dir / "packages").exists()
-    # Sibling untouched.
-    assert (pio_dir / "tmp" / "scratch").read_text() == "keep"
+    assert not (pio_dir / "penv").exists()
+    # Siblings untouched.
+    assert (pio_dir / "dist" / "downloaded.tar.gz").read_text() == "keep — saves a re-download"
+    assert (pio_dir / "appstate.json").read_text() == "keep"
 
 
-def test_wipe_broken_toolchain_noop_when_packages_missing(tmp_path):
-    """Tolerate the case where there's no packages/ to wipe."""
+def test_wipe_broken_toolchain_returns_true_when_only_one_subtree_present(tmp_path):
+    """Either packages/ or penv/ alone is enough to count as a wipe."""
+    import client as client_module  # noqa: PLC0415
+
+    pio_dir = tmp_path / "pio-slot-1"
+    (pio_dir / "penv" / "bin").mkdir(parents=True)
+    # No packages/ — the heal still does what it can.
+
+    assert client_module._wipe_broken_toolchain(str(pio_dir)) is True
+    assert not (pio_dir / "penv").exists()
+
+
+def test_wipe_broken_toolchain_noop_when_nothing_to_wipe(tmp_path):
+    """Tolerate the case where there's neither packages/ nor penv/."""
     import client as client_module  # noqa: PLC0415
 
     pio_dir = tmp_path / "pio-slot-1"
@@ -754,9 +775,62 @@ def test_wipe_broken_toolchain_swallows_rmtree_failure(tmp_path, monkeypatch):
 
     pio_dir = tmp_path / "pio-slot-1"
     (pio_dir / "packages").mkdir(parents=True)
+    (pio_dir / "penv").mkdir(parents=True)
 
     def fake_rmtree(path, ignore_errors=False):
         raise PermissionError("read-only fs")
 
     monkeypatch.setattr(client_module.shutil, "rmtree", fake_rmtree)
     assert client_module._wipe_broken_toolchain(str(pio_dir)) is False
+
+
+# ---------------------------------------------------------------------------
+# #220 — _is_broken_pio_state — every distinct corruption symptom we've
+# seen in the home lab must trigger the self-heal path. New patterns get
+# added to ``_BROKEN_PIO_SIGNATURES`` and a fixture line goes here.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "log_excerpt",
+    [
+        # #214 original — toolchain-xtensa-esp-elf missing cc1.
+        "xtensa-esp-elf-gcc: fatal error: cannot execute 'cc1': posix_spawnp: No such file or directory",
+        # #220 — framework-libs partially extracted.
+        "Error: Missing framework-arduinoespressif32-libs package",
+        # #220 — tool-* package missing pyproject.toml/setup.py.
+        "error: /esphome-versions/pio-slot-1/packages/tool-esptoolpy does not appear to be a Python project, "
+        "as neither `pyproject.toml` nor `setup.py` are present in the directory",
+        # #220 — esptool half-installed in penv/.espidf-*/.
+        "ModuleNotFoundError: No module named 'esptool.__init__'; 'esptool' is not a package",
+        # #220 — penv binary missing → Error 127.
+        "sh: 1: /esphome-versions/pio-slot-2/penv/bin/esptool: not found\n"
+        "*** [.pioenvs/bbq-gas-valve/bootloader.bin] Error 127",
+        # #220 — generic Error 127 in firmware build.
+        "*** [.pioenvs/screek-1u-1/firmware.bin] Error 127",
+    ],
+)
+def test_is_broken_pio_state_matches_real_lab_failures(log_excerpt):
+    import client as client_module  # noqa: PLC0415
+
+    assert client_module._is_broken_pio_state(log_excerpt) is True
+
+
+@pytest.mark.parametrize(
+    "log_excerpt",
+    [
+        # Clean compile log — should not trigger.
+        "Compiling .pioenvs/foo/firmware.bin\nLinking .pioenvs/foo/firmware.elf\n",
+        # User config error — different bug class, must NOT self-heal.
+        "ERROR Error: Unable to find component 'invalid_platform'",
+        # OTA failure — different bug class, must NOT self-heal.
+        "ERROR Error resolving IP address of 192.168.1.99: [Errno 8] nodename nor servname provided",
+        # Compile error in user code — different bug class.
+        "main.cpp:42:1: error: 'foo' was not declared in this scope",
+        # Other Error 127 (not in .pioenvs/) — keep narrow.
+        "make: *** [unrelated/target] Error 127",
+    ],
+)
+def test_is_broken_pio_state_ignores_non_corruption_failures(log_excerpt):
+    import client as client_module  # noqa: PLC0415
+
+    assert client_module._is_broken_pio_state(log_excerpt) is False

@@ -7,6 +7,7 @@ import fcntl
 import io
 import logging
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -45,7 +46,7 @@ from sysinfo import collect_system_info
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.7.0-dev.61"
+CLIENT_VERSION = "1.7.0-dev.62"
 
 
 def _read_image_version() -> Optional[str]:
@@ -363,37 +364,80 @@ def _restart_self() -> None:
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
-def _wipe_broken_toolchain(pio_dir: str) -> bool:
-    """#214: when a compile fails with ``cc1: posix_spawnp: No such file
-    or directory``, the PlatformIO toolchain in *pio_dir* is in a
-    broken state — typically the user's Mac worker `macdaddy.localdomain`
-    in production, where some prior `cc1` was lost (partial extract,
-    Spotlight reindex, backup tool, anything). PlatformIO's own
-    "Check for working C compiler" notices the breakage and bails, but
-    PIO does NOT recover — it just keeps the broken tree on disk and
-    every subsequent compile fails identically. The fix is operator-
-    visible (Clean Cache used to wipe ``pio-slot-N`` end-to-end before
-    the #214 preservation patch); make the worker self-heal instead so
-    the user doesn't have to babysit it.
+# #214 / #220: PlatformIO does not validate package integrity between
+# runs — once a `pio-slot-N/` subtree is partially extracted, missing a
+# binary, or has lost a file, every subsequent compile on the same slot
+# fails identically. The remedy is always the same (wipe the broken
+# subtree, retry once, let PIO re-fetch). These regexes match the
+# distinct symptoms observed in the home lab so the worker can detect
+# every flavor of corruption with one self-heal hook. New patterns get
+# added here, not at every call site.
+_BROKEN_PIO_SIGNATURES: tuple[re.Pattern[str], ...] = (
+    # toolchain-xtensa-esp-elf missing the cc1 binary (#214 original).
+    re.compile(r"posix_spawnp.*(?:cc1|C compiler)|(?:cc1|C compiler).*posix_spawnp", re.DOTALL),
+    # framework-libs / framework-arduinoespressif32-libs partially extracted —
+    # the metadata files are present but the actual library blobs aren't.
+    re.compile(r"Missing framework-\S+ package"),
+    # tool-* package extracted with no Python project files (only
+    # metadata) — PIO's `pip install -e <tool>` then fails with this.
+    re.compile(r"does not appear to be a Python project, as neither"),
+    # esptool half-installed inside penv/.espidf-*/ — directory exists
+    # but missing __init__.py, so Python sees it as a non-package.
+    re.compile(r"ModuleNotFoundError: No module named ['\"]esptool|esptool['\"] is not a package"),
+    # PIO penv binary missing — sh's "not found" form (followed by the
+    # generic Error 127 below).
+    re.compile(r"/penv/bin/\S+: not found"),
+    # Generic Error 127 from a PIO bootloader/firmware build (catches
+    # everything else where some PIO-invoked subcommand is missing).
+    re.compile(r"\*\*\* \[\.pioenvs/[^\]]+/(?:bootloader|firmware)\.bin\] Error 127"),
+)
 
-    This wipes ``pio_dir/packages/`` (the toolchain home — re-fetched
-    by PlatformIO on the next compile via curl/tar, ~5–10 min on a
-    cold network). The PIO core dir itself, the per-target slot dirs,
-    and the shared cache are all left alone — we surgically remove
-    only what we know is broken.
 
-    Returns True if the wipe ran, False if the packages dir doesn't
-    exist (nothing to recover).
+def _is_broken_pio_state(log: str) -> bool:
+    """#214 / #220: detect signatures of a corrupted ``pio-slot-N/`` tree
+    in a PlatformIO compile log. See ``_BROKEN_PIO_SIGNATURES`` for the
+    exhaustive list.
+
+    Triggers ``_wipe_broken_toolchain`` + a one-shot retry on the same
+    job — the worker re-extracts everything PIO needs from scratch, the
+    operator never has to babysit it.
     """
-    import shutil
-    packages = os.path.join(pio_dir, "packages")
-    if not os.path.isdir(packages):
-        logger.warning("[#214] no packages/ under %s — nothing to wipe", pio_dir)
+    return any(pat.search(log) for pat in _BROKEN_PIO_SIGNATURES)
+
+
+def _wipe_broken_toolchain(pio_dir: str) -> bool:
+    """#214 / #220: wipe the corrupted parts of ``pio-slot-N/`` so PIO
+    can re-bootstrap on the next compile.
+
+    Removes both ``packages/`` (extracted toolchain + framework + tool
+    packages) and ``penv/`` (the PIO Python venv where ``esptool``,
+    ``esp-coredump``, etc. live). Either subtree can rot independently:
+    the original #214 incident was ``packages/toolchain-xtensa-esp-elf``
+    missing ``cc1``; #220 added cases where ``penv/bin/esptool`` was
+    gone (``Error 127``) and where ``packages/framework-arduinoespressif32-libs``
+    held only metadata files. A surgical "wipe just packages/" misses
+    the latter two — wipe both.
+
+    The PIO core dir itself, the per-target build slots
+    (``slots/<N>/<stem>/``), the shared ESPHome cache, ``dist/``
+    (downloaded source archives — re-extracts from these without
+    re-download), and ``platforms/`` are all left alone.
+
+    Returns True if at least one subtree was wiped, False if neither
+    existed (nothing to recover) or if the disk-pressure guard fired.
+    """
+    targets = [
+        os.path.join(pio_dir, "packages"),
+        os.path.join(pio_dir, "penv"),
+    ]
+    existing = [t for t in targets if os.path.isdir(t)]
+    if not existing:
+        logger.warning("[#214] no packages/ or penv/ under %s — nothing to wipe", pio_dir)
         return False
-    # #219: if the host is out of disk, wiping the broken toolchain
-    # only to have the next extract hit ENOSPC mid-tarball (re-corrupting
-    # what we just cleaned) is a guaranteed loop. Fail fast with one
-    # honest log line the operator can act on. A fresh xtensa toolchain
+    # #219: if the host is out of disk, wiping the broken state only to
+    # have the next extract hit ENOSPC mid-tarball (re-corrupting what
+    # we just cleaned) is a guaranteed loop. Fail fast with one honest
+    # log line the operator can act on. A fresh xtensa toolchain
     # extracts to ~600 MB; require at least 1 GiB free as headroom.
     try:
         usage = shutil.disk_usage(pio_dir)
@@ -404,23 +448,25 @@ def _wipe_broken_toolchain(pio_dir: str) -> bool:
                 "worker's filesystem; a fresh toolchain extract needs >1 GiB. "
                 "Free disk on the worker host (Clean cache, prune Docker images, "
                 "or grow the volume) and retry.",
-                packages, free_gib,
+                pio_dir, free_gib,
             )
             return False
     except OSError as exc:
         # disk_usage failure is itself diagnostic — log and proceed.
         logger.warning("[#214/#219] disk_usage probe failed on %s: %s", pio_dir, exc)
-    try:
-        logger.warning(
-            "[#214] wiping broken PlatformIO toolchain at %s — next compile will "
-            "re-download (~5–10 min cold). Triggered by cc1/posix_spawnp ENOENT.",
-            packages,
-        )
-        shutil.rmtree(packages, ignore_errors=False)
-        return True
-    except Exception as exc:
-        logger.warning("[#214] toolchain wipe failed on %s: %s", packages, exc)
-        return False
+    wiped_any = False
+    for target in existing:
+        try:
+            logger.warning(
+                "[#214] wiping broken PlatformIO state at %s — next compile will "
+                "re-fetch (~5–10 min cold).",
+                target,
+            )
+            shutil.rmtree(target, ignore_errors=False)
+            wiped_any = True
+        except Exception as exc:
+            logger.warning("[#214] wipe failed on %s: %s", target, exc)
+    return wiped_any
 
 
 def _log_toolchain_state(pio_dir: str, reason: str) -> None:
@@ -1334,22 +1380,19 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
             )
             # #214: same self-heal as the OTA path — see the comment on
             # the run_cmd retry block below for context.
-            cc1_signature = "posix_spawnp" in compile_log and (
-                "cc1" in compile_log or "C compiler" in compile_log
-            )
-            if not compile_ok and cc1_signature:
-                _log_toolchain_state(pio_dir, "download_only compile failed with cc1/posix_spawnp ENOENT")
+            if not compile_ok and _is_broken_pio_state(compile_log):
+                _log_toolchain_state(pio_dir, "download_only compile failed with broken pio-slot signature")
                 if _wipe_broken_toolchain(pio_dir):
                     _flush_log_text(
                         job_id,
-                        "\n--- #214 self-heal: PlatformIO toolchain was broken. "
-                        "Wiped pio-slot/packages/ and retrying compile. ---\n",
+                        "\n--- #214 self-heal: PlatformIO state was broken. "
+                        "Wiped pio-slot/packages/ + penv/ and retrying compile. ---\n",
                     )
                     compile_log, compile_ok = _run_subprocess(
                         compile_cmd,
                         cwd=build_dir,
                         timeout=timeout_seconds,
-                        label="compile (retry after toolchain wipe)",
+                        label="compile (retry after pio-slot wipe)",
                         env=subprocess_env,
                         job_id=job_id,
                     )
@@ -1411,28 +1454,25 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
             job_id=job_id,
         )
 
-        # #214: when the compile failed with the cc1 / posix_spawnp ENOENT
-        # symptom, the PlatformIO toolchain on this worker is broken in
-        # steady state — verified live in #214's home-lab repro, where the
-        # same `pio-slot-1/packages/toolchain-xtensa-esp-elf` is missing
-        # `cc1` across every job that lands on `macdaddy.localdomain`.
-        # PlatformIO doesn't self-recover, so the worker has to: dump the
-        # toolchain layout for the log, wipe `packages/`, and retry the
-        # compile once so the next attempt re-extracts a fresh toolchain
-        # via curl/tar (~5–10 min on a cold link). The retry happens
-        # in-process before we submit "failed", so the original job
-        # succeeds on the second try and the operator never has to babysit
-        # the worker manually.
-        cc1_signature = "posix_spawnp" in run_log and ("cc1" in run_log or "C compiler" in run_log)
-        if not run_ok and cc1_signature:
-            _log_toolchain_state(pio_dir, "compile failed with cc1/posix_spawnp ENOENT")
+        # #214 / #220: when the compile failed with any of the broken-
+        # pio-slot signatures (see ``_BROKEN_PIO_SIGNATURES``), the
+        # worker's ``pio-slot-N/`` tree is corrupted in steady state and
+        # PlatformIO won't self-recover — so the worker has to: dump the
+        # toolchain layout for the log, wipe ``packages/`` + ``penv/``,
+        # and retry the compile once so the next attempt re-extracts
+        # everything via curl/tar (~5–10 min on a cold link). The retry
+        # happens in-process before we submit "failed", so the original
+        # job succeeds on the second try and the operator never has to
+        # babysit the worker manually.
+        if not run_ok and _is_broken_pio_state(run_log):
+            _log_toolchain_state(pio_dir, "compile failed with broken pio-slot signature")
             if _wipe_broken_toolchain(pio_dir):
                 _flush_log_text(
                     job_id,
-                    "\n--- #214 self-heal: PlatformIO toolchain was broken (cc1: "
-                    "posix_spawnp ENOENT). Wiped pio-slot/packages/ and retrying "
-                    "compile — the toolchain re-download takes 5–10 min on cold "
-                    "networks, so subsequent jobs may queue behind this one. ---\n",
+                    "\n--- #214 self-heal: PlatformIO state was broken. "
+                    "Wiped pio-slot/packages/ + penv/ and retrying compile — "
+                    "the re-extract takes 5–10 min on cold networks, so "
+                    "subsequent jobs may queue behind this one. ---\n",
                 )
                 run_log, run_ok = _run_subprocess(
                     run_cmd,
