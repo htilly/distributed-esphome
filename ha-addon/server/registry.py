@@ -38,6 +38,11 @@ class Worker:
     requested_max_parallel_jobs: Optional[int] = None  # set via UI, pushed in heartbeat
     pending_clean: bool = False  # set via UI, pushed in heartbeat
     system_info: Optional[dict] = None
+    # #219: self-imposed claim block when the worker's heartbeat reports
+    # disk_used_pct at/above the enter threshold. Distinct from ``disabled``
+    # (which is a sticky operator choice) — this auto-resumes the moment
+    # the worker reports it's back below the exit threshold.
+    health_blocked_reason: Optional[str] = None
     # TG.1: user-managed tags. Resolved at registration time by the
     # WorkerTagStore (hostname, falling back to client_id, is the identity);
     # this in-memory copy is kept in sync so UI reads off the registry don't
@@ -58,8 +63,32 @@ class Worker:
             "requested_max_parallel_jobs": self.requested_max_parallel_jobs,
             "pending_clean": self.pending_clean,
             "system_info": self.system_info,
+            "health_blocked_reason": self.health_blocked_reason,
             "tags": list(self.tags),
         }
+
+    def evaluate_health(self) -> bool:
+        """Recompute ``health_blocked_reason`` from ``system_info`` (#219).
+
+        Hysteresis: enter blocked at ``WORKER_DISK_BLOCK_ENTER_PCT``; exit
+        only when usage drops to or below ``WORKER_DISK_BLOCK_EXIT_PCT``.
+        Returns True iff the state transitioned (caller can broadcast).
+        """
+        from constants import WORKER_DISK_BLOCK_ENTER_PCT, WORKER_DISK_BLOCK_EXIT_PCT  # noqa: PLC0415
+        info = self.system_info or {}
+        pct = info.get("disk_used_pct")
+        if pct is None:
+            return False
+        try:
+            pct_int = int(pct)
+        except (TypeError, ValueError):
+            return False
+        previous = self.health_blocked_reason
+        if previous is None and pct_int >= WORKER_DISK_BLOCK_ENTER_PCT:
+            self.health_blocked_reason = "disk_full"
+        elif previous == "disk_full" and pct_int <= WORKER_DISK_BLOCK_EXIT_PCT:
+            self.health_blocked_reason = None
+        return self.health_blocked_reason != previous
 
 
 class WorkerRegistry:
@@ -161,6 +190,17 @@ class WorkerRegistry:
         worker.last_seen = _utcnow()
         if system_info is not None:
             worker.system_info = system_info
+            # #219: re-evaluate the disk-pressure self-pause state on every
+            # heartbeat so the gate flips within a single heartbeat tick of
+            # the disk recovering. Broadcast on transition so the UI repaints
+            # without waiting for the 1 Hz SWR poll.
+            if worker.evaluate_health():
+                logger.info(
+                    "Worker %s (%s) health_blocked_reason=%s (disk_used_pct=%s)",
+                    client_id, worker.hostname, worker.health_blocked_reason,
+                    system_info.get("disk_used_pct"),
+                )
+                _broadcast_workers_changed()
         return True
 
     def set_job(self, client_id: str, job_id: Optional[str]) -> bool:

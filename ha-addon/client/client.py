@@ -45,7 +45,7 @@ from sysinfo import collect_system_info
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.7.0-dev.60"
+CLIENT_VERSION = "1.7.0-dev.61"
 
 
 def _read_image_version() -> Optional[str]:
@@ -390,6 +390,26 @@ def _wipe_broken_toolchain(pio_dir: str) -> bool:
     if not os.path.isdir(packages):
         logger.warning("[#214] no packages/ under %s — nothing to wipe", pio_dir)
         return False
+    # #219: if the host is out of disk, wiping the broken toolchain
+    # only to have the next extract hit ENOSPC mid-tarball (re-corrupting
+    # what we just cleaned) is a guaranteed loop. Fail fast with one
+    # honest log line the operator can act on. A fresh xtensa toolchain
+    # extracts to ~600 MB; require at least 1 GiB free as headroom.
+    try:
+        usage = shutil.disk_usage(pio_dir)
+        free_gib = usage.free / (1024 ** 3)
+        if free_gib < 1.0:
+            logger.warning(
+                "[#214/#219] skipping self-heal of %s — only %.2f GiB free on the "
+                "worker's filesystem; a fresh toolchain extract needs >1 GiB. "
+                "Free disk on the worker host (Clean cache, prune Docker images, "
+                "or grow the volume) and retry.",
+                packages, free_gib,
+            )
+            return False
+    except OSError as exc:
+        # disk_usage failure is itself diagnostic — log and proceed.
+        logger.warning("[#214/#219] disk_usage probe failed on %s: %s", pio_dir, exc)
     try:
         logger.warning(
             "[#214] wiping broken PlatformIO toolchain at %s — next compile will "

@@ -7,6 +7,7 @@ import {
   createColumnHelper,
   type SortingState,
 } from '@tanstack/react-table';
+import { HardDrive } from 'lucide-react';
 import type { Job, SystemInfo, Target, Worker } from '../types';
 import { Button } from './ui/button';
 import {
@@ -437,6 +438,33 @@ export function WorkersTab({ workers, targets, queue, serverClientVersion, minIm
         );
       }
 
+      // #219: surface the server's self-imposed disk-pressure pause as
+      // an explanatory badge so the user understands why a worker is
+      // online but not claiming. The icon is decorative; aria-label +
+      // title carry the meaning (UI-7 invariant).
+      let healthBlockEl: React.ReactNode = null;
+      if (c.health_blocked_reason === 'disk_full') {
+        const usedPct = c.system_info?.disk_used_pct;
+        const free = c.system_info?.disk_free;
+        const tip = `Auto-paused: worker disk is full. ${
+          usedPct != null ? `Currently ${usedPct}% used` : 'Disk usage above 95%'
+        }${free ? `, ${free} free` : ''}. Won't claim new jobs until usage drops to 90% or below — use Clean cache to recover, or grow the host's disk.`;
+        healthBlockEl = (
+          <>
+            <br />
+            <span
+              className="inline-flex items-center gap-1 text-[10px] font-medium"
+              style={{ color: 'var(--danger)' }}
+              aria-label="Auto-paused: disk full"
+              title={tip}
+            >
+              <HardDrive className="size-3" aria-hidden="true" />
+              disk full
+            </span>
+          </>
+        );
+      }
+
       if (slot === 1) {
         rows.push(
           <tr key={`${c.client_id}-1`} style={rowStyle} className={rowClass}>
@@ -458,7 +486,7 @@ export function WorkersTab({ workers, targets, queue, serverClientVersion, minIm
               </button>
             </td>
             <td>{c.system_info ? workerPlatformHtml(c.system_info) : null}</td>
-            <td>{statusEl}{uptimeEl}</td>
+            <td>{statusEl}{uptimeEl}{healthBlockEl}</td>
             <td>{jobEl}</td>
             <td><ClientVersionCell ver={c.client_version} scv={serverClientVersion} imageVer={c.image_version} minImageVer={minImageVersion} hostname={c.hostname} onReinstall={() => onConnectWorker({
               hostname: c.hostname,

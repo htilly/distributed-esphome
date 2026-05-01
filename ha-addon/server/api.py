@@ -322,6 +322,12 @@ async def get_next_job(request: web.Request) -> web.Response:
     worker = registry.get(client_id)
     if worker and worker.disabled:
         return web.Response(status=204)
+    # #219: same gate for the self-imposed disk-pressure pause. The
+    # registry stamps ``health_blocked_reason`` from heartbeat; once
+    # the worker's disk drops back below the exit threshold this clears
+    # automatically and the worker resumes claiming on the next poll.
+    if worker and worker.health_blocked_reason:
+        return web.Response(status=204)
 
     worker_id_str = request.headers.get(HEADER_X_WORKER_ID, "1")
     try:
@@ -400,6 +406,11 @@ async def get_next_job(request: web.Request) -> web.Response:
             if other.client_id == client_id:
                 continue
             if other.disabled or not registry.is_online(other.client_id, cfg_threshold):
+                continue
+            # #219: a disk-blocked worker won't claim, so deferring to it
+            # would just strand the job. Skip it from the candidate pool
+            # the same way an offline/disabled worker is skipped.
+            if other.health_blocked_reason:
                 continue
             other_candidate_count += 1
             other_active = active_jobs_by_worker.get(other.client_id, 0)

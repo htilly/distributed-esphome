@@ -546,6 +546,43 @@ async def test_claim_job_disabled_worker_returns_204(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 7b. Claim job — disk-blocked worker (#219)
+# ---------------------------------------------------------------------------
+
+async def test_claim_job_disk_blocked_worker_returns_204(tmp_path):
+    """A worker stamped with health_blocked_reason="disk_full" must not be
+    assigned new jobs even though it's online and not operator-disabled."""
+    ta = await _make_app(tmp_path)
+    try:
+        client_id = await _register(ta)
+        await _enqueue_job(ta.queue, "device.yaml")
+        # Drive the registry through its real heartbeat path so the
+        # hysteresis logic runs (rather than poking the field directly):
+        ta.registry.heartbeat(client_id, system_info={"disk_used_pct": 97})
+        assert ta.registry.get(client_id).health_blocked_reason == "disk_full"
+
+        resp = await ta.get(
+            "/api/v1/jobs/next",
+            headers={**AUTH_HEADERS, "X-Client-Id": client_id},
+        )
+        assert resp.status == 204
+
+        # Job stays PENDING — the disk-blocked worker did not grab it.
+        assert all(j.state == JobState.PENDING for j in ta.queue.get_all())
+
+        # Once disk recovers, the same worker resumes claiming on the next poll.
+        ta.registry.heartbeat(client_id, system_info={"disk_used_pct": 50})
+        assert ta.registry.get(client_id).health_blocked_reason is None
+        resp2 = await ta.get(
+            "/api/v1/jobs/next",
+            headers={**AUTH_HEADERS, "X-Client-Id": client_id},
+        )
+        assert resp2.status == 200
+    finally:
+        await ta.close()
+
+
+# ---------------------------------------------------------------------------
 # 8. Submit result — success and failure
 # ---------------------------------------------------------------------------
 

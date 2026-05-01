@@ -205,3 +205,49 @@ def test_to_dict_includes_all_fields(reg):
     assert d["disabled"] is False
     assert d["current_job_id"] is None
     assert "last_seen" in d
+    assert d["health_blocked_reason"] is None
+
+
+# ---------------------------------------------------------------------------
+# #219: disk-pressure self-pause (hysteresis)
+# ---------------------------------------------------------------------------
+
+def test_heartbeat_with_disk_above_threshold_sets_health_block(reg):
+    client_id = reg.register("host1", "linux/amd64")
+    reg.heartbeat(client_id, system_info={"disk_used_pct": 96})
+    worker = reg.get(client_id)
+    assert worker.health_blocked_reason == "disk_full"
+
+
+def test_heartbeat_below_exit_threshold_clears_block(reg):
+    client_id = reg.register("host1", "linux/amd64")
+    reg.heartbeat(client_id, system_info={"disk_used_pct": 97})
+    assert reg.get(client_id).health_blocked_reason == "disk_full"
+    reg.heartbeat(client_id, system_info={"disk_used_pct": 89})
+    assert reg.get(client_id).health_blocked_reason is None
+
+
+def test_heartbeat_in_hysteresis_band_preserves_state(reg):
+    """Between EXIT (90) and ENTER (95), state must NOT flip in either direction."""
+    client_id_a = reg.register("host-a", "linux/amd64")
+    # Start blocked, then heartbeat at 92 — must stay blocked.
+    reg.heartbeat(client_id_a, system_info={"disk_used_pct": 96})
+    assert reg.get(client_id_a).health_blocked_reason == "disk_full"
+    reg.heartbeat(client_id_a, system_info={"disk_used_pct": 92})
+    assert reg.get(client_id_a).health_blocked_reason == "disk_full"
+
+    # Start clean, heartbeat at 92 — must stay clean.
+    client_id_b = reg.register("host-b", "linux/amd64")
+    reg.heartbeat(client_id_b, system_info={"disk_used_pct": 50})
+    reg.heartbeat(client_id_b, system_info={"disk_used_pct": 92})
+    assert reg.get(client_id_b).health_blocked_reason is None
+
+
+def test_heartbeat_without_disk_used_pct_does_not_clear_block(reg):
+    """If a heartbeat omits disk_used_pct (e.g. older worker, partial info),
+    the block stays in place — clearing requires a positive signal."""
+    client_id = reg.register("host1", "linux/amd64")
+    reg.heartbeat(client_id, system_info={"disk_used_pct": 96})
+    assert reg.get(client_id).health_blocked_reason == "disk_full"
+    reg.heartbeat(client_id, system_info={"cpu_usage": 5})  # no disk_used_pct
+    assert reg.get(client_id).health_blocked_reason == "disk_full"

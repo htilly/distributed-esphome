@@ -319,6 +319,14 @@ export interface Worker {
   current_job_id?: string;
   last_seen?: string;
   /**
+   * #219: server-side self-pause when the worker reports disk pressure.
+   * `null` / undefined = healthy; `"disk_full"` = the worker's heartbeat
+   * disk_used_pct crossed the enter threshold and the server is refusing
+   * to assign new jobs until it drops back below the exit threshold.
+   * Distinct from `disabled`, which is a sticky operator-set pause.
+   */
+  health_blocked_reason?: string | null;
+  /**
    * TG.1: user-managed worker tags. Initially seeded from ``WORKER_TAGS``
    * env on first registration; thereafter authoritative on the server side
    * (UI edits via TG.4/TG.6 are not clobbered by worker restarts unless
