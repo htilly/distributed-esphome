@@ -25,11 +25,21 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # Install esphome FIRST in its own pip pass. esphome pins
+          # several transitive deps with `==` (notably aioesphomeapi).
+          # If we list aioesphomeapi alongside esphome unconstrained,
+          # pip resolves aioesphomeapi to the latest release first, then
+          # has to backtrack through every esphome version trying to find
+          # one that accepts it — eventually reaching ancient esphome
+          # releases that pin PyYAML==6.0 (sdist-only, fails to build
+          # under Python 3.12 / modern Cython). With esphome installed
+          # first, its strict pins win; the second pass sees the deps
+          # already satisfied and doesn't upgrade them.
+          pip install esphome
           pip install \
             pytest pytest-asyncio pytest-cov pytest-xdist pytest-socket \
             aiohttp aioesphomeapi zeroconf \
-            requests psutil pydantic croniter apscheduler \
-            esphome
+            requests psutil pydantic croniter apscheduler
           # The HA integration tests (tests/test_integration_*.py) need
           # the `homeassistant` package installed to import
           # HomeAssistantError, DeviceInfo, etc. Its dep pins conflict
