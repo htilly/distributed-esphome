@@ -59,8 +59,12 @@ FLEET_SOURCE_DIR="${FLEET_SOURCE_DIR:-/usr/share/hassio/homeassistant/esphome}"
 # specs need when HASS4_TARGET=cyd-world-clock.yaml. Extend as specs grow.
 # `fonts` + `images` are directories — tar recurses. cyd-world-clock.yaml
 # references fonts/*.ttf and images/flag_*.png; without them the server-
-# side validator rejects the bundle (#192).
-FLEET_TARGETS="${FLEET_TARGETS:-cyd-world-clock.yaml garage-door-big.yaml .common.yaml secrets.yaml fonts images}"
+# side validator rejects the bundle (#192). `includes/` carries
+# `common.yaml` (and friends) which `garage-door-big.yaml` pulls in via
+# `packages: common: !include includes/common.yaml`; without it the
+# `parallel compile: garage-door-big pinned to local-worker` smoke
+# fast-fails on file-not-found (#225).
+FLEET_TARGETS="${FLEET_TARGETS:-cyd-world-clock.yaml garage-door-big.yaml .common.yaml secrets.yaml fonts images includes}"
 GUEST_ESPHOME_DIR="${GUEST_ESPHOME_DIR:-/mnt/data/supervisor/homeassistant/esphome}"
 
 if [[ "$FLEET_SOURCE" != "repo" && "$FLEET_SOURCE" != "hass-4" ]]; then

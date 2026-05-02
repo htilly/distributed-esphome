@@ -38,8 +38,12 @@ FLEET_SOURCE_DIR="${FLEET_SOURCE_DIR:-/usr/share/hassio/homeassistant/esphome}"
 # references fonts/Arimo-Regular.ttf, fonts/JetBrainsMono-Bold.ttf, and
 # images/flag_{us,in,eu}.png; without them the server-side validator
 # rejects the bundle and the compile is marked failed before the worker
-# ever sees it (#192).
-FLEET_TARGETS="${FLEET_TARGETS:-cyd-world-clock.yaml garage-door-big.yaml .common.yaml secrets.yaml fonts images}"
+# ever sees it (#192). `includes/` carries `common.yaml` (and friends)
+# which `garage-door-big.yaml` pulls in via
+# `packages: common: !include includes/common.yaml`; without it the
+# `parallel compile: garage-door-big pinned to local-worker` smoke
+# fast-fails on file-not-found (#225).
+FLEET_TARGETS="${FLEET_TARGETS:-cyd-world-clock.yaml garage-door-big.yaml .common.yaml secrets.yaml fonts images includes}"
 
 # SSH multiplexing on both ends — see deploy.sh / haos/install-addon.sh
 # for why. Two control sockets, one per remote.
