@@ -68,7 +68,7 @@ You don't need one to start — the add-on ships with a built-in local worker th
 
 The worker container is `ghcr.io/weirded/esphome-dist-client:latest`. All it needs on the host is Docker and network reach to (a) the add-on's HTTP API and (b) the ESP devices it'll flash. No inbound ports.
 
-The worker's Python source updates itself from the server whenever the add-on upgrades (so bug fixes to client code reach remote machines automatically). Its **Docker image** doesn't — when the image needs refreshing (system packages, Python version, pinned dependencies), the Workers tab flags it with an **Image stale** badge and you refresh it on the worker host with `docker pull ghcr.io/weirded/esphome-dist-client:latest && docker restart <name>`. See `ha-addon/DOCS.md → Keeping workers up to date` for the full rundown.
+The worker's Python source updates itself from the server whenever the add-on upgrades (so bug fixes to client code reach remote machines automatically). Its **Docker image** doesn't — when the image needs refreshing (system packages, Python version, pinned dependencies), the Workers tab flags it with an **Image stale** badge and you refresh it on the worker host with `docker pull ghcr.io/weirded/esphome-dist-client:latest && docker restart <name>`. [DOCS.md](ha-addon/DOCS.md) has the longer explanation.
 
 ### As a standalone Docker container
 
@@ -86,7 +86,7 @@ docker run -d \
 
 The UI is at `http://your-host:8765`. `--network host` is required so the server can discover ESP devices over mDNS.
 
-To test pre-release builds, use `:develop` instead of `:latest` — that tag advances on every push to `develop` and isn't meant for production.
+For pre-release builds, use `:develop` instead of `:latest` — that tag updates whenever a new development build is published, so it isn't meant for production.
 
 #### What works and what doesn't without Home Assistant
 
@@ -101,10 +101,8 @@ The server auto-detects its deployment shape via the `SUPERVISOR_TOKEN` env var 
 - Supervisor-driven ESPHome version auto-detection. In standalone the server falls back to "latest stable from PyPI" on first boot; change via the version dropdown in the Web UI header.
 
 **Configuration differences**:
-- Settings live in `/data/settings.json` instead of Supervisor options. Edit via the in-app Settings drawer (gear icon, top-right).
+- Settings live in the server's data volume instead of Supervisor options. Edit via the in-app Settings drawer (gear icon, top-right).
 - `require_ha_auth` defaults to **off** for standalone Docker. If `:8765` is reachable from an untrusted network, turn it on in Settings → Authentication and hand out the bearer token; browsers without a token land on a styled 401 page explaining both recovery paths.
-
-See `dev-plans/HA-COUPLING-AUDIT.md` in the repo for the per-site audit of HA-coupled code paths.
 
 ## A tour of the UI
 

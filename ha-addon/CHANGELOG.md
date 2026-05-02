@@ -22,10 +22,10 @@ A major release built around **fleet tags + rule-based job routing**, with a sta
 
 **Tighter compile pipeline on home labs and slow workers.**
 
-- **Workers self-heal corrupted PlatformIO toolchains mid-compile.** When a build fails with `cc1: posix_spawnp: No such file or directory`, missing `framework-arduinoespressif32-libs`, half-installed `esptool`, or "not a Python project" from a half-extracted package, the worker now wipes the broken `pio-slot-N/packages/` and `pio-slot-N/penv/` directories and retries the same job in-process. The first job to hit the breakage takes a 5–10 min toolchain re-download tax; every subsequent job lands on a fresh tree. Pre-fix, an operator had to ssh to the worker host and `rm -rf` by hand.
+- **Workers self-heal corrupted PlatformIO toolchains mid-compile.** When a build fails because the cached PlatformIO toolchain got into a bad state — half-installed binaries, missing framework libs, partial extracts — the worker now wipes the affected cache directories and retries the same job in-process. The first hit pays a 5–10 min toolchain re-download tax; subsequent jobs land on a fresh tree. Pre-fix, an operator had to ssh to the worker host and clean up by hand.
 - The **Clean Cache** button on the Workers tab no longer wipes ESPHome venvs or PlatformIO toolchains — it now clears only the volatile build outputs, so the next compile doesn't pay the toolchain re-download tax. Venv / toolchain lifecycle is bounded by the new disk quota, not by Clean Cache clicks.
 - Bundle creation is serialised across concurrent job claims so two parallel compiles can't corrupt the same `<config>/.esphome/<repo>/<sha>/` git checkout. Eliminates the cold-cache race where a 7-job batch sharing the same `external_components` repo could fail with five different "phantom" errors.
-- ESPHome's INFO / WARNING chatter no longer decorates bundle-failure logs in the Queue Log modal — only the actual error reaches the captured stream. The known-false-positive `Including a single package under \`packages:\` is deprecated` warning from ESPHome 2026.4.3 also stops appearing.
+- ESPHome's INFO / WARNING chatter no longer decorates bundle-failure logs in the Queue Log modal — only the actual error reaches the captured stream. A noisy false-positive deprecation warning from a recent ESPHome release also stops appearing.
 - **Firmware retention.** New `firmware_retention_days` Settings field (default 2, range 0..3650, 0 = unlimited) — successful compile binaries older than the configured window are evicted. Pairs with adding `firmware/` to the add-on's `backup_exclude` so a HA snapshot no longer carries 200+ MB of regenerable binaries; a typical install drops from ~237 MB → ~2 MB per partial-addon backup.
 
 **Smaller fleet-management wins.**
@@ -65,16 +65,7 @@ A major release built around **fleet tags + rule-based job routing**, with a sta
 - Connect Worker dialog snippet picks up two new optional flags: `WORKER_TAGS=foo,bar` (when the new Tags field is non-empty) and `WORKER_DISK_QUOTA_GB=N` (when the disk-quota radio is set to Custom). Default mode emits neither so the snippet stays clean for users who don't care about either feature yet.
 - New device-meta keys flow through automatic commits with specific subjects (`Updated device tags`, `Pinned ESPHome version`, `Updated routing rules`, …) so `git log` reads as a coherent activity feed rather than a stream of generic "Updated device metadata" entries.
 
-**Under the hood.**
-
-- A new server-wide `asyncio.Lock` serialises bundle creation across concurrent job claims, eliminating a cold-cache race in `esphome.git.clone_or_update` (filed upstream).
-- Bundle subprocesses no longer leak ESPHome's logger chatter into captured stderr — only our explicit error messages (and uncaught Python tracebacks) reach the Queue Log modal.
-- New PY-11 invariant: every UI-driven file mutation under `/config/esphome/` must leave the git working tree clean. Backed by a 12-scenario regression test that drives every file-mutating endpoint and asserts `git status --porcelain` is empty afterward.
-- 27 honest tests for the routing-rule evaluator (each operator, each clause shape, conditional pass/fail, multi-rule AND, store CRUD + persistence, additive composition with per-device `routing_extra`).
-- 23 tests for the disk-quota engine (per-category accounting, eviction order across all four categories, pinning, idempotency, sweep on lowered quota, host-disk-floor emergency override, refcounted active-job pinning, thread safety).
-- A live-HA Playwright spec walks the full routing-rule round-trip on the smoke target: tag a device, create a rule whose worker side requires an unreachable tag, queue a compile, assert it lands BLOCKED, delete the rule, watch the job leave BLOCKED and run to success.
-- The published add-on image now declares `privileged: [NET_RAW]` so the ICMP ping diagnostic works on HAOS without a host-side `net.ipv4.ping_group_range` override.
-- ESPHome compile-test CI now matrixes on two ESPHome versions (the `MIN_ESPHOME_VERSION` floor + latest stable), per platform/framework, so an upstream API regression at either edge surfaces as a single red square.
+**Under the hood.** Hardened the file-mutation paths so every UI edit leaves your config's git history clean. Continuous integration now builds against multiple ESPHome versions to catch upstream breakage earlier.
 
 ## 1.6.2
 
