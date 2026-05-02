@@ -1,5 +1,5 @@
 aiohttp>=3.9
-pydantic>=2
+pydantic>=2.13.3
 croniter>=6.2.2
 apscheduler>=3.10,<4
 aioesphomeapi>=44.22.0
