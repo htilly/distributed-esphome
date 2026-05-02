@@ -454,12 +454,17 @@ export function UpgradeModal({
             <>
               {/* UX.8 + #79: single Action radio (4 options). Schedule is
                   split into recurring vs one-time so there's no nested
-                  sub-toggle inside the schedule form. `whitespace-nowrap`
-                  on the label rows stops "Schedule Recurring" from
-                  wrapping onto two lines (#78). */}
+                  sub-toggle inside the schedule form. #218: each row
+                  uses `flex-wrap` so the descriptive `<span>` wraps to a
+                  second line if it overflows the modal — pre-fix we
+                  used `whitespace-nowrap` and the action descriptions
+                  pushed past 600 px, triggering a horizontal scrollbar.
+                  The radio + label itself is short enough to never wrap,
+                  preserving #78's original "Schedule Recurring stays on
+                  one line" intent. */}
               <div className="flex flex-col gap-1.5">
                 <Label>Action</Label>
-                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer flex-wrap">
                   <input
                     type="radio"
                     name="upgrade-action"
@@ -469,7 +474,7 @@ export function UpgradeModal({
                   Upgrade Now
                   <span className="text-[11px] text-[var(--text-muted)]">— compile + OTA flash</span>
                 </label>
-                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer flex-wrap">
                   <input
                     type="radio"
                     name="upgrade-action"
@@ -479,7 +484,7 @@ export function UpgradeModal({
                   Download Now
                   <span className="text-[11px] text-[var(--text-muted)]">— compile only, no OTA; grab the .bin from the Queue tab</span>
                 </label>
-                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer flex-wrap">
                   <input
                     type="radio"
                     name="upgrade-action"
@@ -489,7 +494,7 @@ export function UpgradeModal({
                   Schedule Recurring
                   <span className="text-[11px] text-[var(--text-muted)]">— run the OTA upgrade on a cron</span>
                 </label>
-                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer flex-wrap">
                   <input
                     type="radio"
                     name="upgrade-action"
@@ -510,7 +515,7 @@ export function UpgradeModal({
                   of truth. */}
               <div className="flex flex-col gap-1.5 pt-2 border-t border-[var(--border)]">
                 <Label>Worker</Label>
-                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer flex-wrap">
                   <input
                     type="radio"
                     name="upgrade-worker-mode"
@@ -520,7 +525,7 @@ export function UpgradeModal({
                   Any available worker
                   <span className="text-[11px] text-[var(--text-muted)]">— scheduler picks at compile time</span>
                 </label>
-                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer flex-wrap">
                   <input
                     type="radio"
                     name="upgrade-worker-mode"
@@ -542,7 +547,7 @@ export function UpgradeModal({
                     ))}
                   </Select>
                 )}
-                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer flex-wrap">
                   <input
                     type="radio"
                     name="upgrade-worker-mode"
@@ -581,7 +586,7 @@ export function UpgradeModal({
                   show-betas only unfold under "Other". */}
               <div className="flex flex-col gap-1.5 pt-2 border-t border-[var(--border)]">
                 <Label>ESPHome version</Label>
-                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer flex-wrap">
                   <input
                     type="radio"
                     name="upgrade-version-mode"
@@ -594,7 +599,7 @@ export function UpgradeModal({
                   Current{defaultEsphomeVersion ? ` (${defaultEsphomeVersion})` : ''}
                   <span className="text-[11px] text-[var(--text-muted)]">— use the server-default version at compile time</span>
                 </label>
-                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer flex-wrap">
                   <input
                     type="radio"
                     name="upgrade-version-mode"

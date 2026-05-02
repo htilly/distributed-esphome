@@ -291,11 +291,15 @@ export function WorkersTab({ workers, targets, queue, serverClientVersion, minIm
 
   // Filter before handing to TanStack — keeps filter state local, same as DevicesTab pattern
   const filteredWorkers = useMemo(() => {
-    // TG.6 pill filter first (OR-logic — match if at least one selected tag is on the worker).
-    const tagFilterSet = new Set(tagFilter);
-    const tagged = tagFilterSet.size === 0
+    // TG.6 pill filter first. #222: AND-logic (was OR pre-#222) — a
+    // worker matches only when it carries *every* selected tag, so
+    // picking `linux` then `fast` narrows to linux-AND-fast workers.
+    const tagged = tagFilter.length === 0
       ? workers
-      : workers.filter(w => (w.tags ?? []).some(t => tagFilterSet.has(t)));
+      : workers.filter(w => {
+          const ts = new Set(w.tags ?? []);
+          return tagFilter.every(t => ts.has(t));
+        });
     if (!filter) return tagged;
     const q = filter.toLowerCase();
     return tagged.filter(w =>

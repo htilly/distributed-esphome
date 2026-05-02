@@ -6,13 +6,15 @@ import { TagChip } from './ui/tag-chips';
  *
  * One clickable pill per tag in the current fleet, with a `(N)` count
  * badge so a quick glance shows which tags are dense vs sparse.
- * Clicking a pill toggles that tag in the selected set; rows with at
- * least one selected tag are kept (OR-logic, "show me kitchen OR
- * bedroom"). Selected pills render with full saturation; unselected
- * pills are dimmed so the visible filter shape reads as "what I asked
- * for" rather than "everything but the rejects." A trailing "Clear"
- * button shows when at least one pill is selected so the user can
- * unstick the filter without re-clicking every pill.
+ * Clicking a pill toggles that tag in the selected set; rows that
+ * carry *every* selected tag are kept (AND-logic — #222 flipped this
+ * from the original OR semantics because users want progressive
+ * narrowing, e.g. `kitchen` AND `prod` to mean "kitchen-and-prod"
+ * rather than "either"). Selected pills render with full saturation;
+ * unselected pills are dimmed so the visible filter shape reads as
+ * "what I asked for" rather than "everything but the rejects." A
+ * trailing "Clear" button shows when at least one pill is selected so
+ * the user can unstick the filter without re-clicking every pill.
  *
  * Empty-pool case (no tags in the fleet yet) renders nothing — a
  * fresh install shouldn't show an empty bar.

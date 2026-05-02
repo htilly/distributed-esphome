@@ -417,17 +417,20 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
   const filteredTargets = useMemo(() => {
     const visible = showArchived ? targets : targets.filter(t => !t.archived);
     const sorted = [...visible].sort((a, b) => a.target.localeCompare(b.target));
-    // TG.5 filter pills: OR-logic across selected tags. A row matches
-    // when it has *any* of the selected tags. Empty selection = no
-    // filter (show everything). Applied before the search-box text
-    // filter so a search with active pill filters narrows the
+    // TG.5 filter pills: AND-logic across selected tags (#222). A row
+    // matches only when it has *every* selected tag. Pre-#222 this was
+    // OR ("any of"), but in practice users want progressive narrowing —
+    // pick `kitchen`, then `prod` to see kitchen-AND-prod, not the
+    // union. Empty selection = no filter. Applied before the search-box
+    // text filter so a search with active pill filters narrows the
     // already-pill-filtered set.
-    const tagFilterSet = new Set(tagFilter);
-    const tagged = tagFilterSet.size === 0
+    const tagged = tagFilter.length === 0
       ? sorted
       : sorted.filter(t => {
-          const ts = (t.tags || '').split(',').map(s => s.trim()).filter(Boolean);
-          return ts.some(x => tagFilterSet.has(x));
+          const ts = new Set(
+            (t.tags || '').split(',').map(s => s.trim()).filter(Boolean),
+          );
+          return tagFilter.every(x => ts.has(x));
         });
     if (!filter) return tagged;
     return tagged.filter(t =>

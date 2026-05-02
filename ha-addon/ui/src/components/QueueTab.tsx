@@ -538,8 +538,9 @@ export function QueueTab({
         const variants = (job.firmware_variants && job.firmware_variants.length > 0)
           ? job.firmware_variants
           : (canDownload ? ['firmware'] : []);
-        // #209: only Rerun + Clear stay inline. Cancel/Log/Download/Edit
-        // and the device-section actions move into the hamburger.
+        // #209 / #221: Rerun + Clear + Log stay inline; everything
+        // else (Cancel, Download, Edit YAML, device-section actions)
+        // lives in the hamburger.
         const target = targets.find(t => t.target === job.target) || null;
         return (
           <div className="flex gap-1 items-center">
@@ -559,17 +560,22 @@ export function QueueTab({
             {isJobFinished(job) && (
               <Button variant="secondary" size="sm" onClick={() => onClear([job.id])}>Clear</Button>
             )}
+            {/* Bug #221: Log button restored as a third inline action.
+                The Queue tab is where users land to investigate failures
+                and successes — burying the log behind a hamburger added
+                friction with no real benefit. */}
+            {hasLog && (
+              <Button variant="secondary" size="sm" onClick={() => onOpenLog(job.id)}>Log</Button>
+            )}
             <QueueRowMenu
               job={job}
               target={target}
               inProgress={inProgress}
-              hasLog={hasLog}
               canDownload={canDownload}
               variants={variants}
               open={actionMenuOpenJobId === job.id}
               onOpenChange={(o) => setActionMenuOpenJobId(o ? job.id : null)}
               onCancel={(id) => onCancel([id])}
-              onOpenLog={onOpenLog}
               onEdit={onEdit}
               onToast={onToast}
               onLogs={onLogs}

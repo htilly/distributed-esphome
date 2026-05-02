@@ -12,14 +12,13 @@ test('Diff since compile opens HistoryPanel with preset from-hash', async ({ pag
   await page.goto('/');
 
   // Navigate to the Queue tab and open the log for job-001, which has
-  // a config_hash set in fixtures. #209: the per-row Log button moved
-  // into the row hamburger ("View log").
+  // a config_hash set in fixtures. #221: per-row Log button is back as
+  // a third inline action (next to Rerun + Clear).
   await page.getByRole('button', { name: /Queue/ }).click();
   const successRow = page.getByRole('row').filter({ hasText: 'bedroom-light' });
   await expect(successRow).toBeVisible({ timeout: 5000 });
 
-  await successRow.getByRole('button', { name: 'More actions' }).click();
-  await page.getByRole('menuitem', { name: 'View log' }).click();
+  await successRow.getByRole('button', { name: 'Log', exact: true }).click();
 
   // Log modal opened — the Diff-since-compile button should be visible
   // because job-001 has a config_hash.
@@ -39,11 +38,10 @@ test('Diff since compile button is hidden when the job has no config_hash', asyn
   await page.goto('/');
   await page.getByRole('button', { name: /Queue/ }).click();
   // job-002 (garage-door.yaml, failed) does NOT have config_hash in the
-  // fixtures — so the shortcut should be absent. #209: log moved into
-  // the row hamburger ("View log").
+  // fixtures — so the shortcut should be absent. #221: per-row Log
+  // button is inline.
   const failedRow = page.getByRole('row').filter({ hasText: 'garage-door' });
-  await failedRow.getByRole('button', { name: 'More actions' }).first().click();
-  await page.getByRole('menuitem', { name: 'View log' }).click();
+  await failedRow.getByRole('button', { name: 'Log', exact: true }).first().click();
   const logDialog = page.getByRole('dialog', { name: /garage-door/i });
   await expect(logDialog).toBeVisible();
   await expect(logDialog.getByRole('button', { name: /diff since compile/i })).toHaveCount(0);

@@ -29,6 +29,11 @@ export interface DeviceMenuSectionProps {
   onPing: (target: string) => void;
   /** DM.3: open the install-to-specific-address modal. */
   onInstallToAddress: (target: string) => void;
+  /** Bug #216 / #221: optional "Edit YAML" entry rendered at the bottom
+   *  of the Device group. Used by the Queue-tab row hamburger; the
+   *  Devices-tab hamburger leaves this unset because that tab has an
+   *  inline Edit button on every row. */
+  onEdit?: (target: string) => void;
   /** Optional label override; defaults to "Device". */
   label?: string;
 }
@@ -40,6 +45,7 @@ export function DeviceMenuSection({
   onOpenCompileHistory,
   onPing,
   onInstallToAddress,
+  onEdit,
   label = 'Device',
 }: DeviceMenuSectionProps) {
   async function handleCopyApiKey() {
@@ -88,6 +94,11 @@ export function DeviceMenuSection({
       <DropdownMenuItem onClick={() => onInstallToAddress(t.target)}>
         Install to address…
       </DropdownMenuItem>
+      {onEdit && (
+        <DropdownMenuItem onClick={() => onEdit(t.target)}>
+          Edit YAML
+        </DropdownMenuItem>
+      )}
     </DropdownMenuGroup>
   );
 }
