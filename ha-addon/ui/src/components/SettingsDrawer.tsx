@@ -279,6 +279,15 @@ export function SettingsDrawer({ open, onOpenChange, dirtyTargets = [], onReques
                   value={data.job_log_retention_days}
                   onCommit={v => patch({ job_log_retention_days: v })}
                 />
+                <IntRow
+                  label="Worker disk quota — fleet default (GiB)"
+                  help="Per-worker cap on the /esphome-versions/ tree (ESPHome venvs + PlatformIO toolchains + per-target build caches). LRU-evicted between jobs. Per-worker overrides live on each worker's row."
+                  min={1}
+                  max={1024}
+                  defaultValue={10}
+                  value={Math.round(data.default_worker_disk_quota_bytes / 1024 ** 3)}
+                  onCommit={v => patch({ default_worker_disk_quota_bytes: v * 1024 ** 3 })}
+                />
               </Section>
               <Section title="Timeouts">
                 <IntRow

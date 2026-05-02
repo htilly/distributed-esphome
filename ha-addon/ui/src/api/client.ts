@@ -275,6 +275,10 @@ export interface AppSettings {
   // 0 = unlimited; default 2.
   firmware_retention_days: number;
   job_log_retention_days: number;
+  // DQ.1 — fleet-wide default cap on the worker's /esphome-versions/ tree
+  // (bytes). Per-worker overrides live on the Worker row's "Set disk
+  // quota…" dialog and are POSTed to /ui/api/workers/{id}/disk-quota.
+  default_worker_disk_quota_bytes: number;
   // SP.8 — moved from Supervisor options.json in 1.6.
   server_token: string;
   job_timeout: number;

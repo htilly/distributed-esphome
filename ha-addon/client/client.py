@@ -46,7 +46,7 @@ from sysinfo import collect_system_info
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.7.0-dev.69"
+CLIENT_VERSION = "1.7.0-dev.70"
 
 
 def _read_image_version() -> Optional[str]:
@@ -1006,7 +1006,17 @@ def heartbeat_loop(client_id: str, stop_event: threading.Event) -> None:
                     prev_quota = _get_current_disk_quota_bytes()
                     if prev_quota != new_quota:
                         _set_current_disk_quota_bytes(new_quota)
-                        if prev_quota is not None and new_quota < prev_quota:
+                        if prev_quota is None:
+                            # #ef-a5l: first heartbeat to bring a quota.
+                            # Worker may have booted over budget — startup
+                            # sweep no-op'd because quota was None then.
+                            # Sweep now rather than waiting for the next
+                            # successful compile.
+                            try:
+                                _run_disk_quota_sweep(label="initial-quota")
+                            except Exception:
+                                logger.exception("disk-quota: sweep on initial quota failed")
+                        elif new_quota < prev_quota:
                             try:
                                 _run_disk_quota_sweep(label="quota-lowered")
                             except Exception:
