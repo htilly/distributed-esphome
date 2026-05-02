@@ -18,7 +18,8 @@ The built-in ESPHome Device Builder does the job — here are the things you get
 - **Firmware archive, automatically.** Every successful compile keeps its binary on the server — not just the ones you marked "download only". Flash it by hand later, bisect a regression, rescue a device with a broken OTA path. The Download button is on every row, including the history drawer.
 - **Pin an ESPHome version to one device.** Beta-test a new ESPHome release on your garage sensor without upgrading the rest of the house. Hold a picky device back on a known-good version indefinitely. The stock dashboard compiles with whatever ESPHome it was installed with.
 - **Scheduled upgrades.** Upgrade the office lights every Sunday at 3am. One-time *"upgrade this device tomorrow at 8pm when nobody's home"*. The schedule lives in the device YAML so it travels with your config and respects the pin.
-- **Bulk operations for larger fleets.** Upgrade every outdated device tonight. Rebuild the whole fleet against a new ESPHome release. Pin half your devices to a known-good version while the rest move forward.
+- **Tags + routing rules.** Tag devices and workers however makes sense for your fleet (`kitchen`, `production`, `ratgdo`, `os:windows`, …) and write rules like *"compile any `ratgdo`-tagged device on a `windows`-tagged worker"* — the queue surfaces a clear **BLOCKED** state with the rule name when no eligible worker is online. Tags also drive bulk filtering and a tag-expression mode in the Upgrade modal that lets you pick build workers without naming each one.
+- **Bulk operations for larger fleets.** Upgrade every outdated device tonight. Rebuild the whole fleet against a new ESPHome release. Pin half your devices to a known-good version while the rest move forward. Bulk archive, bulk tag, bulk rerun-all-failed.
 
 ## How it works
 
@@ -107,9 +108,9 @@ See `dev-plans/HA-COUPLING-AUDIT.md` in the repo for the per-site audit of HA-co
 
 ## A tour of the UI
 
-- **Devices** — every ESPHome config you have. One-click Upgrade on any row; Upgrade dropdown for bulk actions (upgrade all outdated, upgrade selected, upgrade everything). Edit YAML inline with autocomplete and validation. Pin a device to a specific ESPHome version. Open a live device log. Deep-link to the HA device page.
-- **Queue** — what's compiling, what just finished, what failed, what's queued. Live build logs. Retry, cancel, clear, download the compiled `.bin`.
-- **Workers** — the workers you have connected, their platform, online status, number of build slots, what they're currently building. One-click **+ Connect Worker** generates the `docker run` / `docker compose` snippet for adding a new one.
+- **Devices** — every ESPHome config you have. One-click Upgrade on any row; Upgrade dropdown for bulk actions (upgrade all outdated, upgrade changed, upgrade selected, upgrade everything). Edit YAML inline with autocomplete and validation. Pin a device to a specific ESPHome version. Tag devices for routing + filtering. Open a live device log. Ping a device or install to a specific address from the row menu. View the fully-rendered config (with `!secret` substituted, `packages:` flattened) before pushing. Deep-link to the HA device page. Toggle archived rows in-line via the column picker.
+- **Queue** — what's compiling, what just finished, what failed, what's queued. Live build logs. Inline **Rerun · Clear · Log** on every row; Cancel, Download firmware, Edit YAML, and the full Devices-tab Device-section actions live behind the per-row hamburger.
+- **Workers** — the workers you have connected, their platform, online status, build slots, current job, **disk usage vs. quota**, and tags. One-click **+ Connect Worker** generates the `docker run` / `docker compose` snippet for adding a new one. **Routing rules…** opens a builder for fleet-wide job-routing rules backed by device + worker tags.
 - **Schedules** — every scheduled upgrade across your fleet in a single view. See what's due next, when it last ran, whether the run succeeded.
 
 Dark/light theme toggle + a "streamer mode" that blurs tokens and secrets for screen-sharing are in the header.
