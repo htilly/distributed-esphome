@@ -169,6 +169,15 @@ class AppSettings:
     # load and on every drawer commit.
     date_format: str = "auto"
 
+    # DQ.1: fleet-wide default per-worker disk quota for the
+    # ``/esphome-versions/`` tree (venvs + per-target caches + per-slot
+    # working dirs + pio-slot toolchains). Pushed to every worker on every
+    # heartbeat as ``HeartbeatResponse.set_disk_quota_bytes``; per-worker
+    # overrides in ``WorkerDiskQuotaStore`` win over this default. 10 GiB
+    # is enough for 1 venv + a handful of per-target caches + 1 toolchain
+    # without wasting Pi-class storage.
+    default_worker_disk_quota_bytes: int = 10 * 1024 ** 3
+
 
 # ---------------------------------------------------------------------------
 # Validators
@@ -300,6 +309,10 @@ _VALIDATORS: dict[str, Callable[[Any, str], Any]] = {
     # Bug #5: date enum — 'auto' / 'iso' (2026-04-27) / 'us' (4/27/2026)
     # / 'eu' (27/04/2026) / 'long' (Apr 27, 2026).
     "date_format": _validate_enum("auto", "iso", "us", "eu", "long"),
+    # DQ.1: ≥1 GiB floor stops a typo from starving every worker into
+    # constant eviction; 1 TiB ceiling matches firmware_cache_max_gb's
+    # upper bound (anything bigger is misconfiguration).
+    "default_worker_disk_quota_bytes": _validate_int_range(1 * 1024 ** 3, 1024 * 1024 ** 3),
 }
 
 

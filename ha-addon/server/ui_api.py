@@ -520,8 +520,9 @@ async def get_server_info(request: web.Request) -> web.Response:
     else:
         esphome_install_status = "installing"
     from settings import get_settings as _gs  # noqa: PLC0415
+    settings = _gs()
     return web.json_response({
-        "token": _gs().server_token,
+        "token": settings.server_token,
         "port": cfg.port,
         "server_ip": server_ip,
         "server_addresses": addrs,
@@ -531,6 +532,9 @@ async def get_server_info(request: web.Request) -> web.Response:
         # SE.8: ESPHome install lifecycle fields for the UI banner.
         "esphome_install_status": esphome_install_status,
         "esphome_server_version": _scanner.get_esphome_version(),
+        # DQ.5: ConnectWorkerModal needs the fleet default to label its
+        # "Use fleet default (X GiB)" radio without a separate fetch.
+        "default_worker_disk_quota_bytes": settings.default_worker_disk_quota_bytes,
     })
 
 
@@ -1484,7 +1488,14 @@ async def _get_workers_response(request: web.Request) -> web.Response:
     registry = request.app["registry"]
     queue = request.app["queue"]
     from settings import get_settings as _gs  # noqa: PLC0415
-    threshold = _gs().worker_offline_threshold
+    s = _gs()
+    threshold = s.worker_offline_threshold
+    # DQ.5: surface the effective per-worker quota alongside the persisted
+    # override so the UI can render "Custom: 5 GiB" vs "Default: 10 GiB"
+    # without a second fetch. The fleet default is also returned at the
+    # row level (cheap, lets the ConnectWorkerModal default-radio render
+    # without a separate /ui/api/settings call).
+    default_quota = s.default_worker_disk_quota_bytes
 
     result = []
     for worker in registry.get_all():
@@ -1494,6 +1505,8 @@ async def _get_workers_response(request: web.Request) -> web.Response:
             job = queue.get(d["current_job_id"])
             if job:
                 d["current_job_target"] = job.target
+        d["disk_quota_bytes"] = worker.effective_disk_quota_bytes(default_quota)
+        d["default_worker_disk_quota_bytes"] = default_quota
         result.append(d)
     return web.json_response(result)
 
@@ -3371,6 +3384,50 @@ async def set_worker_parallel_jobs(request: web.Request) -> web.Response:
             pass
     _broadcast_ws("workers_changed")
     return web.json_response({"ok": True, "max_parallel_jobs": value})
+
+
+@routes.post("/ui/api/workers/{client_id}/disk-quota")
+async def set_worker_disk_quota(request: web.Request) -> web.Response:
+    """DQ.5 — set or clear a worker's disk-quota override.
+
+    Body ``{"disk_quota_bytes": <int> | null}``. Null clears the override
+    so the worker inherits ``AppSettings.default_worker_disk_quota_bytes``.
+    The next heartbeat (≤10s) carries the new effective value to the worker
+    via ``HeartbeatResponse.set_disk_quota_bytes`` — no restart required.
+    """
+    client_id = request.match_info["client_id"]
+    registry = request.app["registry"]
+    worker = registry.get(client_id)
+    if not worker:
+        return web.json_response({"error": "Worker not found"}, status=404)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+    value = body.get("disk_quota_bytes")
+    if value is not None:
+        if not isinstance(value, int) or isinstance(value, bool):
+            return web.json_response(
+                {"error": "disk_quota_bytes must be an integer or null"},
+                status=400,
+            )
+        # Same floor/ceiling as the fleet default validator (settings.py).
+        if value < 1 * 1024 ** 3 or value > 1024 * 1024 ** 3:
+            return web.json_response(
+                {"error": "disk_quota_bytes must be between 1 GiB and 1 TiB"},
+                status=400,
+            )
+    quota_store = request.app.get("worker_disk_quota_store")
+    if quota_store is not None:
+        identity = worker.hostname or worker.client_id
+        quota_store.set_quota(identity, value)
+    registry.set_disk_quota(client_id, value)
+    logger.info(
+        "Worker %s (%s): disk_quota_bytes set to %r",
+        client_id, worker.hostname, value,
+    )
+    _broadcast_ws("workers_changed")
+    return web.json_response({"ok": True, "disk_quota_bytes": value})
 
 
 @routes.post("/ui/api/workers/{client_id}/clean")

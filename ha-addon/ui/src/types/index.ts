@@ -10,6 +10,12 @@ export interface ServerInfo {
   esphome_install_status?: 'installing' | 'ready' | 'failed';
   /** Version the server is trying to install / has installed. */
   esphome_server_version?: string;
+  /**
+   * DQ.5: fleet-wide default per-worker disk quota in bytes. Surfaced
+   * here so the ConnectWorkerModal's "Use fleet default (X GiB)" radio
+   * label renders without a separate /ui/api/settings call.
+   */
+  default_worker_disk_quota_bytes?: number;
 }
 
 /**
@@ -293,6 +299,17 @@ export interface SystemInfo {
   cached_targets?: number;
   /** Total size of the build cache in MB. */
   cache_size_mb?: number;
+  /**
+   * DQ.6: worker's view of the disk-quota engine's most recent state.
+   * ``disk_usage_bytes`` is the engine's measured byte total under
+   * ``/esphome-versions/`` (venvs + caches + slots + pio-slots).
+   * ``disk_quota_bytes`` echoes the effective quota the worker is
+   * enforcing against. ``last_eviction_freed_bytes`` is the bytes
+   * freed by the most recent post-job sweep.
+   */
+  disk_usage_bytes?: number;
+  disk_quota_bytes?: number;
+  last_eviction_freed_bytes?: number;
 }
 
 /**
@@ -333,6 +350,24 @@ export interface Worker {
    * the worker also sets ``WORKER_TAGS_OVERWRITE=1``).
    */
   tags?: string[];
+  /**
+   * DQ.5: effective per-worker disk-quota in bytes. The server sends the
+   * effective value (override ?? fleet default) on every /ui/api/workers
+   * GET so the UI can render "X / Y GiB" without a second fetch.
+   */
+  disk_quota_bytes?: number;
+  /**
+   * DQ.5: persisted per-worker override (may be ``null`` = inherit fleet
+   * default). The dialog uses this to drive the radio state ("Use fleet
+   * default" vs "Custom").
+   */
+  disk_quota_override_bytes?: number | null;
+  /**
+   * DQ.5: fleet-wide default; bundled into every row so the Workers tab
+   * + Connect dialog can render the default-radio without a separate
+   * /ui/api/settings call.
+   */
+  default_worker_disk_quota_bytes?: number;
 }
 
 export interface Job {

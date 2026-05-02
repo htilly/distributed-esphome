@@ -14,7 +14,26 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 VERSIONS_BASE = Path(os.environ.get("ESPHOME_VERSIONS_DIR", "/esphome-versions"))
-MAX_ESPHOME_VERSIONS = int(os.environ.get("MAX_ESPHOME_VERSIONS", "3"))
+# DQ.8: the disk-quota engine (``disk_quota.py``) is the authoritative
+# bound on cache size now. We always keep exactly 1 venv (most recently
+# used); byte-bounded eviction across every category (caches, slots,
+# pio-slots) happens in ``client.py`` at job boundaries via
+# ``disk_quota.enforce_quota``. The ``MAX_ESPHOME_VERSIONS`` env var
+# becomes a no-op with a one-time warning if set to anything but 1,
+# kept readable for backwards compat with deployed worker docker
+# invocations.
+MAX_ESPHOME_VERSIONS = 1
+_LEGACY_MAX_ESPHOME_VERSIONS = os.environ.get("MAX_ESPHOME_VERSIONS")
+if (
+    _LEGACY_MAX_ESPHOME_VERSIONS is not None
+    and _LEGACY_MAX_ESPHOME_VERSIONS.strip() not in ("", "1")
+):
+    logger.warning(
+        "MAX_ESPHOME_VERSIONS=%s is ignored — the disk-quota engine "
+        "now bounds the cache by bytes, not by venv count. Always 1 "
+        "venv kept (the most recently used).",
+        _LEGACY_MAX_ESPHOME_VERSIONS,
+    )
 # Minimum free disk percentage before we start evicting versions
 MIN_FREE_DISK_PCT = int(os.environ.get("MIN_FREE_DISK_PCT", "10"))
 

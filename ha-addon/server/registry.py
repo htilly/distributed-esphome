@@ -48,6 +48,18 @@ class Worker:
     # this in-memory copy is kept in sync so UI reads off the registry don't
     # have to round-trip the disk store.
     tags: list[str] = field(default_factory=list)
+    # DQ.3: per-worker disk-quota override in bytes (None = inherit
+    # AppSettings.default_worker_disk_quota_bytes). Resolved at registration
+    # time by the WorkerDiskQuotaStore (same hostname/client_id identity as
+    # tags) and kept in sync via UI edit; mirrored in-memory here so
+    # /ui/api/workers responses don't round-trip the disk store on every
+    # request. Use ``effective_disk_quota_bytes(default)`` to resolve the
+    # value the worker should actually enforce against.
+    disk_quota_bytes: Optional[int] = None
+
+    def effective_disk_quota_bytes(self, default_bytes: int) -> int:
+        """Return the override if set, else the supplied fleet default."""
+        return self.disk_quota_bytes if self.disk_quota_bytes is not None else default_bytes
 
     def to_dict(self) -> dict:
         return {
@@ -65,6 +77,10 @@ class Worker:
             "system_info": self.system_info,
             "health_blocked_reason": self.health_blocked_reason,
             "tags": list(self.tags),
+            # DQ.5: persisted override (may be null = inherit fleet default).
+            # The effective value is computed in the UI API layer where the
+            # fleet default is in scope.
+            "disk_quota_override_bytes": self.disk_quota_bytes,
         }
 
     def evaluate_health(self) -> bool:
@@ -107,6 +123,7 @@ class WorkerRegistry:
         system_info: Optional[dict] = None,
         image_version: Optional[str] = None,
         tags: Optional[list[str]] = None,
+        disk_quota_bytes: Optional[int] = None,
     ) -> str:
         """Register a worker. Returns client_id.
 
@@ -131,6 +148,7 @@ class WorkerRegistry:
                     worker.system_info = system_info
                 if tags is not None:
                     worker.tags = list(tags)
+                worker.disk_quota_bytes = disk_quota_bytes
                 logger.info(
                     "Re-registered worker %s (%s / %s / v%s / image=%s / %d slots)",
                     client_id, hostname, platform, client_version or "?",
@@ -151,6 +169,7 @@ class WorkerRegistry:
                     max_parallel_jobs=max_parallel_jobs,
                     system_info=system_info,
                     tags=list(tags) if tags is not None else [],
+                    disk_quota_bytes=disk_quota_bytes,
                 )
                 self._workers[client_id] = worker
                 logger.info(
@@ -172,6 +191,7 @@ class WorkerRegistry:
             max_parallel_jobs=max_parallel_jobs,
             system_info=system_info,
             tags=list(tags) if tags is not None else [],
+            disk_quota_bytes=disk_quota_bytes,
         )
         self._workers[client_id] = worker
         logger.info(
@@ -232,6 +252,21 @@ class WorkerRegistry:
         if worker is None:
             return False
         worker.tags = list(tags)
+        _broadcast_workers_changed()
+        return True
+
+    def set_disk_quota(self, client_id: str, quota_bytes: Optional[int]) -> bool:
+        """Update a worker's in-memory disk-quota override. Returns False if unknown.
+
+        DQ.5: callers (the UI quota-edit endpoint, the registration handler)
+        also persist via WorkerDiskQuotaStore so the value survives a restart;
+        this in-memory copy keeps /ui/api/workers responses cheap and lets the
+        next heartbeat pick up the new value without a disk read.
+        """
+        worker = self._workers.get(client_id)
+        if worker is None:
+            return False
+        worker.disk_quota_bytes = quota_bytes
         _broadcast_workers_changed()
         return True
 

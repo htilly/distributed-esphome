@@ -57,12 +57,14 @@ class _UiApp:
         queue: JobQueue,
         registry: WorkerRegistry,
         config_dir: Path,
+        app: web.Application | None = None,
     ) -> None:
         self.client = client
         self.cfg = cfg
         self.queue = queue
         self.registry = registry
         self.config_dir = config_dir
+        self.app = app
 
     async def close(self) -> None:
         await self.client.close()
@@ -106,6 +108,13 @@ async def _make_ui_app(tmp_path: Path) -> _UiApp:
     app["queue"] = queue
     app["registry"] = registry
     app["log_subscribers"] = {}
+    # DQ.5: every UI test rig gets a real WorkerDiskQuotaStore so the
+    # disk-quota endpoint exercises the full persistence path rather than
+    # the graceful-degrade fallback.
+    from worker_disk_quotas import WorkerDiskQuotaStore  # noqa: PLC0415
+    app["worker_disk_quota_store"] = WorkerDiskQuotaStore(
+        path=tmp_path / "worker-disk-quotas.json",
+    )
     app["_rt"] = {
         "ha_entity_status": {},
         "ha_mac_set": set(),
@@ -123,7 +132,7 @@ async def _make_ui_app(tmp_path: Path) -> _UiApp:
 
     client = TestClient(TestServer(app))
     await client.start_server()
-    return _UiApp(client, cfg, queue, registry, config_dir)
+    return _UiApp(client, cfg, queue, registry, config_dir, app=app)
 
 
 def _write_config(config_dir: Path, filename: str, name: str) -> Path:
@@ -1023,6 +1032,125 @@ async def test_worker_clean_cache_sets_pending_flag(tmp_path):
         resp = await ta.post(f"/ui/api/workers/{client_id}/clean")
         assert resp.status == 200
         assert ta.registry.get(client_id).pending_clean is True
+    finally:
+        await ta.close()
+
+
+# ---------------------------------------------------------------------------
+# DQ.5 — POST /ui/api/workers/{id}/disk-quota + GET /ui/api/workers payload
+# ---------------------------------------------------------------------------
+
+
+async def test_worker_set_disk_quota_persists_override(tmp_path, _enable_socket):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        client_id = ta.registry.register("qworker", "linux/amd64", image_version="4")
+        resp = await ta.post(
+            f"/ui/api/workers/{client_id}/disk-quota",
+            json={"disk_quota_bytes": 5 * 1024 ** 3},
+        )
+        assert resp.status == 200
+        body = await resp.json()
+        assert body == {"ok": True, "disk_quota_bytes": 5 * 1024 ** 3}
+        assert ta.registry.get(client_id).disk_quota_bytes == 5 * 1024 ** 3
+        assert ta.app["worker_disk_quota_store"].get_quota("qworker") == 5 * 1024 ** 3
+    finally:
+        await ta.close()
+
+
+async def test_worker_set_disk_quota_null_clears_override(tmp_path, _enable_socket):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        client_id = ta.registry.register("qworker", "linux/amd64", image_version="4")
+        # Seed an override.
+        await ta.post(
+            f"/ui/api/workers/{client_id}/disk-quota",
+            json={"disk_quota_bytes": 5 * 1024 ** 3},
+        )
+        # Clear it.
+        resp = await ta.post(
+            f"/ui/api/workers/{client_id}/disk-quota",
+            json={"disk_quota_bytes": None},
+        )
+        assert resp.status == 200
+        assert ta.registry.get(client_id).disk_quota_bytes is None
+        assert ta.app["worker_disk_quota_store"].get_quota("qworker") is None
+    finally:
+        await ta.close()
+
+
+async def test_worker_set_disk_quota_rejects_below_floor(tmp_path, _enable_socket):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        client_id = ta.registry.register("qworker", "linux/amd64", image_version="4")
+        resp = await ta.post(
+            f"/ui/api/workers/{client_id}/disk-quota",
+            json={"disk_quota_bytes": 1024 ** 3 - 1},  # < 1 GiB
+        )
+        assert resp.status == 400
+    finally:
+        await ta.close()
+
+
+async def test_worker_set_disk_quota_rejects_above_ceiling(tmp_path, _enable_socket):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        client_id = ta.registry.register("qworker", "linux/amd64", image_version="4")
+        resp = await ta.post(
+            f"/ui/api/workers/{client_id}/disk-quota",
+            json={"disk_quota_bytes": (1024 + 1) * 1024 ** 3},  # > 1 TiB
+        )
+        assert resp.status == 400
+    finally:
+        await ta.close()
+
+
+async def test_worker_set_disk_quota_rejects_non_integer(tmp_path, _enable_socket):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        client_id = ta.registry.register("qworker", "linux/amd64", image_version="4")
+        resp = await ta.post(
+            f"/ui/api/workers/{client_id}/disk-quota",
+            json={"disk_quota_bytes": "5GiB"},
+        )
+        assert resp.status == 400
+    finally:
+        await ta.close()
+
+
+async def test_worker_set_disk_quota_unknown_worker(tmp_path, _enable_socket):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        resp = await ta.post(
+            "/ui/api/workers/unknown-id/disk-quota",
+            json={"disk_quota_bytes": 5 * 1024 ** 3},
+        )
+        assert resp.status == 404
+    finally:
+        await ta.close()
+
+
+async def test_get_workers_includes_disk_quota_fields(tmp_path, _enable_socket):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        # Worker with no override → effective = fleet default (10 GiB).
+        ta.registry.register("worker-default", "linux/amd64", image_version="4")
+        # Worker with an override → effective = override.
+        client_id = ta.registry.register("worker-override", "linux/amd64", image_version="4")
+        ta.registry.set_disk_quota(client_id, 3 * 1024 ** 3)
+
+        resp = await ta.get("/ui/api/workers")
+        assert resp.status == 200
+        rows = await resp.json()
+        by_host = {r["hostname"]: r for r in rows}
+
+        assert by_host["worker-default"]["disk_quota_override_bytes"] is None
+        assert by_host["worker-default"]["disk_quota_bytes"] == 10 * 1024 ** 3
+        assert by_host["worker-default"]["default_worker_disk_quota_bytes"] == 10 * 1024 ** 3
+
+        assert by_host["worker-override"]["disk_quota_override_bytes"] == 3 * 1024 ** 3
+        assert by_host["worker-override"]["disk_quota_bytes"] == 3 * 1024 ** 3
+        assert by_host["worker-override"]["default_worker_disk_quota_bytes"] == 10 * 1024 ** 3
     finally:
         await ta.close()
 

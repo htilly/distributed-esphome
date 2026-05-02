@@ -142,9 +142,9 @@ async def _register_worker_handler(request: web.Request) -> web.Response:
     # when two workers happen to share a hostname. The first registration for an
     # identity seeds from the worker's WORKER_TAGS env; subsequent ones are
     # server-side-wins unless the worker also set WORKER_TAGS_OVERWRITE=1.
+    identity = msg.hostname or msg.client_id or ""
     tag_store = request.app.get("worker_tag_store")
     if tag_store is not None:
-        identity = msg.hostname or msg.client_id or ""
         resolved_tags: Optional[list[str]] = tag_store.load_or_seed(
             identity, msg.tags, overwrite=msg.overwrite_tags,
         )
@@ -153,6 +153,19 @@ async def _register_worker_handler(request: web.Request) -> web.Response:
         # echo of whatever the worker sent — preserves prior test contracts
         # for code paths that don't care about persistence.
         resolved_tags = list(msg.tags) if msg.tags is not None else None
+
+    # DQ.4: resolve the per-worker disk-quota override the same way as tags.
+    # First registration seeds from RegisterRequest.disk_quota_bytes (the value
+    # baked into ``-e WORKER_DISK_QUOTA_GB=N`` on the docker run command).
+    # Later registrations are always server-side-wins (no overwrite flag —
+    # there's no scripted-multi-worker use case here yet).
+    quota_store = request.app.get("worker_disk_quota_store")
+    if quota_store is not None:
+        resolved_quota: Optional[int] = quota_store.load_or_seed(
+            identity, msg.disk_quota_bytes,
+        )
+    else:
+        resolved_quota = msg.disk_quota_bytes
 
     registry = request.app["registry"]
     client_id = registry.register(
@@ -164,6 +177,7 @@ async def _register_worker_handler(request: web.Request) -> web.Response:
         system_info_dict,
         image_version=msg.image_version,
         tags=resolved_tags,
+        disk_quota_bytes=resolved_quota,
     )
     # TG.3: a new worker (or one re-registering with different tags)
     # may unblock or newly-block PENDING jobs. Fire-and-forget — the
@@ -208,6 +222,16 @@ async def _heartbeat_handler(request: web.Request) -> web.Response:
     if worker and worker.pending_clean:
         resp.clean_build_cache = True
         worker.pending_clean = False
+
+    # DQ.4: push the effective disk quota on every heartbeat so a UI edit
+    # propagates within one tick (≤10s by default) without restarting the
+    # worker. Override (Worker.disk_quota_bytes) wins over the fleet default
+    # (AppSettings.default_worker_disk_quota_bytes); we always send a value
+    # so the worker's local cell stays in sync — never None on the wire.
+    if worker is not None:
+        from settings import get_settings as _gs  # noqa: PLC0415
+        default_quota = _gs().default_worker_disk_quota_bytes
+        resp.set_disk_quota_bytes = worker.effective_disk_quota_bytes(default_quota)
 
     # WL.2: tell the worker to start (or stop) streaming logs based on
     # whether any UI is currently watching. Explicit True/False — never

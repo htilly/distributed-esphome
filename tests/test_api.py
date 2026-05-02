@@ -111,6 +111,12 @@ async def _make_app(tmp_path: Path, token: str = TOKEN) -> _App:
     # graceful-degrade fallback.
     from worker_tags import WorkerTagStore  # noqa: PLC0415
     app["worker_tag_store"] = WorkerTagStore(path=tmp_path / "worker-tags.json")
+    # DQ.2: same shape as worker_tag_store — exercises the full register-seed +
+    # heartbeat-push code paths against a real disk store.
+    from worker_disk_quotas import WorkerDiskQuotaStore  # noqa: PLC0415
+    app["worker_disk_quota_store"] = WorkerDiskQuotaStore(
+        path=tmp_path / "worker-disk-quotas.json",
+    )
     app.router.add_routes(api_module.routes)
 
     client = TestClient(TestServer(app))
@@ -288,6 +294,109 @@ async def test_register_overwrite_clobbers(tmp_path, _enable_socket):
         client_id = (await resp.json())["client_id"]
         assert ta.registry.get(client_id).tags == ["staging", "fast"]
         assert ta.app["worker_tag_store"].get_tags("h1") == ["staging", "fast"]
+    finally:
+        await ta.close()
+
+
+# ---------------------------------------------------------------------------
+# DQ.4 — disk-quota seed + push
+# ---------------------------------------------------------------------------
+
+
+async def test_register_seeds_disk_quota_first_time(tmp_path, _enable_socket):
+    """DQ.4: WORKER_DISK_QUOTA_GB-equivalent payload on first registration seeds the store."""
+    ta = await _make_app(tmp_path)
+    try:
+        resp = await ta.post(
+            "/api/v1/workers/register",
+            json={
+                "hostname": "qworker",
+                "platform": "linux/amd64",
+                "disk_quota_bytes": 5 * 1024 ** 3,
+            },
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status == 200
+        client_id = (await resp.json())["client_id"]
+        worker = ta.registry.get(client_id)
+        assert worker is not None
+        assert worker.disk_quota_bytes == 5 * 1024 ** 3
+        assert ta.app["worker_disk_quota_store"].get_quota("qworker") == 5 * 1024 ** 3
+    finally:
+        await ta.close()
+
+
+async def test_register_disk_quota_server_side_wins_after_first(tmp_path, _enable_socket):
+    """DQ.4: re-registering with a different env value doesn't clobber the persisted override."""
+    ta = await _make_app(tmp_path)
+    try:
+        await ta.post(
+            "/api/v1/workers/register",
+            json={
+                "hostname": "qworker",
+                "platform": "linux/amd64",
+                "disk_quota_bytes": 5 * 1024 ** 3,
+            },
+            headers=AUTH_HEADERS,
+        )
+        resp = await ta.post(
+            "/api/v1/workers/register",
+            json={
+                "hostname": "qworker",
+                "platform": "linux/amd64",
+                "disk_quota_bytes": 50 * 1024 ** 3,
+            },
+            headers=AUTH_HEADERS,
+        )
+        client_id = (await resp.json())["client_id"]
+        # Server kept the original 5 GiB; the worker's restart with a larger
+        # env value didn't sneak past the UI's authoritative override.
+        assert ta.registry.get(client_id).disk_quota_bytes == 5 * 1024 ** 3
+    finally:
+        await ta.close()
+
+
+async def test_heartbeat_pushes_effective_disk_quota(tmp_path, _enable_socket):
+    """DQ.4: every heartbeat carries the effective quota (override or fleet default)."""
+    import settings as _s
+    ta = await _make_app(tmp_path)
+    try:
+        # Default fleet quota (10 GiB) flows through when no override is set.
+        resp = await ta.post(
+            "/api/v1/workers/register",
+            json={"hostname": "qworker", "platform": "linux/amd64"},
+            headers=AUTH_HEADERS,
+        )
+        client_id = (await resp.json())["client_id"]
+
+        hb = await ta.post(
+            "/api/v1/workers/heartbeat",
+            json={"client_id": client_id},
+            headers=AUTH_HEADERS,
+        )
+        body = await hb.json()
+        assert body["set_disk_quota_bytes"] == 10 * 1024 ** 3
+
+        # Set an override → next heartbeat picks it up.
+        ta.registry.set_disk_quota(client_id, 3 * 1024 ** 3)
+        hb = await ta.post(
+            "/api/v1/workers/heartbeat",
+            json={"client_id": client_id},
+            headers=AUTH_HEADERS,
+        )
+        body = await hb.json()
+        assert body["set_disk_quota_bytes"] == 3 * 1024 ** 3
+
+        # Bump the fleet default → workers without an override see the new value.
+        ta.registry.set_disk_quota(client_id, None)
+        await _s.update_settings({"default_worker_disk_quota_bytes": 25 * 1024 ** 3})
+        hb = await ta.post(
+            "/api/v1/workers/heartbeat",
+            json={"client_id": client_id},
+            headers=AUTH_HEADERS,
+        )
+        body = await hb.json()
+        assert body["set_disk_quota_bytes"] == 25 * 1024 ** 3
     finally:
         await ta.close()
 

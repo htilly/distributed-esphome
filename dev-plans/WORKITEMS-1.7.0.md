@@ -142,6 +142,72 @@ Severity: only `required` accepted by the API in 1.7.0 (`preferred` rejected wit
 
 ---
 
+## DQ — Disk quota & LRU eviction on workers
+
+Worker hosts (especially the in-add-on local worker on a Pi) accumulate disk state under `/esphome-versions/`: ESPHome venvs (~250 MB each), per-slot PlatformIO toolchains (`pio-slot-N/`, ~600 MB–1 GB each), per-target compile caches (`cache/<stem>/`, 50–400 MB), and per-slot/per-target working dirs (`slots/<w>/<stem>/`). Today's bounds are loose — `MAX_ESPHOME_VERSIONS=3` count cap on the venvs (the smallest contributor) and a soft `MIN_FREE_DISK_PCT=10` floor on host disk. The fat dirs (toolchains + target caches) have no upper bound and grow unboundedly as the fleet covers more targets and frameworks.
+
+Replace those knobs with a single byte budget across the whole `/esphome-versions/` tree, evicted LRU between jobs. Policy: keep exactly one ESPHome venv (the most recently used); spend the rest of the budget on build caches; evict the oldest things first when the budget is exceeded. Configurable as a fleet-wide default in server settings (10 GiB), with a per-worker override surfaced in the "Add worker" dialog and the worker row's hamburger menu. Surface `disk: X / Y GiB` per worker in the UI.
+
+Eviction policy (cheapest → most expensive to recreate):
+
+1. **Orphan slot dirs** (`slots/N/` + `pio-slot-N/` for `N >= MAX_PARALLEL_JOBS`) — pruned unconditionally first; can never be in flight.
+2. **Stale ESPHome venvs** — collapse to 1 (most recently used). ~1–3 min to re-pip-install.
+3. **Per-target caches** (`cache/<stem>/` + every `slots/*/<stem>/` for the same stem, evicted as a unit) — mtime-LRU. 3–5 min cold rebuild.
+4. **PlatformIO toolchains** (whole `pio-slot-N/` dirs) — last resort, mtime-LRU. 5–10 min re-extract.
+
+Pinning (must-not-evict): the venv, `slots/<w>/<stem>/`, `pio-slot-N/`, and `cache/<stem>/` of any in-flight job. The cache is already fcntl-locked during rsync (implicit pin); the rest needs an in-memory active set tracked by the run-loop.
+
+Triggers: (a) worker startup before the poll loop starts, (b) end of every job in the same code path as `_sync_slot_into_cache`, (c) inside `ensure_version()` before a fresh `pip install` (replaces the existing eviction call), (d) after a heartbeat brings a new lower `set_disk_quota_bytes`. No background timer — idle workers do nothing.
+
+The `MIN_FREE_DISK_PCT=10` host-disk floor is kept as a separate emergency override: if host disk drops below 10% free regardless of our usage, evict beyond what the quota mandates until host recovers (workers share the disk with HA core, Docker images, logs).
+
+LRU bookkeeping: dir mtimes already maintained today — `cache/<stem>/` is touched by `_sync_slot_into_cache` on every successful compile; `version_manager` already `move_to_end`s on use; `pio-slot-N/` mtime gets a one-line `os.utime` bump at job end.
+
+### Backend
+
+- [x] **DQ.1** *(1.7.0-dev.67)* — Added `default_worker_disk_quota_bytes` (default 10 GiB) to `AppSettings`, with `_validate_int_range(1 GiB, 1 TiB)` validator. PATCH-able via the existing `/ui/api/settings` endpoint without a server restart.
+- [x] **DQ.2** *(1.7.0-dev.67)* — New `ha-addon/server/worker_disk_quotas.py` mirroring the `worker_tags.py` shape (hostname/client_id identity, schema-versioned JSON, atomic write+rename, malformed-file recovery). Tests in `tests/test_worker_disk_quotas.py` cover round-trip, server-side-wins on re-registration, explicit-null persistence, and garbage-value drop-through.
+- [x] **DQ.3** *(1.7.0-dev.67)* — `Worker.disk_quota_bytes: Optional[int]` plus `Worker.effective_disk_quota_bytes(default)` helper. `to_dict` emits `disk_quota_override_bytes` (the persisted override, may be null) so the UI can drive the dialog's radio without a second fetch.
+- [x] **DQ.4** *(1.7.0-dev.67)* — Register handler seeds the persistent store from `RegisterRequest.disk_quota_bytes` on the first registration for the worker's identity (subsequent registrations are server-side-wins, mirroring TG.1). Heartbeat handler pushes the effective quota (override ?? `default_worker_disk_quota_bytes`) on every response — UI edits propagate within one heartbeat (≤10 s) without a worker restart.
+- [x] **DQ.5** *(1.7.0-dev.67)* — `POST /ui/api/workers/{id}/disk-quota` accepts `{disk_quota_bytes: int | null}` (null clears the override; ≥1 GiB / ≤1 TiB enforced). `GET /ui/api/workers` adds `disk_quota_bytes` (effective) + `disk_quota_override_bytes` (persisted, nullable) + `default_worker_disk_quota_bytes` (fleet default) per row. `GET /ui/api/server-info` also surfaces the fleet default for the ConnectWorkerModal radio label.
+
+### Protocol
+
+Additive only — no `PROTOCOL_VERSION` bump. Both `ha-addon/server/protocol.py` and `ha-addon/client/protocol.py` (byte-identical, enforced by `tests/test_protocol.py::test_server_and_client_protocol_files_are_identical`):
+
+- [x] **DQ.6** *(1.7.0-dev.67)* — `RegisterRequest.disk_quota_bytes`, `HeartbeatResponse.set_disk_quota_bytes`, `SystemInfo.disk_usage_bytes` / `disk_quota_bytes` / `last_eviction_freed_bytes` — all `Optional[int]`, additive only (no `PROTOCOL_VERSION` bump). Server + client copies stay byte-identical (`tests/test_protocol.py::test_server_and_client_protocol_files_are_identical` enforces). New `tests/test_protocol.py` cases pin the round-trip + the `extra="ignore"` forward-compat for older peers.
+
+### Client
+
+- [x] **DQ.7** *(1.7.0-dev.67)* — `ha-addon/client/disk_quota.py` engine: `compute_usage` (per-category byte breakdown), `prune_orphans(base, max_slots)` (unconditional), `enforce_quota(base, quota_bytes, *, pinned)` (mtime-LRU across stale venvs → per-target caches → pio-slots; per-target evicted as a unit so the cache lock semantics stay consistent), `host_disk_floor(base, min_free_pct, *, pinned)` (emergency override, same eviction order). `ActiveJobSet` provides refcounted pinning so two parallel jobs on the same target both protect it. When only pinned items remain over quota, the engine logs a warning and returns rather than panicking — the next post-job sweep catches up once pins drop.
+- [x] **DQ.8** *(1.7.0-dev.67)* — `ha-addon/client/version_manager.py`: module-level `MAX_ESPHOME_VERSIONS` hard-set to `1` (the byte-bound disk-quota engine is the authoritative cache cap now). `MAX_ESPHOME_VERSIONS` env var is a no-op with a one-time warning log on startup when set ≠ 1. The `max_versions` constructor kwarg is preserved so existing test rigs continue to work.
+- [x] **DQ.9** *(1.7.0-dev.67)* — `ha-addon/client/client.py` integration: thread-safe `_current_disk_quota_bytes` cell (boot env default → server-pushed value wins), `_active_job_set` pinning, `_run_disk_quota_sweep()` helper called at three trigger points (startup with `prune_orphans_first=True`, post-job same code path as `_sync_slot_into_cache`, heartbeat-driven sweep when the server lowers the quota mid-life). `_build_system_info()` enriches every `SystemInfo` with `disk_usage_bytes` / `disk_quota_bytes` / `last_eviction_freed_bytes` so register and heartbeat both surface the same view. New `WORKER_DISK_QUOTA_GB` env var (integer GiB → bytes on the wire). Per-sweep log line: `disk-quota[label]: X.Y / Z.0 GiB — evicted: ...`.
+
+### UI
+
+- [x] **DQ.10** *(1.7.0-dev.67)* — `ConnectWorkerModal.tsx`: new "Disk Quota" radio field (default = "Use fleet default (X GiB)" reading from `serverInfo.default_worker_disk_quota_bytes`, custom = integer-GiB input ≥1 / ≤1024). Custom mode bakes `-e WORKER_DISK_QUOTA_GB=<n>` (and the matching `      - WORKER_DISK_QUOTA_GB=<n>` for compose) into the rendered docker command; default mode emits nothing so the worker registers with `disk_quota_bytes=None` and the server's fleet default flows in via heartbeat.
+- [x] **DQ.11** *(1.7.0-dev.67)* — Workers tab worker-info cell gains a `Quota: 2.1 / 10 GiB` line (yellow >80 %, red >95 %) sourced from `system_info.disk_usage_bytes` + `system_info.disk_quota_bytes`. Actions hamburger gains "Set disk quota…" backed by a new `SetDiskQuotaDialog` (radio "Use fleet default" vs "Custom + integer GiB"). Dialog state is lifted to `WorkersTab` to avoid the SWR-poll-tears-down-row issue (#2 / #71 class). `setWorkerDiskQuota(id, bytes | null)` lives in `src/api/client.ts`; `App.tsx::handleSetDiskQuota` shows the appropriate toast + mutates the SWR cache.
+- [x] **DQ.12** — Settings UI form for the fleet-wide default: deferred per plan. The field is editable today via `PATCH /ui/api/settings`; a React form lands when the broader settings drawer gets a build-cache section.
+
+### Tests
+
+- [x] **DQ.13** *(1.7.0-dev.67)* — `tests/test_disk_quota_logic.py` (23 cases): per-category usage accounting, orphan-slot pruning, eviction ORDER across all four categories, per-target unit eviction, pinning honored at every layer, idempotency on steady-state second pass, sweep on quota lowered mid-life, host-disk floor with patched `os.statvfs`, `ActiveJobSet` refcounting + thread safety, **and the pinned-only-exceeds-quota → warn + no-op case I flagged during plan review**.
+- [x] **DQ.14** *(1.7.0-dev.67)* — `tests/test_settings.py` extended for `default_worker_disk_quota_bytes`: dataclass default = 10 GiB, validator accepts in-range, rejects below floor / zero / negative / above ceiling, accepts exactly at floor + ceiling.
+- [x] **DQ.15** *(1.7.0-dev.67)* — `tests/test_worker_disk_quotas.py` (13 cases) covers seed-on-first / server-side-wins / persisted-explicit-null round-trip / malformed-file recovery / unknown-schema-version / garbage-value drop-through / authoritative `set_quota` UI path.
+- [x] **DQ.16** *(1.7.0-dev.67)* — `tests/test_protocol.py` byte-identical assertion still holds; new round-trip cases for `RegisterRequest.disk_quota_bytes`, `HeartbeatResponse.set_disk_quota_bytes`, and the three `SystemInfo` fields plus default-omitted-is-None coverage.
+- [x] **DQ.17** *(1.7.0-dev.67)* — `connect-worker-modal.spec.ts` extended: default mode emits no `WORKER_DISK_QUOTA_GB` across bash/powershell/compose; custom mode bakes `WORKER_DISK_QUOTA_GB=5` into all three formats.
+- [x] **DQ.18** *(1.7.0-dev.67)* — `workers.spec.ts` extended: row surfaces "Quota: 2.1 / 10 GiB" from `system_info`; "Set disk quota…" hamburger item opens the dialog; saving Custom POSTs `{disk_quota_bytes: 5*1024**3}`; saving "Use fleet default" POSTs `{disk_quota_bytes: null}`. All 193 mocked Playwright tests pass.
+
+### Out of scope
+
+- **Per-target quotas** — one global pool, by design.
+- **Background timer for cleanup** — jobs trigger eviction; idle workers do nothing.
+- **Quota enforcement mid-compile** — between jobs only; interrupting a live build to free disk is worse than failing the build cleanly.
+- **Server-pushed config changes for *other* knobs** — this only adds `set_disk_quota_bytes`; broader server-pushed config is a separate concern.
+- **Migration tooling for existing `MAX_ESPHOME_VERSIONS` users** — env var becomes a no-op with a one-time warning log.
+
+---
+
 ## SD — Scope discipline (moved)
 
 SD.2 (release-blocker gate) and SD.3 (TEST-AUDIT production) moved to `dev-plans/WORKITEMS-1.7.1.md` — both pre-tag gates were specifically scoped to the Honest Gold tier-flip and only make sense alongside the QS / TP / HT / CI work that now lives in 1.7.1.

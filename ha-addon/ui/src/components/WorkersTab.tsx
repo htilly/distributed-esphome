@@ -25,6 +25,7 @@ import { TagsEditDialog } from './TagsEditDialog';
 import { TagFilterBar } from './TagFilterBar';
 import { setWorkerTags } from '../api/client';
 import { useSWRConfig } from 'swr';
+import { SetDiskQuotaDialog } from './SetDiskQuotaDialog';
 
 interface Props {
   workers: Worker[];
@@ -37,6 +38,9 @@ interface Props {
   minImageVersion?: string;
   onRemove: (id: string) => void;
   onSetParallelJobs: (id: string, count: number) => void;
+  // DQ.5: per-worker disk-quota override. Null clears the override so
+  // the worker inherits ``default_worker_disk_quota_bytes``.
+  onSetDiskQuota: (id: string, bytes: number | null) => void;
   onCleanCache: (id: string) => void;
   onCleanAllCaches: () => void;
   onConnectWorker: (preset?: import('../types').WorkerPreset | null) => void;
@@ -92,6 +96,24 @@ function workerPlatformHtml(si: SystemInfo): React.ReactNode {
     lines.push(
       <span key="cache" className="text-[10px] text-[var(--text-muted)]" title={`Build cache: ${si.cached_targets} target(s) cached${cacheStr}`}>
         Cache: {si.cached_targets} target{si.cached_targets !== 1 ? 's' : ''}{cacheStr}
+      </span>
+    );
+  }
+  // DQ.11: disk-quota engine view — shown when the worker has surfaced
+  // the new system_info fields (post-DQ.6 worker). Yellow >80%, red >95%.
+  if (si.disk_usage_bytes != null && si.disk_quota_bytes != null && si.disk_quota_bytes > 0) {
+    const usageGb = si.disk_usage_bytes / (1024 ** 3);
+    const quotaGb = si.disk_quota_bytes / (1024 ** 3);
+    const pct = (si.disk_usage_bytes / si.disk_quota_bytes) * 100;
+    const quotaColor = pct > 95 ? 'var(--danger)' : pct > 80 ? 'var(--warn)' : 'var(--text-muted)';
+    lines.push(
+      <span
+        key="quota"
+        className="text-[10px]"
+        style={{ color: quotaColor }}
+        title={`Disk quota: ${usageGb.toFixed(1)} / ${quotaGb.toFixed(0)} GiB (${pct.toFixed(0)}% used)`}
+      >
+        Quota: {usageGb.toFixed(1)} / {quotaGb.toFixed(0)} GiB
       </span>
     );
   }
@@ -254,7 +276,7 @@ function getWorkerSortValue(w: Worker, colId: string): string {
 
 const columnHelper = createColumnHelper<Worker>();
 
-export function WorkersTab({ workers, targets, queue, serverClientVersion, minImageVersion, onRemove, onSetParallelJobs, onCleanCache, onCleanAllCaches, onConnectWorker, onViewLogs, onRequestDiagnostics, onOpenRoutingRules }: Props) {
+export function WorkersTab({ workers, targets, queue, serverClientVersion, minImageVersion, onRemove, onSetParallelJobs, onSetDiskQuota, onCleanCache, onCleanAllCaches, onConnectWorker, onViewLogs, onRequestDiagnostics, onOpenRoutingRules }: Props) {
   // WL.3: lift the actions-dropdown open state out of the TanStack row
   // cell so the 1 Hz SWR poll doesn't tear it down mid-click (bug #2
   // / #71 class — see Design Judgment in CLAUDE.md). Keyed by
@@ -263,6 +285,9 @@ export function WorkersTab({ workers, targets, queue, serverClientVersion, minIm
   const [filter, setFilter] = useState('');
   // TG.6 inline edit — same lift-out-of-row pattern as the Actions menu.
   const [tagsEditClientId, setTagsEditClientId] = useState<string | null>(null);
+  // DQ.11: same lift-out-of-row pattern — keep the dialog state at the
+  // tab level so the 1 Hz SWR poll doesn't tear it down on row remount.
+  const [diskQuotaEditClientId, setDiskQuotaEditClientId] = useState<string | null>(null);
   // TG.6 filter pills — selected tag set persisted across reloads.
   const [tagFilter, setTagFilter] = usePersistedState<string[]>('workers-tag-filter', []);
   // TG.9: rules modal is now lifted to App.tsx so the QueueTab can also
@@ -531,6 +556,9 @@ export function WorkersTab({ workers, targets, queue, serverClientVersion, minIm
                         Clean cache
                       </DropdownMenuItem>
                     )}
+                    <DropdownMenuItem onClick={() => setDiskQuotaEditClientId(c.client_id)}>
+                      Set disk quota…
+                    </DropdownMenuItem>
                     {!c.online && !isLocal && (
                       <DropdownMenuItem
                         onClick={() => onRemove(c.client_id)}
@@ -658,6 +686,22 @@ export function WorkersTab({ workers, targets, queue, serverClientVersion, minIm
                 // up on its own but mutate() snaps the UI immediately.
                 await mutate('workers');
               }}
+            />
+          );
+        })()}
+        {diskQuotaEditClientId && (() => {
+          const w = workers.find(x => x.client_id === diskQuotaEditClientId);
+          if (!w) return null;
+          return (
+            <SetDiskQuotaDialog
+              hostname={w.hostname}
+              currentOverrideBytes={w.disk_quota_override_bytes ?? null}
+              defaultBytes={w.default_worker_disk_quota_bytes ?? 10 * 1024 ** 3}
+              onSave={async (bytes) => {
+                await onSetDiskQuota(w.client_id, bytes);
+                await mutate('workers');
+              }}
+              onClose={() => setDiskQuotaEditClientId(null)}
             />
           );
         })()}

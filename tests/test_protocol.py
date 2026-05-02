@@ -125,6 +125,47 @@ class TestRoundTrip:
         msg = HeartbeatResponse(stream_logs=False)
         assert HeartbeatResponse.model_validate(msg.model_dump()).stream_logs is False
 
+    def test_register_request_disk_quota_roundtrip(self) -> None:
+        """DQ.6 — RegisterRequest carries the worker's boot-time disk-quota override."""
+        msg = RegisterRequest(
+            hostname="worker-1",
+            platform="linux",
+            disk_quota_bytes=5 * 1024 ** 3,
+        )
+        d = msg.model_dump()
+        assert d["disk_quota_bytes"] == 5 * 1024 ** 3
+        assert RegisterRequest.model_validate(d) == msg
+
+    def test_register_request_disk_quota_omitted_is_none(self) -> None:
+        msg = RegisterRequest(hostname="worker-1", platform="linux")
+        assert msg.disk_quota_bytes is None
+
+    def test_heartbeat_response_set_disk_quota_roundtrip(self) -> None:
+        """DQ.6 — server pushes the effective disk quota to the worker."""
+        msg = HeartbeatResponse(set_disk_quota_bytes=10 * 1024 ** 3)
+        d = msg.model_dump()
+        assert d["set_disk_quota_bytes"] == 10 * 1024 ** 3
+        assert HeartbeatResponse.model_validate(d) == msg
+
+    def test_system_info_disk_quota_fields_roundtrip(self) -> None:
+        """DQ.6 — worker reports its current view back via SystemInfo."""
+        msg = SystemInfo(
+            disk_usage_bytes=2 * 1024 ** 3,
+            disk_quota_bytes=10 * 1024 ** 3,
+            last_eviction_freed_bytes=512 * 1024 ** 2,
+        )
+        d = msg.model_dump()
+        assert d["disk_usage_bytes"] == 2 * 1024 ** 3
+        assert d["disk_quota_bytes"] == 10 * 1024 ** 3
+        assert d["last_eviction_freed_bytes"] == 512 * 1024 ** 2
+        assert SystemInfo.model_validate(d) == msg
+
+    def test_system_info_disk_quota_fields_default_none(self) -> None:
+        msg = SystemInfo()
+        assert msg.disk_usage_bytes is None
+        assert msg.disk_quota_bytes is None
+        assert msg.last_eviction_freed_bytes is None
+
     def test_heartbeat_response_stream_logs_omitted_is_none(self) -> None:
         # No flag = no change from the worker's current state. Default must
         # be None so we can distinguish "unchanged" from "stop".

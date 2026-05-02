@@ -1505,6 +1505,16 @@ def create_app() -> web.Application:
     from worker_tags import WorkerTagStore  # noqa: PLC0415
     app["worker_tag_store"] = WorkerTagStore(path="/data/worker-tags.json")
 
+    # DQ.2: persistent per-worker disk-quota override store. Same identity
+    # scheme as worker_tag_store. None = inherit fleet default
+    # (AppSettings.default_worker_disk_quota_bytes). The server pushes the
+    # effective value to each worker on every heartbeat so a UI edit
+    # propagates within one heartbeat tick without a worker restart.
+    from worker_disk_quotas import WorkerDiskQuotaStore  # noqa: PLC0415
+    app["worker_disk_quota_store"] = WorkerDiskQuotaStore(
+        path="/data/worker-disk-quotas.json",
+    )
+
     # TG.2: routing-rule store. JSON-backed list of "when device matches X,
     # worker must match Y" rules. The eligibility evaluator uses this list
     # at job-claim time; TG.4's REST endpoints (create/update/delete) and

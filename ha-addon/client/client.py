@@ -139,6 +139,29 @@ def _parse_tags_env(raw: Optional[str]) -> Optional[list[str]]:
     return [p for p in parts if p]
 WORKER_TAGS = _parse_tags_env(os.environ.get("WORKER_TAGS"))
 WORKER_TAGS_OVERWRITE = os.environ.get("WORKER_TAGS_OVERWRITE", "0").strip().lower() in ("1", "true", "yes")
+# DQ.9: per-worker disk-quota override baked into the docker invocation.
+# Integer GiB; converted to bytes on the wire. The server seeds its
+# persistent override from this on the *first* registration; subsequent
+# heartbeats push the effective value (override ?? fleet default) back
+# to us via HeartbeatResponse.set_disk_quota_bytes — see _current_disk_quota.
+def _parse_disk_quota_gb_env(raw: Optional[str]) -> Optional[int]:
+    if raw is None or not raw.strip():
+        return None
+    try:
+        gb = int(raw.strip())
+    except ValueError:
+        logger.warning("Ignoring invalid WORKER_DISK_QUOTA_GB=%r (not an integer)", raw)
+        return None
+    if gb < 1:
+        logger.warning("Ignoring invalid WORKER_DISK_QUOTA_GB=%d (must be ≥ 1)", gb)
+        return None
+    return gb * 1024 ** 3
+WORKER_DISK_QUOTA_BYTES = _parse_disk_quota_gb_env(os.environ.get("WORKER_DISK_QUOTA_GB"))
+# DQ.9: emergency host-disk floor — same default as version_manager (10%);
+# triggers an out-of-quota sweep in disk_quota.host_disk_floor when host
+# free% drops below this regardless of our usage. Workers share the disk
+# with HA core, Docker, and logs.
+MIN_FREE_DISK_PCT = int(os.environ.get("MIN_FREE_DISK_PCT", "10"))
 ESPHOME_BIN = os.environ.get("ESPHOME_BIN")  # If set, skip version manager
 ESPHOME_SEED_VERSION = os.environ.get("ESPHOME_SEED_VERSION")  # Pre-download on startup
 # Base directory for per-slot PlatformIO core dirs (avoids cross-slot conflicts)
@@ -181,6 +204,68 @@ _reregister_needed: threading.Event = threading.Event()  # set by heartbeat on 4
 # new jobs while it's set, so the cache only gets wiped on a quiescent
 # worker — never mid-compile.
 _clean_pending: threading.Event = threading.Event()
+
+# DQ.9: thread-safe disk-quota cell. Boot-time default = WORKER_DISK_QUOTA_GB
+# env var (or None — meaning "no opinion, use whatever the server sends").
+# The heartbeat handler stores HeartbeatResponse.set_disk_quota_bytes here
+# on every response so a UI edit (or a fleet-default change) propagates
+# within one heartbeat tick without a worker restart. ``last_eviction_freed_bytes``
+# is the bytes freed by the most recent post-job sweep — surfaced in
+# system_info so the UI can show "evicted N bytes" toasts.
+_disk_quota_lock: threading.Lock = threading.Lock()
+_current_disk_quota_bytes: Optional[int] = WORKER_DISK_QUOTA_BYTES
+_last_eviction_freed_bytes: int = 0
+# DQ.9: active-set tracker for pinning during eviction sweeps. run_job
+# uses ``active_job_set.pin(...)`` while a compile is in flight; the
+# disk_quota engine reads ``snapshot()`` to know which dirs are off-limits.
+from disk_quota import ActiveJobSet  # noqa: E402, PLC0415
+_active_job_set: ActiveJobSet = ActiveJobSet()
+
+
+def _get_current_disk_quota_bytes() -> Optional[int]:
+    with _disk_quota_lock:
+        return _current_disk_quota_bytes
+
+
+def _set_current_disk_quota_bytes(value: Optional[int]) -> None:
+    global _current_disk_quota_bytes
+    with _disk_quota_lock:
+        _current_disk_quota_bytes = value
+
+
+def _record_eviction_freed_bytes(freed: int) -> None:
+    global _last_eviction_freed_bytes
+    with _disk_quota_lock:
+        _last_eviction_freed_bytes = freed
+
+
+def _get_last_eviction_freed_bytes() -> int:
+    with _disk_quota_lock:
+        return _last_eviction_freed_bytes
+
+
+def _build_system_info() -> "SystemInfo":  # noqa: F821
+    """Collect sysinfo + enrich with the disk-quota engine's current view.
+
+    Kept as a helper so register and heartbeat both surface the same
+    ``disk_usage_bytes`` / ``disk_quota_bytes`` / ``last_eviction_freed_bytes``
+    triple (DQ.6). ``compute_usage`` is a single os.scandir walk per call —
+    not free, but heartbeats are 10s apart and the dir's small.
+    """
+    import disk_quota  # noqa: PLC0415
+
+    sysinfo_dict = collect_system_info(_ESPHOME_VERSIONS_DIR)
+    base = Path(_ESPHOME_VERSIONS_DIR)
+    if base.exists():
+        try:
+            sysinfo_dict["disk_usage_bytes"] = disk_quota.compute_usage(base).total_bytes
+        except Exception:
+            logger.debug("disk_quota.compute_usage failed", exc_info=True)
+    quota = _get_current_disk_quota_bytes()
+    if quota is not None:
+        sysinfo_dict["disk_quota_bytes"] = quota
+    sysinfo_dict["last_eviction_freed_bytes"] = _get_last_eviction_freed_bytes()
+    return SystemInfo.model_validate(sysinfo_dict)
 
 
 def _is_idle() -> bool:
@@ -327,9 +412,10 @@ def register() -> str:
                 image_version=IMAGE_VERSION,
                 client_id=existing_id,
                 max_parallel_jobs=MAX_PARALLEL_JOBS,
-                system_info=SystemInfo.model_validate(sysinfo),
+                system_info=_build_system_info(),
                 tags=WORKER_TAGS,
                 overwrite_tags=WORKER_TAGS_OVERWRITE,
+                disk_quota_bytes=WORKER_DISK_QUOTA_BYTES,
             )
             resp = post("/api/v1/workers/register", req.model_dump(exclude_none=True))
             resp.raise_for_status()
@@ -577,6 +663,77 @@ def _clean_build_cache() -> None:
 
 
 # ---------------------------------------------------------------------------
+# DQ.9: disk-quota sweep — runs at startup, between jobs, and after a
+# heartbeat brings a lower set_disk_quota_bytes. Logs one tidy summary
+# line per sweep ("evicted: 0 orphans, 1 stale venv, ...") so the user
+# can spot eviction churn in the worker log without trawling per-file
+# logs.
+# ---------------------------------------------------------------------------
+
+
+def _run_disk_quota_sweep(
+    *,
+    label: str,
+    prune_orphans_first: bool = False,
+) -> None:
+    """Run :func:`disk_quota.enforce_quota` (and optionally :func:`prune_orphans`)
+    against the current effective quota.
+
+    Safe to call from any thread. No-op when no quota is in effect (e.g.
+    a worker that hasn't received its first heartbeat yet — the sweep
+    will run on the next trigger). Updates ``_last_eviction_freed_bytes``
+    so the next heartbeat surfaces the result via ``system_info``.
+    """
+    import disk_quota  # noqa: PLC0415
+
+    quota = _get_current_disk_quota_bytes()
+    if quota is None:
+        # Pre-first-heartbeat OR explicit "no override; server hasn't replied
+        # yet" — skip silently. We'll catch up on the next trigger.
+        return
+
+    base = Path(_ESPHOME_VERSIONS_DIR)
+    if not base.exists():
+        return
+
+    pinned = _active_job_set.snapshot()
+    total_freed = 0
+    summary_parts: list[str] = []
+
+    if prune_orphans_first:
+        orphan_result = disk_quota.prune_orphans(base, max_slots=MAX_PARALLEL_JOBS)
+        total_freed += orphan_result.freed_bytes
+        if orphan_result.orphan_slots_evicted:
+            summary_parts.append(f"{orphan_result.orphan_slots_evicted} orphans")
+
+    quota_result = disk_quota.enforce_quota(base, quota, pinned=pinned)
+    total_freed += quota_result.freed_bytes
+    if quota_result.venvs_evicted:
+        summary_parts.append(f"{quota_result.venvs_evicted} stale venv(s)")
+    if quota_result.targets_evicted:
+        summary_parts.append(f"{quota_result.targets_evicted} target(s)")
+    if quota_result.pio_slots_evicted:
+        summary_parts.append(f"{quota_result.pio_slots_evicted} pio-slot(s)")
+
+    floor_result = disk_quota.host_disk_floor(base, MIN_FREE_DISK_PCT, pinned=pinned)
+    total_freed += floor_result.freed_bytes
+    if floor_result.freed_bytes > 0:
+        summary_parts.append(f"+{floor_result.freed_bytes} B (host-disk floor)")
+
+    _record_eviction_freed_bytes(total_freed)
+
+    usage = disk_quota.compute_usage(base).total_bytes
+    summary = ", ".join(summary_parts) if summary_parts else "nothing"
+    logger.info(
+        "disk-quota[%s]: %.1f / %.1f GiB — evicted: %s",
+        label,
+        usage / 1024 ** 3,
+        quota / 1024 ** 3,
+        summary,
+    )
+
+
+# ---------------------------------------------------------------------------
 # WL.2: pull-when-watched log pusher
 # ---------------------------------------------------------------------------
 
@@ -801,7 +958,7 @@ def heartbeat_loop(client_id: str, stop_event: threading.Event) -> None:
         try:
             hb = HeartbeatRequest(
                 client_id=client_id,
-                system_info=SystemInfo.model_validate(collect_system_info(_ESPHOME_VERSIONS_DIR)),
+                system_info=_build_system_info(),
             )
             resp = post("/api/v1/workers/heartbeat", hb.model_dump(exclude_none=True))
             if resp.status_code == 401:
@@ -840,6 +997,20 @@ def heartbeat_loop(client_id: str, stop_event: threading.Event) -> None:
                             "Worker update available: local=%s server=%s", CLIENT_VERSION, sv
                         )
                         _update_available.set()
+                # DQ.9: server pushes the effective disk quota on every
+                # heartbeat. Lower-quota transitions trigger an immediate
+                # sweep so the worker doesn't keep sitting on bytes the
+                # operator just told it to evict.
+                new_quota = data.set_disk_quota_bytes
+                if new_quota is not None:
+                    prev_quota = _get_current_disk_quota_bytes()
+                    if prev_quota != new_quota:
+                        _set_current_disk_quota_bytes(new_quota)
+                        if prev_quota is not None and new_quota < prev_quota:
+                            try:
+                                _run_disk_quota_sweep(label="quota-lowered")
+                            except Exception:
+                                logger.exception("disk-quota: sweep on lower quota failed")
                 # Check for max_parallel_jobs config change from UI
                 new_jobs = data.set_max_parallel_jobs
                 if new_jobs is not None and new_jobs != MAX_PARALLEL_JOBS:
@@ -1324,6 +1495,11 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
     target_stem = os.path.splitext(target)[0]
     build_dir = _slot_dir(worker_id, target_stem)
     os.makedirs(build_dir, exist_ok=True)
+    # DQ.9: pin the venv + target stem + slot for the duration of the
+    # job so the disk-quota engine doesn't evict files we're using.
+    # Refcounted so two parallel jobs on the same target both protect it.
+    pin_cm = _active_job_set.pin(esphome_version, target_stem, worker_id)
+    pin_cm.__enter__()
     try:
         # Seed this slot's .pio/.esphome from the shared cache if this is
         # the first compile of this target on this slot. No-op otherwise.
@@ -1561,6 +1737,22 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
         _log_context.current_target = None
         with _active_jobs_lock:
             _active_jobs -= 1
+        # DQ.9: drop the disk-quota pin first so the post-job sweep can
+        # reclaim caches our slot will no longer touch. The exception
+        # path is fine — pin_cm.__exit__ accepts the exc tuple shape
+        # contextlib injected, but here we bail without exception data
+        # and let the running exception propagate via the outer try.
+        try:
+            pin_cm.__exit__(None, None, None)
+        except Exception:
+            logger.exception("disk-quota: pin __exit__ raised")
+        # DQ.9: post-job sweep — same trigger point as _sync_slot_into_cache
+        # was already running. If the quota cell hasn't been seeded yet
+        # (no heartbeat reply yet) the sweep is a no-op.
+        try:
+            _run_disk_quota_sweep(label="post-job")
+        except Exception:
+            logger.exception("disk-quota: post-job sweep failed")
         # #13: intentionally NOT cleaning up build_dir — the .esphome/
         # subdirectory contains PlatformIO's compiled object cache. Keeping
         # it turns a 60-90s full compile into a 5-10s incremental build.
@@ -2091,6 +2283,16 @@ def main() -> None:
             logger.info("ESPHome %s ready", ESPHOME_SEED_VERSION)
         except Exception as exc:
             logger.warning("Failed to pre-seed ESPHome %s: %s", ESPHOME_SEED_VERSION, exc)
+
+    # DQ.9: startup sweep — prune orphan slot dirs (slot ids >= MAX_PARALLEL_JOBS,
+    # left over from a higher-slot-count run) and run the byte-bound enforce.
+    # The quota cell may still be None at this point (no heartbeat yet); in
+    # that case enforce_quota is a no-op and the first heartbeat will trigger
+    # a sweep if the server pushes a smaller quota than we have on disk.
+    try:
+        _run_disk_quota_sweep(label="startup", prune_orphans_first=True)
+    except Exception:
+        logger.exception("disk-quota: startup sweep failed")
 
     # Register with server
     client_id = register()

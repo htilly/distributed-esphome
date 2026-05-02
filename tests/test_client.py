@@ -834,3 +834,134 @@ def test_is_broken_pio_state_ignores_non_corruption_failures(log_excerpt):
     import client as client_module  # noqa: PLC0415
 
     assert client_module._is_broken_pio_state(log_excerpt) is False
+
+
+# ---------------------------------------------------------------------------
+# DQ.8 — version manager defaults to 1 venv; legacy MAX_ESPHOME_VERSIONS warns
+# ---------------------------------------------------------------------------
+
+
+def test_version_manager_module_default_is_1():
+    """DQ.8: the module-level constant is 1 — disk_quota engine bounds the rest."""
+    import version_manager as vm_mod  # noqa: PLC0415
+
+    assert vm_mod.MAX_ESPHOME_VERSIONS == 1
+
+
+# ---------------------------------------------------------------------------
+# DQ.9 — disk-quota wiring in client.py
+# ---------------------------------------------------------------------------
+
+
+def test_parse_disk_quota_gb_env_accepts_integer():
+    import client as client_mod  # noqa: PLC0415
+    assert client_mod._parse_disk_quota_gb_env("5") == 5 * 1024 ** 3
+
+
+def test_parse_disk_quota_gb_env_rejects_non_integer():
+    import client as client_mod  # noqa: PLC0415
+    assert client_mod._parse_disk_quota_gb_env("5.5") is None
+    assert client_mod._parse_disk_quota_gb_env("abc") is None
+
+
+def test_parse_disk_quota_gb_env_rejects_below_one():
+    import client as client_mod  # noqa: PLC0415
+    assert client_mod._parse_disk_quota_gb_env("0") is None
+    assert client_mod._parse_disk_quota_gb_env("-1") is None
+
+
+def test_parse_disk_quota_gb_env_treats_blank_as_none():
+    import client as client_mod  # noqa: PLC0415
+    assert client_mod._parse_disk_quota_gb_env(None) is None
+    assert client_mod._parse_disk_quota_gb_env("") is None
+    assert client_mod._parse_disk_quota_gb_env("   ") is None
+
+
+def test_disk_quota_cell_round_trip():
+    import client as client_mod  # noqa: PLC0415
+    prev = client_mod._get_current_disk_quota_bytes()
+    try:
+        client_mod._set_current_disk_quota_bytes(7 * 1024 ** 3)
+        assert client_mod._get_current_disk_quota_bytes() == 7 * 1024 ** 3
+        client_mod._set_current_disk_quota_bytes(None)
+        assert client_mod._get_current_disk_quota_bytes() is None
+    finally:
+        client_mod._set_current_disk_quota_bytes(prev)
+
+
+def test_run_disk_quota_sweep_no_op_when_quota_unset(tmp_path, monkeypatch):
+    """DQ.9: pre-first-heartbeat the cell is None; sweep skips silently."""
+    import client as client_mod  # noqa: PLC0415
+
+    monkeypatch.setattr(client_mod, "_ESPHOME_VERSIONS_DIR", str(tmp_path))
+    prev = client_mod._get_current_disk_quota_bytes()
+    try:
+        client_mod._set_current_disk_quota_bytes(None)
+        # Should not raise even though disk_quota engine has nothing to do.
+        client_mod._run_disk_quota_sweep(label="test")
+        assert client_mod._get_last_eviction_freed_bytes() == 0
+    finally:
+        client_mod._set_current_disk_quota_bytes(prev)
+
+
+def test_run_disk_quota_sweep_evicts_when_over_quota(tmp_path, monkeypatch):
+    """DQ.9: when the cell is set and tree is over budget, sweep evicts."""
+    import client as client_mod  # noqa: PLC0415
+
+    # Make a tiny synthetic tree: one venv + one cache target.
+    (tmp_path / "2026.4.3" / "bin").mkdir(parents=True)
+    (tmp_path / "2026.4.3" / "bin" / "esphome").write_bytes(b"")
+    (tmp_path / "2026.4.3" / "lib").mkdir()
+    (tmp_path / "2026.4.3" / "lib" / "padding").write_bytes(b"\x00" * 100)
+
+    cache = tmp_path / "cache" / "device-a"
+    cache.mkdir(parents=True)
+    (cache / "blob").write_bytes(b"\x00" * 5000)
+
+    monkeypatch.setattr(client_mod, "_ESPHOME_VERSIONS_DIR", str(tmp_path))
+    prev = client_mod._get_current_disk_quota_bytes()
+    try:
+        # Quota tight enough that the cache must go (only the venv fits).
+        client_mod._set_current_disk_quota_bytes(500)
+        client_mod._run_disk_quota_sweep(label="test")
+        assert not (tmp_path / "cache" / "device-a").exists()
+        assert client_mod._get_last_eviction_freed_bytes() > 0
+    finally:
+        client_mod._set_current_disk_quota_bytes(prev)
+
+
+def test_active_job_set_pin_protects_target(tmp_path, monkeypatch):
+    """DQ.9: a pinned target survives even when sweep would otherwise evict it."""
+    import client as client_mod  # noqa: PLC0415
+
+    cache = tmp_path / "cache" / "stem-a"
+    cache.mkdir(parents=True)
+    (cache / "blob").write_bytes(b"\x00" * 5000)
+
+    monkeypatch.setattr(client_mod, "_ESPHOME_VERSIONS_DIR", str(tmp_path))
+    prev = client_mod._get_current_disk_quota_bytes()
+    try:
+        client_mod._set_current_disk_quota_bytes(100)  # very tight
+        with client_mod._active_job_set.pin("2026.4.3", "stem-a", 1):
+            client_mod._run_disk_quota_sweep(label="test")
+            assert (tmp_path / "cache" / "stem-a").exists()
+    finally:
+        client_mod._set_current_disk_quota_bytes(prev)
+
+
+def test_default_constructed_version_manager_collapses_to_one(tmp_path):
+    """DQ.8: VersionManager() (no override) keeps at most one venv."""
+    _add_fake_version(tmp_path, "2026.4.1")
+    _add_fake_version(tmp_path, "2026.4.2")
+    _add_fake_version(tmp_path, "2026.4.3")
+
+    vm_one = VersionManager(versions_base=tmp_path)
+    # The constructor's _load_existing accepted all 3 from disk; after the
+    # first ensure_version-style call, the count cap kicks in. Direct
+    # eviction call to verify the cap is 1.
+    assert len(vm_one.installed_versions()) == 3
+    # Force eviction via the internal helper used by ensure_version.
+    while len(vm_one.installed_versions()) > vm_one._max_versions:
+        with vm_one._lock:
+            vm_one._evict_lru(keep_version=None)
+    assert len(vm_one.installed_versions()) == 1

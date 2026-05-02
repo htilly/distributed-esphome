@@ -74,3 +74,30 @@ test('SERVER_URL value matches the live /ui/api/server-info url across every for
     expect(cmd, `${fmt} branch`).toContain(expected);
   }
 });
+
+// DQ.17 — disk-quota field on the Connect Worker modal.
+
+test('disk-quota field defaults to "use fleet default" → no env var emitted', async ({ page }) => {
+  // Default mode is selected on initial render — the user did not flip
+  // the radio to "Custom", so WORKER_DISK_QUOTA_GB must not be baked
+  // into any of the three output formats.
+  for (const fmt of ['bash', 'powershell', 'compose'] as const) {
+    const cmd = await commandFor(page, fmt);
+    expect(cmd, `${fmt} branch should NOT carry WORKER_DISK_QUOTA_GB in default mode`)
+      .not.toContain('WORKER_DISK_QUOTA_GB');
+  }
+});
+
+test('disk-quota field "Custom" mode bakes WORKER_DISK_QUOTA_GB into every format', async ({ page }) => {
+  const dialog = page.getByRole('dialog');
+  await dialog.getByLabel('Disk quota in GiB').waitFor();
+  // Flip to Custom + set 5 GiB.
+  await dialog.locator('input[type="radio"][value="custom"]').check();
+  await dialog.getByLabel('Disk quota in GiB').fill('5');
+
+  for (const fmt of ['bash', 'powershell', 'compose'] as const) {
+    const cmd = await commandFor(page, fmt);
+    expect(cmd, `${fmt} branch should carry WORKER_DISK_QUOTA_GB=5 in custom mode`)
+      .toMatch(/WORKER_DISK_QUOTA_GB=5\b/);
+  }
+});

@@ -79,6 +79,19 @@ class SystemInfo(_ProtocolMessage):
     disk_total: Optional[str] = None
     disk_free: Optional[str] = None
     disk_used_pct: Optional[int] = None
+    # DQ.6: worker's view of the disk-quota engine's most recent state.
+    # ``disk_usage_bytes`` is the engine's measured byte total under
+    # ``/esphome-versions/`` (venvs + caches + slots + pio-slots).
+    # ``disk_quota_bytes`` is the effective quota the worker is enforcing
+    # against — usually identical to whatever the server most recently
+    # pushed via ``HeartbeatResponse.set_disk_quota_bytes`` but kept here
+    # so the UI sees what the worker is actually using rather than what
+    # the server thinks it pushed. ``last_eviction_freed_bytes`` is the
+    # bytes freed by the most recent post-job sweep — useful for the UI
+    # to surface "evicted N bytes" toasts.
+    disk_usage_bytes: Optional[int] = None
+    disk_quota_bytes: Optional[int] = None
+    last_eviction_freed_bytes: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +116,13 @@ class RegisterRequest(_ProtocolMessage):
     # always wins" behaviour for scripted multi-worker deployments.
     tags: Optional[list[str]] = None
     overwrite_tags: bool = False
+    # DQ.6: worker's boot-time disk-quota override (from the
+    # ``WORKER_DISK_QUOTA_GB`` env var, converted to bytes by the
+    # client). Server seeds the persistent override from this on the
+    # *first* registration for the identity (mirrors the ``tags`` flow);
+    # subsequent registrations ignore it (server-side wins). ``None``
+    # means "no override; use the fleet default."
+    disk_quota_bytes: Optional[int] = None
     protocol_version: int = PROTOCOL_VERSION
 
 
@@ -128,6 +148,14 @@ class HeartbeatResponse(_ProtocolMessage):
     image_upgrade_required: Optional[bool] = None
     min_image_version: Optional[str] = None
     set_max_parallel_jobs: Optional[int] = None
+    # DQ.6: server's effective per-worker disk-quota in bytes (override
+    # from WorkerDiskQuotaStore ?? AppSettings.default_worker_disk_quota_bytes).
+    # The worker stores this in a thread-safe cell and the engine reads
+    # it on every sweep, so a UI edit propagates within one heartbeat
+    # without restarting the worker. ``None`` is unused on the wire today
+    # (server always sends a value), but kept Optional for the same
+    # forward-compat reasons as set_max_parallel_jobs.
+    set_disk_quota_bytes: Optional[int] = None
     clean_build_cache: Optional[bool] = None
     # WL.2: None = "unchanged" (default — older servers never set it).
     # True = start pushing logs at 1 Hz to /api/v1/workers/{id}/logs.

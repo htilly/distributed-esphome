@@ -24,6 +24,7 @@ import {
   removeWorker,
   renameTarget,
   setWorkerParallelJobs,
+  setWorkerDiskQuota,
   retryAllFailed,
   retryJobs,
   requestServerDiagnostics,
@@ -690,6 +691,19 @@ export default function App() {
     }
   }
 
+  async function handleSetDiskQuota(id: string, bytes: number | null) {
+    try {
+      await setWorkerDiskQuota(id, bytes);
+      const label = bytes == null
+        ? 'Cleared override — using fleet default'
+        : `Set quota to ${Math.round(bytes / (1024 ** 3))} GiB`;
+      addToast(label, 'success');
+      mutateWorkers();
+    } catch (err) {
+      addToast('Error: ' + (err as Error).message, 'error');
+    }
+  }
+
   const handleDeleteDevice = useCallback(async (target: string, archive: boolean) => {
     try {
       await deleteTarget(target, archive);
@@ -933,6 +947,7 @@ export default function App() {
             minImageVersion={serverInfo.min_image_version}
             onRemove={handleRemoveWorker}
             onSetParallelJobs={handleSetParallelJobs}
+            onSetDiskQuota={handleSetDiskQuota}
             onCleanCache={handleCleanWorkerCache}
             onCleanAllCaches={handleCleanAllCaches}
             onConnectWorker={(preset) => { setConnectModalPreset(preset ?? null); setConnectModalOpen(true); }}

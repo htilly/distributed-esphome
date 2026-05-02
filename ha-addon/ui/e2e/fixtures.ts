@@ -23,6 +23,9 @@ export const serverInfo: ServerInfo = {
   addon_version: '1.3.0-dev.4',
   server_client_version: '1.3.0-dev.4',
   min_image_version: '3',
+  // DQ.5: fleet default — used by the ConnectWorkerModal "Use fleet
+  // default (X GiB)" radio label and as the dialog's default value.
+  default_worker_disk_quota_bytes: 10 * 1024 ** 3,
 };
 
 export const esphomeVersions: EsphomeVersions = {
@@ -122,7 +125,17 @@ export const workers: Worker[] = [
       disk_total: '500 GB',
       disk_free: '350 GB',
       disk_used_pct: 30,
+      // DQ.6: worker reports its view of the disk-quota engine state.
+      // 2.1 / 10 GiB → ~21 % used — under the 80 % yellow threshold.
+      disk_usage_bytes: Math.round(2.1 * 1024 ** 3),
+      disk_quota_bytes: 10 * 1024 ** 3,
+      last_eviction_freed_bytes: 0,
     },
+    // DQ.5: GET /ui/api/workers includes both the effective quota and
+    // the persisted override (null = inherits fleet default).
+    disk_quota_bytes: 10 * 1024 ** 3,
+    disk_quota_override_bytes: null,
+    default_worker_disk_quota_bytes: 10 * 1024 ** 3,
   },
   {
     client_id: 'worker-2',
@@ -400,6 +413,28 @@ export async function mockApi(page: Page) {
   await page.route('**/ui/api/workers/*/clean', route =>
     route.fulfill({ status: 200, json: {} }),
   );
+  // DQ.5 — per-worker disk-quota override. ``null`` clears the override
+  // so the worker inherits the fleet default. Body shape:
+  // ``{disk_quota_bytes: int | null}``. Mutates the in-memory worker so
+  // a follow-up GET sees the change (mirrors the real server flow).
+  await page.route('**/ui/api/workers/*/disk-quota', async (route) => {
+    const url = new URL(route.request().url());
+    const m = url.pathname.match(/\/ui\/api\/workers\/([^/]+)\/disk-quota$/);
+    if (!m) return route.fulfill({ status: 400, json: { error: 'bad path' } });
+    const id = decodeURIComponent(m[1]);
+    let body: { disk_quota_bytes?: number | null } = {};
+    try {
+      body = JSON.parse(route.request().postData() ?? '{}');
+    } catch {
+      return route.fulfill({ status: 400, json: { error: 'bad json' } });
+    }
+    const w = workers.find(x => x.client_id === id);
+    if (w) {
+      w.disk_quota_override_bytes = body.disk_quota_bytes ?? null;
+      w.disk_quota_bytes = body.disk_quota_bytes ?? w.default_worker_disk_quota_bytes ?? 10 * 1024 ** 3;
+    }
+    return route.fulfill({ json: { ok: true, disk_quota_bytes: body.disk_quota_bytes ?? null } });
+  });
   // TG.4 — worker tag edit endpoint. Body shape: ``{tags: [str]}``. We
   // mutate the in-memory ``workers`` array so a follow-up GET reflects
   // the edit (matches how the real server's broadcast → SWR refetch

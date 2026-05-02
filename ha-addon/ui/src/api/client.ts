@@ -503,6 +503,19 @@ export async function setWorkerParallelJobs(id: string, maxParallelJobs: number)
   }), 'setting worker parallel-jobs');
 }
 
+// DQ.5: per-worker disk-quota override. ``null`` clears the override
+// so the worker inherits ``default_worker_disk_quota_bytes``.
+export async function setWorkerDiskQuota(
+  id: string,
+  diskQuotaBytes: number | null,
+): Promise<void> {
+  await expectOk(await apiFetch(`./ui/api/workers/${id}/disk-quota`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ disk_quota_bytes: diskQuotaBytes }),
+  }), 'setting worker disk-quota');
+}
+
 export async function cleanWorkerCache(id: string): Promise<void> {
   await expectOk(
     await apiFetch(`./ui/api/workers/${id}/clean`, { method: 'POST' }),
