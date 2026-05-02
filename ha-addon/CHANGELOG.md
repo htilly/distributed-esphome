@@ -1,5 +1,81 @@
 # Changelog
 
+## 1.7.0
+
+A major release built around **fleet tags + rule-based job routing**, with a stack of device-management polish, bounded worker disk, and a unified Upgrade modal on top.
+
+**User-managed tags on devices and workers, plus a routing-rule engine that decides who builds what.** Click any tag chip in the Devices or Workers tab to edit; type to add new tags; the chip-input pulls autocomplete from the fleet's existing tag pool. The new **Routing rules…** button in the Workers toolbar opens a builder with `all_of` / `any_of` / `none_of` clauses against device tags and worker tags — a rule fires when its device side matches, and then constrains job claims to workers whose tags satisfy its worker side. A live preview at the bottom of the builder counts how many devices the rule would constrain and how many online workers are eligible, recomputed on every keystroke. When a rule eliminates every eligible worker, the job lands in a new **BLOCKED** state in the queue with the rule name surfaced in the badge tooltip; click the badge to deep-link straight into the rule editor. Tags also drive bulk filtering: an above-table pill bar on the Devices and Workers tabs narrows the visible set as you click successive tags (AND-logic intersection — click `kitchen` then `prod` to see only the devices in both). Workers can be tagged at startup via the new `WORKER_TAGS=foo,bar` env var, and the Connect Worker dialog has a tags field that bakes the env var into the generated docker snippet.
+
+**The Upgrade modal is now the single source of truth for "compile this."** Per-row Upgrade, the four bulk-upgrade items (Upgrade All / Online / Outdated / Selected), and per-row Rerun all open the same modal — pick the action (Upgrade / Download / Schedule), the worker (Any / Specific / Tag expression), and the ESPHome version (Current / Other) up-front, then confirm. Tag-expression mode lets you constrain a one-off compile to "any worker tagged `windows`" without writing a full routing rule. When your worker selection conflicts with an active routing rule, the modal surfaces a warning panel listing the offending rules — click **Upgrade & override rules** to enqueue anyway. The action / worker / version sections read top-to-bottom in that order so the verb that drives every other choice lands first; the version surface collapses to a two-radio choice (Current / Other) with the picker only unfolding when needed.
+
+**Bounded worker disk usage.** Build workers used to grow their `/esphome-versions/` cache without a real upper bound — PlatformIO toolchains, per-target build caches, ESPHome venvs, all unbounded. 1.7.0 replaces the loose `MAX_ESPHOME_VERSIONS=3` count cap with a single byte budget across the whole tree (10 GiB by default, configurable in **Settings → Disk management → Worker disk quota — fleet default**). Eviction is LRU between jobs in cheapest-to-recreate order: orphan slot dirs first, then stale ESPHome venvs, then per-target build caches, then PlatformIO toolchains as a last resort. Active jobs pin the dirs they're using so a sweep can't yank a directory out from under a running compile. The Workers tab now shows `Quota: 2.1 / 10 GiB` per worker (yellow over 80 %, red over 95 %), and a **Set disk quota…** hamburger item lets you override the fleet default per worker. The Connect Worker dialog has a matching radio so a fresh worker can be sized differently from the start.
+
+**Workers self-pause when their disk fills up.** When a worker crosses 95 % disk usage a **disk full** badge appears in its Status column and the server stops handing it new jobs; it un-pauses automatically when usage drops below 90 %. Prevents the cascade of `[Errno 28] No space left on device` failures that used to happen when one worker filled up but kept claiming work — jobs are now stranded with a clear reason rather than re-failing forever.
+
+**Device-management polish inspired by [heffneil/esphome-enhanced-dashboard](https://github.com/heffneil/esphome-enhanced-dashboard).**
+
+- **Archived devices live in the same table.** The separate "Archived devices" page is gone — toggle **Show archived devices** in the Devices column-picker dropdown and archived rows render in-line at 50 % opacity below active ones, with their own reduced action menu (Unarchive / Permanently delete). Archive becomes a first-order hamburger action between **Commit changes…** and **Delete**, no confirmation modal — just a toast with the restore path. Archived rows keep their tags, area, project, comment, pinned version, schedule, network, chip, and BLE-proxy state — everything the scanner can read from raw YAML.
+- **Ping device.** New **Ping device…** entry in the Devices-tab hamburger fires 10 ICMP packets at the device's resolved OTA address and shows reachability + RTT stats. Works on every install path — the add-on now declares `NET_RAW` so HAOS installs (where unprivileged ICMP is disabled by default) fall back to raw-socket ping automatically.
+- **Install to specific address.** New **Install to address…** entry sends the OTA bundle to a hand-typed address — useful when mDNS resolves the wrong IP after a router reboot or the device just came up on a recovery network. Pre-fills with the device's current resolved address so the common case is one click; editing the field flips the button into a two-step confirm.
+
+**Read-only rendered-config view.** A **View rendered config** menu item on every device opens a Monaco-rendered, fully-resolved YAML — `!secret` references substituted, `packages:` flattened, `external_components:` realized. Useful for understanding what ESPHome will actually see, and for diffing against a previous version before pushing. The output is cached by file mtime so reopening during one edit session is instant; a `!secret` swap re-renders even when the device YAML is byte-identical. The header carries an explicit "this view contains plaintext secret values — copy with care" notice.
+
+**Tighter compile pipeline on home labs and slow workers.**
+
+- **Workers self-heal corrupted PlatformIO toolchains mid-compile.** When a build fails with `cc1: posix_spawnp: No such file or directory`, missing `framework-arduinoespressif32-libs`, half-installed `esptool`, or "not a Python project" from a half-extracted package, the worker now wipes the broken `pio-slot-N/packages/` and `pio-slot-N/penv/` directories and retries the same job in-process. The first job to hit the breakage takes a 5–10 min toolchain re-download tax; every subsequent job lands on a fresh tree. Pre-fix, an operator had to ssh to the worker host and `rm -rf` by hand.
+- The **Clean Cache** button on the Workers tab no longer wipes ESPHome venvs or PlatformIO toolchains — it now clears only the volatile build outputs, so the next compile doesn't pay the toolchain re-download tax. Venv / toolchain lifecycle is bounded by the new disk quota, not by Clean Cache clicks.
+- Bundle creation is serialised across concurrent job claims so two parallel compiles can't corrupt the same `<config>/.esphome/<repo>/<sha>/` git checkout. Eliminates the cold-cache race where a 7-job batch sharing the same `external_components` repo could fail with five different "phantom" errors.
+- ESPHome's INFO / WARNING chatter no longer decorates bundle-failure logs in the Queue Log modal — only the actual error reaches the captured stream. The known-false-positive `Including a single package under \`packages:\` is deprecated` warning from ESPHome 2026.4.3 also stops appearing.
+- **Firmware retention.** New `firmware_retention_days` Settings field (default 2, range 0..3650, 0 = unlimited) — successful compile binaries older than the configured window are evicted. Pairs with adding `firmware/` to the add-on's `backup_exclude` so a HA snapshot no longer carries 200+ MB of regenerable binaries; a typical install drops from ~237 MB → ~2 MB per partial-addon backup.
+
+**Smaller fleet-management wins.**
+
+- Queue row actions reshape: **Rerun · Clear · Log** are inline (Rerun replaces the historical Retry/Rerun split — same action either way). Everything else (Cancel, Download firmware, Edit YAML, plus the full Devices-tab Device-section actions: Live Logs, Compile history, Restart, Copy API Key, Ping device, Install to address) collapses behind a per-row hamburger.
+- Per-row **Rerun** opens the unified Upgrade modal pre-seeded with the original job's worker / version / action / tag-filter, so you can tweak any field before re-submitting. Bulk **Rerun All Failed** / **Rerun Selected** keep the immediate path because there's no single set of params to pre-seed.
+- Queue's worker-selection cell now stacks **what the user asked for** (any worker / specific worker / tag expression with chips) on top, **why this worker won** (Pinned / Only eligible / Least busy / Fastest / First to poll) below — read the whole routing story off one cell. Distinct selection reasons surface the case where a routing rule narrowed eligibility to a single worker (no race, just no other choice) versus a real "first-to-poll" win between equally-eligible workers.
+- New **Commit all uncommitted** entry in the Devices Action dropdown commits every dirty YAML in the config dir in one shot, with an optional commit message that applies to every commit. Label includes a live count `(N)` so you see what's queued before clicking; disabled when nothing's dirty.
+- New **Upgrade Changed** bulk action upgrades every device whose YAML has drifted since its last successful compile (distinct from **Upgrade Outdated**, which targets firmware-version mismatch).
+- Bulk **Archive Selected** / **Unarchive Selected** items in the Devices Action menu — operate only on rows where the action is meaningful; mixed selections leave the matching item disabled with a tooltip.
+- New optional Devices-tab columns: **Platform** (chip family + PlatformIO board, e.g. `ESP32-S3` over `esp32-s3-devkitm-1`) and **BLE proxy** (off / passive / active). Both default off — opt in via the column picker.
+- The address-source label under the IP cell now carries a per-source explanatory tooltip (`Detected via ARP scan…`, `From wifi.use_address in the device YAML…`) instead of the raw enum name.
+
+**Home Assistant action surface.** `esphome_fleet.compile` and `esphome_fleet.validate` services now accept a `tags` list + optional `tags_op` matcher (`any_of` default; `all_of` / `none_of` available). Compile a tag-defined subset of your fleet from a HA automation without naming each device.
+
+**Bug fixes users will notice.**
+
+- The **Last compiled** column on the Devices tab is now populated for every device that's running ESPHome firmware, even when the server has no compile history for it — falls back to parsing the device-reported build time, marked `~` to signal it's not server-recorded. Pre-fix any target without server-side history showed a bare "—".
+- Devices that compose their `esphome:` block via `packages:` / `<<: !include` now keep their friendly-name and area when archived (was rendering the bare filename pre-fix).
+- Archived devices show **Archived** with a muted dot in the Status column instead of stuck on "Checking…" indefinitely.
+- Tag editing is disabled on archived devices on every surface — writes to YAMLs in `.archive/` are no-ops, so making them appear editable was dishonest UX.
+- Reconfigure form's submit button reads **Save changes** instead of HA's stock "Submit".
+- Worker-selection-reason label has a short variant on narrower screens (`Fastest` instead of `Fastest worker available`) so it stops overflowing the cell on a 13-inch laptop. Long form returns at ≥1280 px; tooltip carries the long context regardless.
+- Devices "config changed" badge reflects the same `git status` source as everything else, so the per-row Upgrade button highlight and the badge can't disagree.
+- Restoring a device from `.archive/` flips the **Restore from archive** toolbar button off immediately instead of waiting for a manual reload.
+- `fmtEpochRelative` produces clean integer-second strings ("4s ago", "12s ago") instead of fractional ones ("4.327s ago").
+- The Ping result table no longer overflows the modal on narrow viewports (rebuilt as a `<dl>` grid that wraps RTT triples instead of forcing horizontal scroll).
+- **Tag chip palette redesigned for visual distinctness** — 17 perceptibly-different hues plus a darker secondary band (25 colors total), so a row of 4 tags reads as 4 distinct colors at a glance instead of "two reds, two greens".
+- Chip-input editor with X-to-remove and inline-add — type Enter or comma to commit, Backspace on an empty input drops the last chip, autocomplete dropdown filtered by substring; pulls suggestions from the fleet's existing tag pool.
+
+**Smaller changes.**
+
+- Hash-based tag chip colors — same tag string maps to the same color across rows, tabs, and refreshes, regardless of theme.
+- Date-format picker companion to the existing time-format picker (`auto` / `iso` / `us` / `eu` / `long`).
+- Workers tab Tags column moved to position 2 (right after Hostname) to mirror the Devices-tab layout.
+- Live build-cache cleans defer until the worker is idle — used to truncate `.esphome/build/` mid-compile and silently break the OTA upload.
+- Connect Worker dialog snippet picks up two new optional flags: `WORKER_TAGS=foo,bar` (when the new Tags field is non-empty) and `WORKER_DISK_QUOTA_GB=N` (when the disk-quota radio is set to Custom). Default mode emits neither so the snippet stays clean for users who don't care about either feature yet.
+- New device-meta keys flow through automatic commits with specific subjects (`Updated device tags`, `Pinned ESPHome version`, `Updated routing rules`, …) so `git log` reads as a coherent activity feed rather than a stream of generic "Updated device metadata" entries.
+
+**Under the hood.**
+
+- A new server-wide `asyncio.Lock` serialises bundle creation across concurrent job claims, eliminating a cold-cache race in `esphome.git.clone_or_update` (filed upstream).
+- Bundle subprocesses no longer leak ESPHome's logger chatter into captured stderr — only our explicit error messages (and uncaught Python tracebacks) reach the Queue Log modal.
+- New PY-11 invariant: every UI-driven file mutation under `/config/esphome/` must leave the git working tree clean. Backed by a 12-scenario regression test that drives every file-mutating endpoint and asserts `git status --porcelain` is empty afterward.
+- 27 honest tests for the routing-rule evaluator (each operator, each clause shape, conditional pass/fail, multi-rule AND, store CRUD + persistence, additive composition with per-device `routing_extra`).
+- 23 tests for the disk-quota engine (per-category accounting, eviction order across all four categories, pinning, idempotency, sweep on lowered quota, host-disk-floor emergency override, refcounted active-job pinning, thread safety).
+- A live-HA Playwright spec walks the full routing-rule round-trip on the smoke target: tag a device, create a rule whose worker side requires an unreachable tag, queue a compile, assert it lands BLOCKED, delete the rule, watch the job leave BLOCKED and run to success.
+- The published add-on image now declares `privileged: [NET_RAW]` so the ICMP ping diagnostic works on HAOS without a host-side `net.ipv4.ping_group_range` override.
+- ESPHome compile-test CI now matrixes on two ESPHome versions (the `MIN_ESPHOME_VERSION` floor + latest stable), per platform/framework, so an upstream API regression at either edge surfaces as a single red square.
+
 ## 1.6.2
 
 A hardening release on top of 1.6.1.
