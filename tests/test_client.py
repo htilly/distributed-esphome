@@ -784,6 +784,46 @@ def test_wipe_broken_toolchain_swallows_rmtree_failure(tmp_path, monkeypatch):
     assert client_module._wipe_broken_toolchain(str(pio_dir)) is False
 
 
+def test_wipe_broken_toolchain_recovers_from_strict_rmtree_enoent_mid_walk(tmp_path, monkeypatch):
+    """Live repro on AI-MacBook-Pro 2026-05-02: strict ``shutil.rmtree``
+    raised ``FileNotFoundError: 'CMakeLists.txt'`` mid-walk on
+    ``packages/`` (concurrent mutator / already-removed inode), the
+    single-pass wipe abandoned the rest of the subtree, and the four
+    follow-up screek-2a-N compiles cascaded on the half-rotted state.
+    After the strict pass raises a benign ENOENT, the wipe must do a
+    lenient ``ignore_errors=True`` sweep so the next compile gets a
+    clean slate.
+    """
+    import client as client_module  # noqa: PLC0415
+
+    pio_dir = tmp_path / "pio-slot-1"
+    # Real on-disk state — the strict pass will be intercepted but the
+    # lenient sweep needs an actual tree to clean.
+    (pio_dir / "packages" / "tool-esptoolpy").mkdir(parents=True)
+    (pio_dir / "packages" / "tool-esptoolpy" / "leftover").write_text("partially-extracted")
+    (pio_dir / "penv" / "bin").mkdir(parents=True)
+    (pio_dir / "penv" / "bin" / "esptool").write_text("broken-script")
+
+    real_rmtree = client_module.shutil.rmtree
+    strict_seen = {"count": 0}
+
+    def flaky_rmtree(path, ignore_errors=False):
+        if not ignore_errors:
+            strict_seen["count"] += 1
+            # Mirror the live error string — relative inner filename.
+            raise FileNotFoundError(2, "No such file or directory", "CMakeLists.txt")
+        return real_rmtree(path, ignore_errors=True)
+
+    monkeypatch.setattr(client_module.shutil, "rmtree", flaky_rmtree)
+
+    assert client_module._wipe_broken_toolchain(str(pio_dir)) is True
+    # Both subtrees were ultimately swept by the lenient retry, even
+    # though the strict pass raised on each.
+    assert not (pio_dir / "packages").exists()
+    assert not (pio_dir / "penv").exists()
+    assert strict_seen["count"] == 2  # one strict attempt per subtree
+
+
 # ---------------------------------------------------------------------------
 # #220 — _is_broken_pio_state — every distinct corruption symptom we've
 # seen in the home lab must trigger the self-heal path. New patterns get

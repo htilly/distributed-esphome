@@ -46,7 +46,7 @@ from sysinfo import collect_system_info
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.7.0"
+CLIENT_VERSION = "1.8.0-dev.1"
 
 
 def _read_image_version() -> Optional[str]:
@@ -542,16 +542,41 @@ def _wipe_broken_toolchain(pio_dir: str) -> bool:
         logger.warning("[#214/#219] disk_usage probe failed on %s: %s", pio_dir, exc)
     wiped_any = False
     for target in existing:
+        logger.warning(
+            "[#214] wiping broken PlatformIO state at %s — next compile will "
+            "re-fetch (~5–10 min cold).",
+            target,
+        )
+        # ef-2n2: two-pass wipe. The strict first pass surfaces real
+        # problems (read-only fs, EPERM) in the log. If it raises a
+        # benign mid-walk ENOENT — the live AI-MacBook-Pro repro on
+        # 2026-05-02 was ``FileNotFoundError: 'CMakeLists.txt'``, a
+        # concurrent mutator or already-removed inode — the lenient
+        # second pass sweeps whatever's left so the retry compile
+        # doesn't land on a half-rotted toolchain. ``os.path.exists``
+        # decides ``wiped_any``: a real permission failure leaves the
+        # subtree intact through both passes and returns False (the
+        # ``test_wipe_broken_toolchain_swallows_rmtree_failure`` case).
         try:
+            shutil.rmtree(target, ignore_errors=False)
+        except Exception as exc:
             logger.warning(
-                "[#214] wiping broken PlatformIO state at %s — next compile will "
-                "re-fetch (~5–10 min cold).",
+                "[#214] strict wipe of %s raised %s — sweeping leftover "
+                "state with ignore_errors=True.",
+                target, exc,
+            )
+            try:
+                shutil.rmtree(target, ignore_errors=True)
+            except Exception:
+                pass
+        if os.path.exists(target):
+            logger.warning(
+                "[#214] subtree at %s still present after wipe — retry "
+                "compile will likely fail; investigate filesystem state.",
                 target,
             )
-            shutil.rmtree(target, ignore_errors=False)
+        else:
             wiped_any = True
-        except Exception as exc:
-            logger.warning("[#214] wipe failed on %s: %s", target, exc)
     return wiped_any
 
 
