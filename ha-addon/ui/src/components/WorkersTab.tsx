@@ -100,12 +100,14 @@ function workerPlatformHtml(si: SystemInfo): React.ReactNode {
     );
   }
   // DQ.11: disk-quota engine view — shown when the worker has surfaced
-  // the new system_info fields (post-DQ.6 worker). Yellow >80%, red >95%.
+  // the new system_info fields (post-DQ.6 worker). Yellow when approaching
+  // the cap, red only when usage has actually hit it — being below quota
+  // is normal operating state, not a warning condition.
   if (si.disk_usage_bytes != null && si.disk_quota_bytes != null && si.disk_quota_bytes > 0) {
     const usageGb = si.disk_usage_bytes / (1024 ** 3);
     const quotaGb = si.disk_quota_bytes / (1024 ** 3);
     const pct = (si.disk_usage_bytes / si.disk_quota_bytes) * 100;
-    const quotaColor = pct > 95 ? 'var(--danger)' : pct > 80 ? 'var(--warn)' : 'var(--text-muted)';
+    const quotaColor = pct >= 100 ? 'var(--danger)' : pct > 80 ? 'var(--warn)' : 'var(--text-muted)';
     lines.push(
       <span
         key="quota"
