@@ -64,6 +64,9 @@ ha-addon/dist/
 
 # Local agent state
 .claude/
+.agents/
+.obsidian/
+skills-lock.json
 
 # Local deployment scripts
 push-to-hass-4.sh
