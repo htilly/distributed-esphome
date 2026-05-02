@@ -150,18 +150,18 @@ ESPHome's `importable` device list — mDNS-discovered devices with `package_imp
 
 Do not pull any of this into a scheduled release without explicit approval (per CLAUDE.md "Never reshuffle workitems between releases without an explicit ask"). The table below is a **suggestion surface**, not a plan.
 
-**Status update (2026-04-24):** Four items pulled into 1.7.0 as DM.1–DM.4 (sidecar tagging, Mark Inactive, Ping, Install to Specific Address). Workitems are renumbered: old 1.7 → 1.8, old 1.8 → 1.9. Bucket labels in the table below still read "1.8 / 1.9" as conceptual "near-term / longer-term" placeholders, not literal file pointers.
+**Status update (2026-04-24):** Four items were initially pulled into 1.7.0 as DM.1–DM.4. After grilling on 2026-04-26, sidecar-JSON tagging was dropped — tags already live in the YAML comment block via `read_device_meta` / `write_device_meta` (`yaml.safe_load`-parsed, not regex; the original DM.1 description had that wrong), and the "no YAML churn" benefit only paid off if pin/schedule moved with them, which is a broader migration than the heffneil scope warranted. The remaining three (Mark Inactive, Ping, Install to Specific Address) are now DM.1–DM.3 in `WORKITEMS-1.7.0.md`. Workitems are renumbered: old 1.7 → 1.8, old 1.8 → 1.9. Bucket labels in the table below still read "1.8 / 1.9" as conceptual "near-term / longer-term" placeholders, not literal file pointers.
 
 | Candidate | Bucket | Rough effort | Rationale |
 |---|---|---|---|
 | Side panel for per-device actions | 1.9 or future | L | Changes core UX pattern; unlocks 4–5 other ★★★ items by giving them a home |
-| Install to Specific Address | **1.7.0 (DM.4)** ✓ pulled | S | Real recovery workflow; one modal + CLI flag pass-through |
-| Ping Device diagnostic | **1.7.0 (DM.3)** ✓ pulled | S | `icmplib` dep + one endpoint + one modal |
-| Mark Inactive | **1.7.0 (DM.2)** ✓ pulled | S | Sidecar JSON + one column state + skip in poller |
-| Sidecar-JSON tagging (replace YAML comments) | **1.7.0 (DM.1)** ✓ pulled | M | Stops user-YAML churn; unlocks tag-pool UI cleanly |
+| Install to Specific Address | **1.7.0 (DM.3)** ✓ pulled | S | Real recovery workflow; one modal + CLI flag pass-through |
+| Ping Device diagnostic | **1.7.0 (DM.2)** ✓ pulled | S | `icmplib` dep + one endpoint + one modal |
+| Mark Inactive | **1.7.0 (DM.1)** ✓ pulled | S | Sidecar JSON + one column state + skip in poller |
+| Sidecar-JSON tagging (replace YAML comments) | dropped 2026-04-26 | — | Considered for 1.7.0; YAML-comment storage kept (already `yaml.safe_load`-parsed). See WORKITEMS-1.7.0 DM section preamble. |
 | New Device wizard with platforms | 1.9 | M | Wraps `esphome.wizard`; big UX win for onboarding |
 | Device adoption / import | 1.9 | M | Already in WORKITEMS-1.9 (was 1.8 before the rename); stock backend, just UI |
-| Tag filter pills + tag pool | 1.9 | S | Copies cleanly into Devices tab now that DM.1's storage is JSON-backed |
+| Tag filter pills + tag pool | **1.7.0 (TG.5/6/7/8)** ✓ pulled | M | Pulled in alongside a much larger fleet-tags + routing-rules feature after a 2026-04-26 design grilling — see WORKITEMS-1.7.0 §TG. Folds the editor tag-pool affordance into TG.5/TG.7's chip-input autocomplete rather than shipping it as a separate panel. |
 | Floating batch action bar | 1.9 | S | Upgrade on top of existing bulk-select |
 | Archive reclaims build dir | Bug | XS | One-liner verification; file a bug if missing |
 | `backup_exclude` on add-on config | Bug | XS | Verify current config; file a bug if missing |
