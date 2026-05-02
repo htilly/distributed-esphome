@@ -573,10 +573,11 @@ async def test_claim_job_disk_blocked_worker_returns_204(tmp_path):
         # Once disk recovers, the same worker resumes claiming on the next poll.
         ta.registry.heartbeat(client_id, system_info={"disk_used_pct": 50})
         assert ta.registry.get(client_id).health_blocked_reason is None
-        resp2 = await ta.get(
-            "/api/v1/jobs/next",
-            headers={**AUTH_HEADERS, "X-Client-Id": client_id},
-        )
+        with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())):
+            resp2 = await ta.get(
+                "/api/v1/jobs/next",
+                headers={**AUTH_HEADERS, "X-Client-Id": client_id},
+            )
         assert resp2.status == 200
     finally:
         await ta.close()
