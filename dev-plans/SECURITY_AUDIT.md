@@ -1,8 +1,22 @@
 # Security Audit: ESPHome Fleet
 
 **Original audit:** 2026-03-29 (version 0.0.21; at the time of audit the product was called "ESPHome Distributed Build Server", renamed to ESPHome Fleet in 1.4.1, renumbered to 1.5.0 late cycle).
-**Last refreshed:** 2026-04-24 against 1.6.2.
+**Last refreshed:** 2026-05-02 against 1.7.0.
 **Scope:** Server add-on (`ha-addon/server/`), Dockerfile, `run.sh`, `config.yaml`, and the bundled worker (`client/client.py`) as it interacts with the server security model.
+
+> **Refresh note (2026-05-02, 1.7.0):** No F-* status flips this cycle. 1.7.0 is a feature release (TG.* fleet tags + routing rules, DQ.* worker disk quota, DM.* heffneil-inspired device-management polish, RC.1 rendered-config view) plus a stack of compile-pipeline hardening (#111 bundle-creation race, #112 bundle-log scrub, #197/PY-11 git-clean invariant, #214/#220 worker self-heal of corrupted PlatformIO toolchains). Items worth surfacing for the audit even though none of them flip an F-* finding:
+>
+> - **`NET_RAW` capability added** (`config.yaml` `privileged: [NET_RAW]`) for the new ICMP ping diagnostic (DM.2 / bug #206). The endpoint at `POST /ui/api/targets/{filename}/ping` tries unprivileged datagram ICMP first and only falls back to raw-socket ICMP on installs where `net.ipv4.ping_group_range` is empty (HAOS default). The capability is the only non-default Linux capability the add-on holds; the endpoint accepts no arbitrary host (only the configured target's resolved OTA address), is `count=10, interval=0.2 s, timeout=2 s` rate-bounded by ICMP, and lives under `/ui/api/*` (HA-Ingress / `require_ha_auth` Bearer-gated). Threat model §1 (browser is trusted) accepts that any UI user can trigger an ICMP burst at the configured target; Pat at home-lab scale has no DoS budget.
+> - **Server-wide bundle-creation lock** (#111, `scanner.create_bundle_async` wraps `loop.run_in_executor` behind a module-level `asyncio.Lock`). Closes a real race that surfaced as five different misleading errors out of seven concurrent kauf-plug-* claims sharing the same `external_components` git repo. Not a security finding (no trust-boundary crossing), but the race could leak intermediate-extraction state from one job into another's captured build log; the lock makes that impossible by construction.
+> - **Bundle-failure log scrubbed of ESPHome logger chatter** (#112). Captured stderr from the bundle subprocess used to be decorated with INFO/WARNING lines from ESPHome's `_LOGGER` (deprecation warnings, the upstream `2026.4.3` false-positive `Including a single package under \`packages:\` is deprecated`, etc.). 1.7.0 silences `_LOGGER` inside the subprocess so only our explicit stderr writes — and uncaught Python tracebacks — reach the Queue Log modal. Defensive: the noise wasn't sensitive but it concealed real diagnostics.
+> - **Rendered-config endpoint never logs body** (RC.1, `GET /ui/api/targets/{filename}/rendered-config`). Output contains plaintext `!secret` substitutions; the handler logs only `rendered config bytes=NN`. Regression test `tests/test_rendered_config.py::test_rendered_config_logs_do_not_leak_output` pins the contract. Server-side ANSI strip on stdout/stderr prevents Monaco from rendering raw escape codes that would otherwise leak conceal-wrapped `secret:`/`key:`/`psk:` values into the visible YAML.
+> - **PY-11 invariant** (#197) — every UI-driven file mutation under `/config/esphome/` must leave `git status --porcelain` empty after `drain_pending_commits()` returns. Closes a class of bugs (#94, #197) where an `os.unlink` or `git mv` left a dangling staged half-commit that the next user save swept into the wrong commit, producing inaccurate rollback diffs. Backed by a 12-scenario regression test (`tests/test_git_clean_after_ops.py`).
+> - **Firmware retention + `backup_exclude` (#198/#199).** `firmware_retention_days` Settings field (default 2) bounds how long compile binaries linger on disk; `firmware/` added to `backup_exclude` so a HA snapshot no longer carries 200+ MB of regenerable .bin files. Reduces the data-exposure footprint on a stolen / leaked HA backup tarball.
+> - **Tags + routing-rule endpoints (TG.*) and disk-quota endpoint (DQ.5).** All under `/ui/api/*` — same auth tier, no new tokens, no new privileges. Wire-protocol additions (`RegisterRequest.disk_quota_bytes`, `HeartbeatResponse.set_disk_quota_bytes`, `SystemInfo.{disk_usage_bytes,disk_quota_bytes,last_eviction_freed_bytes}`) are additive optional fields with no `PROTOCOL_VERSION` bump (backward-compatible — old workers register without these and the server falls back to env-var defaults).
+> - **Worker self-pause on disk full (#219).** Hysteresis-bounded (enter at 95 %, exit at 90 %) — when a worker's heartbeat reports disk over the entry threshold, the server returns 204 on its claim attempts and the deferral pool excludes it. Prevents a no-space-left-on-device worker from claiming and immediately failing every job in the queue. Defensive; closes a denial-of-service-by-stupidity hole that was tractable in the home lab on 50-GB-rootfs Proxmox VMs.
+> - **CI compile-test matrix doubled** (CI.3) — the pinned `MIN_ESPHOME_VERSION` floor + latest stable both compile across 16 fixture YAMLs per platform/framework. Catches upstream API regressions at either edge as a single red square.
+>
+> No F-* status flips because none of these change a trust assumption or move a finding's residual risk; they are documented for auditability of the new attack surface.
 
 > **Refresh note (2026-04-24, 1.6.2):** No F-* status flips this cycle. 1.6.2 is a hardening release focused on install-path correctness (bugs #82, #83, #84, #86, #104, #105, #190), worker-bundle discipline (BD.1), and honest framing of already-shipped security claims (TP.1 AppArmor permissive-caveat, TP.2 AppArmor narrow denies verified, TP.3 quality-scale retreat silver → bronze, TP.4 CHANGELOG retrospective). None of these open, widen, or close a finding in this audit.
 >
@@ -719,7 +733,7 @@ The straightforward case for a profile on this add-on: we shell out to PlatformI
 
 ## OWASP Top 10 (2021) Assessment
 
-A mapping of this project's findings against OWASP's Top 10 web application risks. Status reflects current code (1.6.1, last refreshed 2026-04-20).
+A mapping of this project's findings against OWASP's Top 10 web application risks. Status reflects current code (1.7.0, last refreshed 2026-05-02).
 
 | Category | Status | Evidence in this project |
 |---|---|---|
@@ -768,7 +782,7 @@ The following aspects of the implementation are done well and worth noting expli
 
 Status legend: **FIXED** (resolved, release noted) · **PARTIAL** (partially mitigated in the release noted; residual risk remains) · **OPEN** (still live, planned to fix) · **WONTFIX** (accepted risk by design for the HA add-on threat model) · **INFO** (observation, no action planned).
 
-Status as of 1.6.1 (last reviewed 2026-04-20).
+Status as of 1.7.0 (last reviewed 2026-05-02).
 
 | ID   | Finding                                              | Severity | Status | Notes |
 |------|------------------------------------------------------|----------|--------|-------|

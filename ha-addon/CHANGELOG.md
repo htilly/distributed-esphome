@@ -12,7 +12,7 @@ A major release built around **fleet tags + rule-based job routing**, with a sta
 
 **Workers self-pause when their disk fills up.** When a worker crosses 95 % disk usage a **disk full** badge appears in its Status column and the server stops handing it new jobs; it un-pauses automatically when usage drops below 90 %. Prevents the cascade of `[Errno 28] No space left on device` failures that used to happen when one worker filled up but kept claiming work — jobs are now stranded with a clear reason rather than re-failing forever.
 
-**Device-management polish inspired by [heffneil/esphome-enhanced-dashboard](https://github.com/heffneil/esphome-enhanced-dashboard).**
+**Device-management polish.**
 
 - **Archived devices live in the same table.** The separate "Archived devices" page is gone — toggle **Show archived devices** in the Devices column-picker dropdown and archived rows render in-line at 50 % opacity below active ones, with their own reduced action menu (Unarchive / Permanently delete). Archive becomes a first-order hamburger action between **Commit changes…** and **Delete**, no confirmation modal — just a toast with the restore path. Archived rows keep their tags, area, project, comment, pinned version, schedule, network, chip, and BLE-proxy state — everything the scanner can read from raw YAML.
 - **Ping device.** New **Ping device…** entry in the Devices-tab hamburger fires 10 ICMP packets at the device's resolved OTA address and shows reachability + RTT stats. Works on every install path — the add-on now declares `NET_RAW` so HAOS installs (where unprivileged ICMP is disabled by default) fall back to raw-socket ping automatically.
