@@ -719,19 +719,18 @@ class JobHistoryDAO:
             return []
         cutoff = int(datetime.now(timezone.utc).timestamp()) - days * 86400
         with self._connect() as conn:
-            # SELECT before DELETE so we can return the evicted IDs;
-            # both run inside the same connection so the transaction
-            # remains atomic if a concurrent writer races.
+            # Single DELETE ... RETURNING is atomic in SQLite (3.35+,
+            # well below what Python 3.11 ships): the evicted ids and
+            # the deletion are one statement, so a concurrent writer
+            # can't slip a row in between. SELECT-then-DELETE on the
+            # same connection would NOT be atomic without an explicit
+            # BEGIN IMMEDIATE.
             evicted = [
                 str(row[0]) for row in conn.execute(
-                    "SELECT id FROM jobs WHERE finished_at IS NOT NULL AND finished_at < ?",
+                    "DELETE FROM jobs WHERE finished_at IS NOT NULL AND finished_at < ? RETURNING id",
                     (cutoff,),
                 ).fetchall()
             ]
-            conn.execute(
-                "DELETE FROM jobs WHERE finished_at IS NOT NULL AND finished_at < ?",
-                (cutoff,),
-            )
             conn.commit()
         if evicted:
             logger.info(
