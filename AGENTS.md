@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-Guidance for Claude Code (claude.ai/code) when working in this repository.
+Guidance for Codex (Codex.ai/code) when working in this repository.
 
 ## Concision
 
@@ -136,8 +136,6 @@ Checked mechanically by `scripts/check-invariants.sh` (wired into the CI `test` 
 **PY-10 — `tests/test_integration_*.py` (without a `_logic` suffix) must import `pytest_homeassistant_custom_component`.** The plain `test_integration_*` name reads as "real test against a running HA" — if that's not what the file does, rename it to `test_integration_*_logic.py` (which the invariant exempts) so the filename doesn't mislead. Origin: IT.1 from 1.6 — mock-based helper tests were file-named as integration tests and reviewers kept assuming coverage that wasn't there, letting CR.12-class bugs ship (`async_setup_entry` misuse, `unique_id` collisions, config-flow regressions). `scripts/check-invariants.sh` greps each non-`_logic` integration test file for the `pytest_homeassistant_custom_component` import and fails CI if it's absent.
 
 **PY-10b — Skipped-integration-test ratio across non-`_logic` `test_integration_*.py` files must stay ≤ 50 %.** PY-10 above guarantees those files *import* the HA custom-integration plugin, but a future regression where every real test gets `@pytest.mark.skip`-decorated would leave the import as the only honest part — same coverage-mirage failure mode IT.1 was filed for. `scripts/check-invariants.sh` counts `@pytest.mark.skip` decorators vs `def test_` / `async def test_` declarations across every non-`_logic` integration test file; if the ratio crosses 50 %, CI fails. Origin: CI.5 from 1.7.0.
-
-**PY-11 — Every UI-driven file mutation under `/config/esphome/` must leave the git working tree clean.** When versioning is on, an endpoint that writes / renames / archives / restores / deletes a file MUST also commit the change (via `commit_file`, `archive_and_commit`, `restore_and_commit`, or `delete_archived_and_commit`) so `git status --porcelain` is empty once `drain_pending_commits()` finishes. A "dangling" working-tree entry (file modified-but-not-committed, or — worse — a half-staged rename like `D src` left over from a partial commit) means the next user save sweeps the leftover into someone else's git log, the rollback diff lies, and `has_uncommitted_changes` reports the wrong thing. Origin: #94 (`os.unlink` on archived file left `deleted: .archive/<f>` in working tree) and #197 (rename pathspecs filtered out the source side of `git mv` so commits left the deletion staged — fixed by widening `_staged_paths` to include both halves of renames). Regression net: `tests/test_git_clean_after_ops.py` drives every file-mutating endpoint and asserts `dirty_paths(config_dir) == set()` afterward. Every new file-mutating endpoint MUST add a scenario there.
 
 ## Design Judgment (aspirational — reviewed, not enforced)
 
@@ -309,7 +307,6 @@ End-of-turn rule when a PR has review feedback: **before marking the turn done, 
 **`./push-to-haos.sh`** drives the HAOS VM at `192.168.226.135`. Same two flags.
 
 **HA Core restart when the custom integration changes.** Changes under `ha-addon/custom_integration/` require a full `ha core restart` to take effect — the integration_installer copies new files to `/config/custom_components/` on add-on boot, but HA Core loads Python modules once at startup and doesn't hot-reload them. The add-on restart during deploy does NOT restart HA Core (Supervisor only restarts the add-on container). `push-to-hass-4.sh` hashes the integration directory and compares to a remote stamp file (`/tmp/esphome_fleet_integration.hash`); on a mismatch it runs `ha core restart` before the smoke suite. Skipped when the integration is byte-identical to the last push so non-integration turns don't pay the 30-60s restart cost.
-
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker

@@ -67,3 +67,8 @@ ha-addon/dist/
 
 # Local deployment scripts
 push-to-hass-4.sh
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key

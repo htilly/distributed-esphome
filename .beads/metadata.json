@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "distributed_esphome",
+  "project_id": "45507fd6-b35b-40e1-806f-b37c5bfaa261"
+}
