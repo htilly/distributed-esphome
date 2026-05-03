@@ -102,7 +102,7 @@ class EsphomeFleetCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # user rotated the add-on token.
                 raise ConfigEntryAuthFailed(
                     "Add-on rejected the request with 401 — re-enter the "
-                    "token from the add-on's Configuration tab"
+                    "Server token from the add-on's Settings → Authentication"
                 ) from err
             raise UpdateFailed(
                 f"Add-on returned HTTP {err.status} at {self._base_url}: {err.message}"

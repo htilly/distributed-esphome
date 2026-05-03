@@ -158,4 +158,4 @@ CI.4 protects the tier flip (TP.3); CI.6 protects the coverage claim (HT.12 / QS
 
 ### New in 1.7.1
 
-*(none yet)*
+- [x] **#231** *(1.7.1-dev.2)* — "Authentication Expired" repair sent users to the wrong place. The reauth flow, the initial config flow, the `token_required` error, the `config_entry_reauth` fix-flow description, and the underlying `ConfigEntryAuthFailed` exception message in `coordinator.py:103-106` all directed users to "Settings → Add-ons → ESPHome Fleet → Configuration" — the HA Supervisor's add-on Configuration tab. The Server token actually lives in the add-on's own UI at **Settings → Authentication → Server token** (`SettingsDrawer.tsx:193-199`). Reported by BradleyFord in #108. Fix: rewrote the four affected entries in `strings.json` and `translations/en.json`, plus the exception message, to reference the add-on's Settings drawer path verbatim ("Settings → Authentication → Server token") so the in-product copy matches the visible UI labels.

@@ -4,7 +4,7 @@
     "step": {
       "user": {
         "title": "Connect to ESPHome Fleet",
-        "description": "Enter the base URL of your ESPHome Fleet add-on (for example {example_url}) and the shared token from the add-on's Configuration tab.",
+        "description": "Enter the base URL of your ESPHome Fleet add-on (for example {example_url}) and the **Server token** shown in the add-on's Settings drawer, under Authentication.",
         "data": {
           "base_url": "Base URL",
           "token": "Add-on token"
@@ -20,7 +20,7 @@
       },
       "reauth_confirm": {
         "title": "ESPHome Fleet needs a new token",
-        "description": "The add-on at {url} is rejecting requests. Re-enter the shared token from Settings → Add-ons → ESPHome Fleet → Configuration.",
+        "description": "The add-on at {url} is rejecting requests. Open the add-on, click **Settings → Authentication**, copy the **Server token**, and paste it below.",
         "data": {
           "token": "Add-on token"
         }
@@ -38,7 +38,7 @@
     "error": {
       "invalid_url": "Enter a valid http(s) URL.",
       "cannot_connect": "Could not reach the ESPHome Fleet server at that URL. Check the URL, that the add-on is running, and that this host can reach it.",
-      "token_required": "The add-on token is required. Copy it from Settings → Add-ons → ESPHome Fleet → Configuration."
+      "token_required": "The add-on token is required. Copy it from the add-on's **Settings → Authentication → Server token**."
     },
     "abort": {
       "already_configured": "This server is already configured.",
@@ -81,7 +81,7 @@
       "fix_flow": {
         "step": {
           "init": {
-            "description": "The add-on at {url} is rejecting requests — the shared token may have been rotated. Click **Submit** to open the re-authentication form."
+            "description": "The add-on at {url} is rejecting requests — the shared token may have been rotated. Open the add-on, click **Settings → Authentication**, copy the current **Server token**, then click **Submit** to paste it into the re-authentication form."
           }
         }
       }
