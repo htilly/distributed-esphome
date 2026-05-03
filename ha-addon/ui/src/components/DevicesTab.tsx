@@ -608,30 +608,45 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
                       action picker as the per-row Upgrade button — and
                       applies the chosen options uniformly across the
                       affected set. */}
+                  {/* #229: every bulk-Upgrade predicate excludes archived
+                      rows up front. The `/ui/api/targets` response merges
+                      `.archive/*.yaml` into the same list (DM.1 in-tab
+                      surface) with `online=null` / `needs_update=null` /
+                      `config_modified=null`, and the server's
+                      `start_compile` silently filters them out via
+                      `set(scan_configs(...))`. Without these guards the
+                      toast counts the optimistic UI total (e.g. "queued
+                      95") while the queue only ever holds the active
+                      subset (e.g. 68 actually compile). The two filters
+                      that *would* leak — `Upgrade All` (no predicate at
+                      all) and `Upgrade All Online` (`online !== false`
+                      passes `null`) — are now corrected; the others get
+                      the same `!t.archived` guard for symmetry so a
+                      future schema tweak can't reintroduce the leak. */}
                   <DropdownMenuItem
                     onClick={() => {
-                      const all = targets.map(t => t.target);
+                      const all = targets.filter(t => !t.archived).map(t => t.target);
                       if (all.length > 0) onUpgradeMany(all, `all ${all.length} device${all.length === 1 ? '' : 's'}`);
                     }}
-                    disabled={targets.length === 0}
+                    disabled={!targets.some(t => !t.archived)}
                   >
                     Upgrade All
                   </DropdownMenuItem>
                   <DropdownMenuItem
                     onClick={() => {
-                      const onlineTargets = targets.filter(t => t.online !== false).map(t => t.target);
+                      const onlineTargets = targets.filter(t => !t.archived && t.online !== false).map(t => t.target);
                       if (onlineTargets.length > 0) onUpgradeMany(onlineTargets, `${onlineTargets.length} online device${onlineTargets.length === 1 ? '' : 's'}`);
                     }}
-                    disabled={!targets.some(t => t.online !== false)}
+                    disabled={!targets.some(t => !t.archived && t.online !== false)}
                   >
                     Upgrade All Online
                   </DropdownMenuItem>
                   <DropdownMenuItem
                     onClick={() => {
-                      const outdated = targets.filter(t => t.needs_update).map(t => t.target);
+                      const outdated = targets.filter(t => !t.archived && t.needs_update).map(t => t.target);
                       if (outdated.length > 0) onUpgradeMany(outdated, `${outdated.length} outdated device${outdated.length === 1 ? '' : 's'}`);
                     }}
-                    disabled={!targets.some(t => t.needs_update)}
+                    disabled={!targets.some(t => !t.archived && t.needs_update)}
                   >
                     Upgrade Outdated
                   </DropdownMenuItem>
@@ -644,10 +659,10 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
                       configuration drift). */}
                   <DropdownMenuItem
                     onClick={() => {
-                      const changed = targets.filter(hasDriftedConfig).map(t => t.target);
+                      const changed = targets.filter(t => !t.archived && hasDriftedConfig(t)).map(t => t.target);
                       if (changed.length > 0) onUpgradeMany(changed, `${changed.length} changed device${changed.length === 1 ? '' : 's'}`);
                     }}
-                    disabled={!targets.some(hasDriftedConfig)}
+                    disabled={!targets.some(t => !t.archived && hasDriftedConfig(t))}
                   >
                     Upgrade Changed
                   </DropdownMenuItem>

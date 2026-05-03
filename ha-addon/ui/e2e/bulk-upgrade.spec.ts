@@ -86,6 +86,95 @@ test.describe('Bug #107 — bulk Upgrade items open the UpgradeModal', () => {
     await expect(dialog.getByRole('heading', { name: /Upgrade — 1 changed device$/ })).toBeVisible();
   });
 
+  // #229 — `/ui/api/targets` merges `.archive/*.yaml` rows into the
+  // same list (DM.1 in-tab surface) with `online=null`, `needs_update
+  // =null`, `config_modified=null`. The bulk-Upgrade predicates used
+  // to leak archived rows into `Upgrade All` (no filter) and
+  // `Upgrade All Online` (`t.online !== false` passes `null`); the
+  // server then silently filtered them via `set(scan_configs(...))`,
+  // so the toast count and the queued count diverged. This pair of
+  // tests asserts the predicates exclude archived rows so the count
+  // the user sees matches the count the queue receives.
+  test('Upgrade All / Upgrade All Online exclude archived rows so the title count matches the active set (#229)', async ({ page }) => {
+    const activeCount = fixtureTargets.length;
+    await page.route('**/ui/api/targets', route => {
+      const archivedExtras: typeof fixtureTargets = [
+        {
+          ...fixtureTargets[0],
+          target: '.archive/old-bulb.yaml',
+          friendly_name: 'Old Bulb (archived)',
+          device_name: 'old-bulb',
+          online: null,
+          needs_update: undefined,
+          config_modified: undefined,
+          archived: true,
+        },
+        {
+          ...fixtureTargets[0],
+          target: '.archive/decommissioned-sensor.yaml',
+          friendly_name: 'Decommissioned Sensor (archived)',
+          device_name: 'decommissioned-sensor',
+          online: null,
+          needs_update: undefined,
+          config_modified: undefined,
+          archived: true,
+        },
+      ];
+      route.fulfill({ json: [...fixtureTargets, ...archivedExtras] });
+    });
+    await page.reload();
+    await expect(page.getByText('Living Room Sensor')).toBeVisible({ timeout: 5000 });
+
+    // Upgrade All: title says `all <activeCount> devices`, not `all <activeCount + 2>`.
+    await upgradeTrigger(page).click();
+    await page.getByRole('menuitem', { name: /^Upgrade All$/ }).click();
+    let dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('heading', { name: new RegExp(`Upgrade — all ${activeCount} devices`) })).toBeVisible();
+    await dialog.getByRole('button', { name: /^Cancel$/ }).click();
+    await expect(dialog).toBeHidden();
+
+    // Upgrade All Online: same — archived rows must NOT count toward
+    // the "online" set even though their `online` field is null.
+    const onlineActive = fixtureTargets.filter(t => t.online !== false).length;
+    await upgradeTrigger(page).click();
+    await page.getByRole('menuitem', { name: /^Upgrade All Online$/ }).click();
+    dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('heading', { name: new RegExp(`Upgrade — ${onlineActive} online devices?`) })).toBeVisible();
+    await dialog.getByRole('button', { name: /^Cancel$/ }).click();
+  });
+
+  test('Upgrade All Online posts only active targets to /ui/api/compile (#229)', async ({ page }) => {
+    let postedTargets: unknown = null;
+    await page.route('**/ui/api/targets', route => {
+      const archived: typeof fixtureTargets[number] = {
+        ...fixtureTargets[0],
+        target: '.archive/old-bulb.yaml',
+        friendly_name: 'Old Bulb (archived)',
+        device_name: 'old-bulb',
+        online: null,
+        needs_update: undefined,
+        config_modified: undefined,
+        archived: true,
+      };
+      route.fulfill({ json: [...fixtureTargets, archived] });
+    });
+    await page.route('**/ui/api/compile', route => {
+      const body = route.request().postDataJSON();
+      postedTargets = body.targets;
+      route.fulfill({ json: { enqueued: Array.isArray(body.targets) ? body.targets.length : 0 } });
+    });
+    await page.reload();
+    await expect(page.getByText('Living Room Sensor')).toBeVisible({ timeout: 5000 });
+
+    await upgradeTrigger(page).click();
+    await page.getByRole('menuitem', { name: /^Upgrade All Online$/ }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('button', { name: /^Upgrade$/ }).click();
+
+    await expect.poll(() => Array.isArray(postedTargets) ? (postedTargets as string[]).length : -1).toBeGreaterThan(0);
+    expect(Array.isArray(postedTargets) && (postedTargets as string[]).every(t => !t.startsWith('.archive/'))).toBe(true);
+  });
+
   test('Upgrade Selected enqueues a single compile POST containing every checked target', async ({ page }) => {
     let postedTargets: unknown = null;
     await page.route('**/ui/api/compile', route => {
