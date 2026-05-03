@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Optional
@@ -94,7 +95,13 @@ class WorkerDiskQuotaStore:
         tmp = self._path.with_suffix(self._path.suffix + ".tmp")
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            # fsync before rename so a crash mid-write doesn't silently
+            # blank the quota store and let re-registration re-seed from
+            # WORKER_DISK_QUOTA_GB. Mirrors WorkerTagStore._save.
+            with tmp.open("w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, sort_keys=True)
+                f.flush()
+                os.fsync(f.fileno())
             tmp.replace(self._path)
         except OSError as exc:
             logger.error("worker-disk-quotas save failed: %s", exc)

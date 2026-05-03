@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -51,13 +51,10 @@ export function SetDiskQuotaDialog({
   const [gb, setGb] = useState<number>(initialGb);
   const [saving, setSaving] = useState(false);
 
-  // Re-sync if the dialog is reused across workers without remount —
-  // belt-and-braces; today the parent keys it by client_id so this is
-  // mostly defensive.
-  useEffect(() => {
-    setMode(initialMode);
-    setGb(initialGb);
-  }, [hostname]);  // eslint-disable-line react-hooks/exhaustive-deps
+  // No re-sync effect: state is initialised once on mount, and the
+  // parent forces a fresh mount per worker via `key={w.client_id}`. A
+  // mid-edit SWR refresh that flips currentOverrideBytes/defaultBytes
+  // therefore can't yank the user's typed value out from under them.
 
   const defaultGb = Math.max(1, Math.round(defaultBytes / GIB));
   const valid = mode === 'default' || (Number.isInteger(gb) && gb >= 1 && gb <= 1024);

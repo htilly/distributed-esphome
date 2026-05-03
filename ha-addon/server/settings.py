@@ -198,7 +198,9 @@ def _validate_bool(value: Any, field: str) -> bool:
     raise SettingsValidationError(field, f"expected bool, got {value!r}")
 
 
-def _validate_int_range(lo: int, hi: int) -> Callable[[Any, str], int]:
+def _validate_int_range(
+    lo: int, hi: int, *, multiple_of: int | None = None,
+) -> Callable[[Any, str], int]:
     def _v(value: Any, field: str) -> int:
         try:
             coerced = int(value)
@@ -206,6 +208,10 @@ def _validate_int_range(lo: int, hi: int) -> Callable[[Any, str], int]:
             raise SettingsValidationError(field, f"expected integer, got {value!r}")
         if coerced < lo or coerced > hi:
             raise SettingsValidationError(field, f"must be between {lo} and {hi}, got {coerced}")
+        if multiple_of is not None and coerced % multiple_of != 0:
+            raise SettingsValidationError(
+                field, f"must be a multiple of {multiple_of}, got {coerced}",
+            )
         return coerced
 
     return _v
@@ -311,8 +317,14 @@ _VALIDATORS: dict[str, Callable[[Any, str], Any]] = {
     "date_format": _validate_enum("auto", "iso", "us", "eu", "long"),
     # DQ.1: ≥1 GiB floor stops a typo from starving every worker into
     # constant eviction; 1 TiB ceiling matches firmware_cache_max_gb's
-    # upper bound (anything bigger is misconfiguration).
-    "default_worker_disk_quota_bytes": _validate_int_range(1 * 1024 ** 3, 1024 * 1024 ** 3),
+    # upper bound (anything bigger is misconfiguration). Also pinned to
+    # whole-GiB multiples so the UI's `Math.round(bytes / GiB)` display
+    # round-trips cleanly — without this, an API caller could store
+    # e.g. 10.5 GiB, the Settings drawer would render "11", and the
+    # next save would silently rewrite the value to 11 GiB.
+    "default_worker_disk_quota_bytes": _validate_int_range(
+        1 * 1024 ** 3, 1024 * 1024 ** 3, multiple_of=1024 ** 3,
+    ),
 }
 
 

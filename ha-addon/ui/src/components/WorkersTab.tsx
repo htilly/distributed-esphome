@@ -696,6 +696,7 @@ export function WorkersTab({ workers, targets, queue, serverClientVersion, minIm
           if (!w) return null;
           return (
             <SetDiskQuotaDialog
+              key={w.client_id}
               hostname={w.hostname}
               currentOverrideBytes={w.disk_quota_override_bytes ?? null}
               defaultBytes={w.default_worker_disk_quota_bytes ?? 10 * 1024 ** 3}

@@ -3428,10 +3428,18 @@ async def set_worker_disk_quota(request: web.Request) -> web.Response:
                 {"error": "disk_quota_bytes must be an integer or null"},
                 status=400,
             )
-        # Same floor/ceiling as the fleet default validator (settings.py).
+        # Same floor/ceiling/granularity as the fleet default validator
+        # (settings.py). Whole-GiB multiples keep the UI's
+        # `Math.round(bytes / GiB)` display honest — see the validator
+        # comment for the silent-rewrite scenario.
         if value < 1 * 1024 ** 3 or value > 1024 * 1024 ** 3:
             return web.json_response(
                 {"error": "disk_quota_bytes must be between 1 GiB and 1 TiB"},
+                status=400,
+            )
+        if value % (1024 ** 3) != 0:
+            return web.json_response(
+                {"error": "disk_quota_bytes must be a whole-GiB multiple"},
                 status=400,
             )
     quota_store = request.app.get("worker_disk_quota_store")
