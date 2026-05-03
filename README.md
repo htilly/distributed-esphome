@@ -7,6 +7,8 @@
 
 ![ESPHome Fleet — Devices tab](docs/screenshot.png)
 
+![ESPHome Fleet — fleet tags and tag filter pills](docs/screenshot-tags.png)
+
 ## Why use this instead of the ESPHome builder?
 
 The built-in ESPHome Device Builder does the job — here are the things you get on top of it:
