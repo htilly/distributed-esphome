@@ -404,7 +404,7 @@ class TestPollCycle:
 # ---------------------------------------------------------------------------
 
 # Override with ESPHOME_TEST_VERSION env var if you want a different version.
-ESPHOME_TEST_VERSION = os.environ.get("ESPHOME_TEST_VERSION", "2026.3.1")
+ESPHOME_TEST_VERSION = os.environ.get("ESPHOME_TEST_VERSION", "2026.4.3")
 
 _COMPILE_TEST_YAML = """\
 esphome:
