@@ -11,7 +11,7 @@ import io
 import tarfile
 import uuid
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from aiohttp import web
@@ -29,6 +29,21 @@ from registry import WorkerRegistry
 
 TOKEN = "test-secret-token"
 AUTH_HEADERS = {"Authorization": f"Bearer {TOKEN}"}
+
+
+# pytest-homeassistant-custom-component (installed on some dev boxes but not in
+# the plain CI test env) pulls in pytest-socket, which globally blocks
+# socket() so aiohttp's TestServer can't bind a loopback listener. Tests that
+# need loopback access pull this fixture; the pattern mirrors test_ui_api.py.
+@pytest.fixture
+def _enable_socket():
+    try:
+        import pytest_socket as _pytest_socket  # type: ignore[import-not-found]
+    except ImportError:
+        yield
+        return
+    _pytest_socket.enable_socket()
+    yield
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +106,17 @@ async def _make_app(tmp_path: Path, token: str = TOKEN) -> _App:
     app["queue"] = queue
     app["registry"] = registry
     app["log_subscribers"] = {}
+    # TG.1: every test rig gets a real WorkerTagStore on tmp_path so register
+    # tests exercise the full seed/server-wins/overwrite flow rather than the
+    # graceful-degrade fallback.
+    from worker_tags import WorkerTagStore  # noqa: PLC0415
+    app["worker_tag_store"] = WorkerTagStore(path=tmp_path / "worker-tags.json")
+    # DQ.2: same shape as worker_tag_store — exercises the full register-seed +
+    # heartbeat-push code paths against a real disk store.
+    from worker_disk_quotas import WorkerDiskQuotaStore  # noqa: PLC0415
+    app["worker_disk_quota_store"] = WorkerDiskQuotaStore(
+        path=tmp_path / "worker-disk-quotas.json",
+    )
     app.router.add_routes(api_module.routes)
 
     client = TestClient(TestServer(app))
@@ -193,6 +219,184 @@ async def test_register_stores_worker_in_registry(tmp_path):
         assert worker.hostname == "worker1"
         assert worker.platform == "linux/arm64"
         assert worker.client_version == "1.2.3"
+    finally:
+        await ta.close()
+
+
+async def test_register_seeds_tags_first_time(tmp_path, _enable_socket):
+    """TG.1: WORKER_TAGS-equivalent payload on the first registration seeds the store."""
+    ta = await _make_app(tmp_path)
+    try:
+        resp = await ta.post(
+            "/api/v1/workers/register",
+            json={
+                "hostname": "tagged-worker",
+                "platform": "linux/amd64",
+                "tags": ["prod", "linux"],
+            },
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status == 200
+        client_id = (await resp.json())["client_id"]
+        worker = ta.registry.get(client_id)
+        assert worker is not None
+        assert worker.tags == ["prod", "linux"]
+        # Persisted by identity (hostname).
+        assert ta.app["worker_tag_store"].get_tags("tagged-worker") == ["prod", "linux"]
+    finally:
+        await ta.close()
+
+
+async def test_register_server_side_wins_after_first(tmp_path, _enable_socket):
+    """TG.1: a worker re-registering with different tags doesn't clobber the persisted entry."""
+    ta = await _make_app(tmp_path)
+    try:
+        resp = await ta.post(
+            "/api/v1/workers/register",
+            json={"hostname": "dup", "platform": "linux/amd64", "tags": ["prod"]},
+            headers=AUTH_HEADERS,
+        )
+        first_id = (await resp.json())["client_id"]
+
+        # New container, new client_id, but same hostname → server keeps "prod".
+        resp = await ta.post(
+            "/api/v1/workers/register",
+            json={"hostname": "dup", "platform": "linux/amd64", "tags": ["staging", "rebuild"]},
+            headers=AUTH_HEADERS,
+        )
+        second_id = (await resp.json())["client_id"]
+        assert second_id != first_id
+        worker = ta.registry.get(second_id)
+        assert worker.tags == ["prod"]
+    finally:
+        await ta.close()
+
+
+async def test_register_overwrite_clobbers(tmp_path, _enable_socket):
+    """TG.1: WORKER_TAGS_OVERWRITE=1 → overwrite_tags=true on the wire → server replaces."""
+    ta = await _make_app(tmp_path)
+    try:
+        await ta.post(
+            "/api/v1/workers/register",
+            json={"hostname": "h1", "platform": "linux/amd64", "tags": ["prod"]},
+            headers=AUTH_HEADERS,
+        )
+        resp = await ta.post(
+            "/api/v1/workers/register",
+            json={
+                "hostname": "h1",
+                "platform": "linux/amd64",
+                "tags": ["staging", "fast"],
+                "overwrite_tags": True,
+            },
+            headers=AUTH_HEADERS,
+        )
+        client_id = (await resp.json())["client_id"]
+        assert ta.registry.get(client_id).tags == ["staging", "fast"]
+        assert ta.app["worker_tag_store"].get_tags("h1") == ["staging", "fast"]
+    finally:
+        await ta.close()
+
+
+# ---------------------------------------------------------------------------
+# DQ.4 — disk-quota seed + push
+# ---------------------------------------------------------------------------
+
+
+async def test_register_seeds_disk_quota_first_time(tmp_path, _enable_socket):
+    """DQ.4: WORKER_DISK_QUOTA_GB-equivalent payload on first registration seeds the store."""
+    ta = await _make_app(tmp_path)
+    try:
+        resp = await ta.post(
+            "/api/v1/workers/register",
+            json={
+                "hostname": "qworker",
+                "platform": "linux/amd64",
+                "disk_quota_bytes": 5 * 1024 ** 3,
+            },
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status == 200
+        client_id = (await resp.json())["client_id"]
+        worker = ta.registry.get(client_id)
+        assert worker is not None
+        assert worker.disk_quota_bytes == 5 * 1024 ** 3
+        assert ta.app["worker_disk_quota_store"].get_quota("qworker") == 5 * 1024 ** 3
+    finally:
+        await ta.close()
+
+
+async def test_register_disk_quota_server_side_wins_after_first(tmp_path, _enable_socket):
+    """DQ.4: re-registering with a different env value doesn't clobber the persisted override."""
+    ta = await _make_app(tmp_path)
+    try:
+        await ta.post(
+            "/api/v1/workers/register",
+            json={
+                "hostname": "qworker",
+                "platform": "linux/amd64",
+                "disk_quota_bytes": 5 * 1024 ** 3,
+            },
+            headers=AUTH_HEADERS,
+        )
+        resp = await ta.post(
+            "/api/v1/workers/register",
+            json={
+                "hostname": "qworker",
+                "platform": "linux/amd64",
+                "disk_quota_bytes": 50 * 1024 ** 3,
+            },
+            headers=AUTH_HEADERS,
+        )
+        client_id = (await resp.json())["client_id"]
+        # Server kept the original 5 GiB; the worker's restart with a larger
+        # env value didn't sneak past the UI's authoritative override.
+        assert ta.registry.get(client_id).disk_quota_bytes == 5 * 1024 ** 3
+    finally:
+        await ta.close()
+
+
+async def test_heartbeat_pushes_effective_disk_quota(tmp_path, _enable_socket):
+    """DQ.4: every heartbeat carries the effective quota (override or fleet default)."""
+    import settings as _s
+    ta = await _make_app(tmp_path)
+    try:
+        # Default fleet quota (10 GiB) flows through when no override is set.
+        resp = await ta.post(
+            "/api/v1/workers/register",
+            json={"hostname": "qworker", "platform": "linux/amd64"},
+            headers=AUTH_HEADERS,
+        )
+        client_id = (await resp.json())["client_id"]
+
+        hb = await ta.post(
+            "/api/v1/workers/heartbeat",
+            json={"client_id": client_id},
+            headers=AUTH_HEADERS,
+        )
+        body = await hb.json()
+        assert body["set_disk_quota_bytes"] == 10 * 1024 ** 3
+
+        # Set an override → next heartbeat picks it up.
+        ta.registry.set_disk_quota(client_id, 3 * 1024 ** 3)
+        hb = await ta.post(
+            "/api/v1/workers/heartbeat",
+            json={"client_id": client_id},
+            headers=AUTH_HEADERS,
+        )
+        body = await hb.json()
+        assert body["set_disk_quota_bytes"] == 3 * 1024 ** 3
+
+        # Bump the fleet default → workers without an override see the new value.
+        ta.registry.set_disk_quota(client_id, None)
+        await _s.update_settings({"default_worker_disk_quota_bytes": 25 * 1024 ** 3})
+        hb = await ta.post(
+            "/api/v1/workers/heartbeat",
+            json={"client_id": client_id},
+            headers=AUTH_HEADERS,
+        )
+        body = await hb.json()
+        assert body["set_disk_quota_bytes"] == 25 * 1024 ** 3
     finally:
         await ta.close()
 
@@ -363,7 +567,7 @@ async def test_claim_job_returns_job_payload(tmp_path):
         client_id = await _register(ta)
         await _enqueue_job(ta.queue, "device.yaml")
 
-        with patch("api.create_bundle", return_value=_make_test_bundle()):
+        with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())):
             resp = await ta.get(
                 "/api/v1/jobs/next",
                 headers={**AUTH_HEADERS, "X-Client-Id": client_id},
@@ -387,7 +591,7 @@ async def test_claim_job_transitions_to_working(tmp_path):
         client_id = await _register(ta)
         job = await _enqueue_job(ta.queue, "device.yaml")
 
-        with patch("api.create_bundle", return_value=_make_test_bundle()):
+        with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())):
             resp = await ta.get(
                 "/api/v1/jobs/next",
                 headers={**AUTH_HEADERS, "X-Client-Id": client_id},
@@ -446,6 +650,44 @@ async def test_claim_job_disabled_worker_returns_204(tmp_path):
 
         # Job should remain PENDING
         assert all(j.state == JobState.PENDING for j in ta.queue.get_all())
+    finally:
+        await ta.close()
+
+
+# ---------------------------------------------------------------------------
+# 7b. Claim job — disk-blocked worker (#219)
+# ---------------------------------------------------------------------------
+
+async def test_claim_job_disk_blocked_worker_returns_204(tmp_path):
+    """A worker stamped with health_blocked_reason="disk_full" must not be
+    assigned new jobs even though it's online and not operator-disabled."""
+    ta = await _make_app(tmp_path)
+    try:
+        client_id = await _register(ta)
+        await _enqueue_job(ta.queue, "device.yaml")
+        # Drive the registry through its real heartbeat path so the
+        # hysteresis logic runs (rather than poking the field directly):
+        ta.registry.heartbeat(client_id, system_info={"disk_used_pct": 97})
+        assert ta.registry.get(client_id).health_blocked_reason == "disk_full"
+
+        resp = await ta.get(
+            "/api/v1/jobs/next",
+            headers={**AUTH_HEADERS, "X-Client-Id": client_id},
+        )
+        assert resp.status == 204
+
+        # Job stays PENDING — the disk-blocked worker did not grab it.
+        assert all(j.state == JobState.PENDING for j in ta.queue.get_all())
+
+        # Once disk recovers, the same worker resumes claiming on the next poll.
+        ta.registry.heartbeat(client_id, system_info={"disk_used_pct": 50})
+        assert ta.registry.get(client_id).health_blocked_reason is None
+        with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())):
+            resp2 = await ta.get(
+                "/api/v1/jobs/next",
+                headers={**AUTH_HEADERS, "X-Client-Id": client_id},
+            )
+        assert resp2.status == 200
     finally:
         await ta.close()
 
@@ -576,7 +818,7 @@ async def test_faster_worker_gets_job_over_slower(tmp_path):
         await _enqueue_job(ta.queue, "device.yaml")
 
         # Slow worker polls first — should be deferred
-        with patch("api.create_bundle", return_value=_make_test_bundle()):
+        with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())):
             slow_resp = await ta.get(
                 "/api/v1/jobs/next",
                 headers={**AUTH_HEADERS, "X-Client-Id": slow_id},
@@ -584,7 +826,7 @@ async def test_faster_worker_gets_job_over_slower(tmp_path):
         assert slow_resp.status == 204  # deferred — faster worker is idle
 
         # Fast worker polls — should receive the job
-        with patch("api.create_bundle", return_value=_make_test_bundle()):
+        with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())):
             fast_resp = await ta.get(
                 "/api/v1/jobs/next",
                 headers={**AUTH_HEADERS, "X-Client-Id": fast_id},
@@ -606,7 +848,7 @@ async def test_only_worker_always_gets_job(tmp_path):
 
         await _enqueue_job(ta.queue, "device.yaml")
 
-        with patch("api.create_bundle", return_value=_make_test_bundle()):
+        with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())):
             resp = await ta.get(
                 "/api/v1/jobs/next",
                 headers={**AUTH_HEADERS, "X-Client-Id": client_id},
@@ -630,7 +872,7 @@ async def test_pinned_job_only_claimable_by_pinned_worker(tmp_path):
         await _enqueue_job(ta.queue, "device.yaml", pinned_client_id=id_b)
 
         # Worker-a must not receive it
-        with patch("api.create_bundle", return_value=_make_test_bundle()):
+        with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())):
             resp = await ta.get(
                 "/api/v1/jobs/next",
                 headers={**AUTH_HEADERS, "X-Client-Id": id_a},
@@ -638,7 +880,7 @@ async def test_pinned_job_only_claimable_by_pinned_worker(tmp_path):
         assert resp.status == 204
 
         # Worker-b must receive it
-        with patch("api.create_bundle", return_value=_make_test_bundle()):
+        with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())):
             resp = await ta.get(
                 "/api/v1/jobs/next",
                 headers={**AUTH_HEADERS, "X-Client-Id": id_b},
@@ -662,7 +904,7 @@ async def test_pinned_job_not_deferred_by_faster_worker(tmp_path):
         # Pin job to the slow worker
         await _enqueue_job(ta.queue, "device.yaml", pinned_client_id=slow_id)
 
-        with patch("api.create_bundle", return_value=_make_test_bundle()):
+        with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())):
             resp = await ta.get(
                 "/api/v1/jobs/next",
                 headers={**AUTH_HEADERS, "X-Client-Id": slow_id},
@@ -670,6 +912,49 @@ async def test_pinned_job_not_deferred_by_faster_worker(tmp_path):
 
         # Slow worker must NOT be deferred — pinned jobs bypass deferral
         assert resp.status == 200
+    finally:
+        await ta.close()
+
+
+# ---------------------------------------------------------------------------
+# Bug #210 — selection_reason="only_eligible_worker" must NOT fire when
+# other workers were eligible-by-tag but happened to be fully booked.
+# Pre-fix path attributed busy-blocked competitors as "rules narrowed
+# the field" so untagged jobs surfaced "Only eligible by tag" in the UI.
+# ---------------------------------------------------------------------------
+
+async def test_busy_other_workers_do_not_trigger_only_eligible_reason(tmp_path, _enable_socket):
+    """Two online workers, no routing rules, the second one is fully booked.
+    The free worker should claim with reason ``first_available`` — not
+    ``only_eligible_worker``, because the busy worker IS eligible by tag.
+    """
+    ta = await _make_app(tmp_path)
+    try:
+        free_id = await _register(ta, hostname="free",
+                                   system_info={"perf_score": 50, "cpu_usage": 0})
+        busy_id = await _register(ta, hostname="busy",
+                                   system_info={"perf_score": 50, "cpu_usage": 0})
+        # Default max_parallel_jobs == 1 — fill the busy worker's only slot.
+        busy_filler = await _enqueue_job(ta.queue, "filler.yaml")
+        claimed = await ta.queue.claim_next(busy_id)
+        assert claimed is not None and claimed.id == busy_filler.id
+
+        # New untagged job, no routing rules in play.
+        await _enqueue_job(ta.queue, "device.yaml")
+
+        with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())):
+            resp = await ta.get(
+                "/api/v1/jobs/next",
+                headers={**AUTH_HEADERS, "X-Client-Id": free_id},
+            )
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["target"] == "device.yaml"
+
+        # The freshly claimed job should carry the busy-aware reason —
+        # "first_available", not the misleading "only_eligible_worker".
+        job = next(j for j in ta.queue.get_all() if j.target == "device.yaml")
+        assert job.selection_reason == "first_available"
     finally:
         await ta.close()
 

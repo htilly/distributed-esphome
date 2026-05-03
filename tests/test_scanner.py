@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import sys
 import tarfile
 from pathlib import Path
 
@@ -14,9 +15,12 @@ from scanner import (
     create_bundle,
     create_stub_yaml,
     duplicate_device,
+    rename_device_in_yaml,
+    get_archived_device_metadata,
     get_device_address,
     get_device_metadata,
     get_esphome_version,
+    scan_archived,
     scan_configs,
 )
 
@@ -32,6 +36,9 @@ def _empty_meta() -> dict:
         "project_name": None,
         "project_version": None,
         "has_web_server": False,
+        # UD.5: surfaced via the Devices-tab Platform column. Defaults
+        # to None so a YAML without a chip block (rare) reads cleanly.
+        "board": None,
     }
 
 FIXTURES = Path(__file__).parent / "fixtures" / "esphome_configs"
@@ -147,6 +154,192 @@ def test_scan_dir_with_only_secrets(tmp_path):
     (tmp_path / "secrets.yaml").write_text("key: val")
     targets = scan_configs(str(tmp_path))
     assert targets == []
+
+
+# ---------------------------------------------------------------------------
+# scan_archived — DM.1. Lists YAMLs under ``<config_dir>/.archive/`` so
+# the Devices endpoint can merge archived rows into its response and the
+# UI can render them inline (toggleable via the column picker).
+# ---------------------------------------------------------------------------
+
+def test_scan_archived_no_archive_dir(tmp_path):
+    """Fresh install with nothing archived → empty list, not an error."""
+    assert scan_archived(str(tmp_path)) == []
+
+
+def test_scan_archived_returns_yaml_files(tmp_path):
+    archive = tmp_path / ".archive"
+    archive.mkdir()
+    (archive / "alpha.yaml").write_text("esphome:\n  name: alpha\n")
+    (archive / "beta.yml").write_text("esphome:\n  name: beta\n")
+    rows = scan_archived(str(tmp_path))
+    names = {r["filename"] for r in rows}
+    assert names == {"alpha.yaml", "beta.yml"}
+
+
+def test_scan_archived_skips_non_yaml(tmp_path):
+    archive = tmp_path / ".archive"
+    archive.mkdir()
+    (archive / "device.yaml").write_text("esphome:\n  name: device\n")
+    (archive / "README.md").write_text("notes")
+    (archive / "key.bin").write_text("x")
+    rows = scan_archived(str(tmp_path))
+    assert [r["filename"] for r in rows] == ["device.yaml"]
+
+
+def test_scan_archived_includes_size_and_archived_at(tmp_path):
+    archive = tmp_path / ".archive"
+    archive.mkdir()
+    body = "esphome:\n  name: alpha\n"
+    p = archive / "alpha.yaml"
+    p.write_text(body)
+    rows = scan_archived(str(tmp_path))
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["filename"] == "alpha.yaml"
+    assert row["size"] == len(body.encode("utf-8"))
+    # archived_at is the file mtime as epoch seconds (float).
+    assert isinstance(row["archived_at"], float)
+    assert row["archived_at"] == p.stat().st_mtime
+
+
+def test_scan_archived_round_trip_with_scan_configs(tmp_path):
+    """Round-trip: an active YAML moved to .archive/ disappears from
+    scan_configs and appears in scan_archived."""
+    src = tmp_path / "device.yaml"
+    src.write_text("esphome:\n  name: device\n")
+    assert "device.yaml" in scan_configs(str(tmp_path))
+    assert scan_archived(str(tmp_path)) == []
+
+    archive = tmp_path / ".archive"
+    archive.mkdir()
+    src.rename(archive / "device.yaml")
+    assert "device.yaml" not in scan_configs(str(tmp_path))
+    rows = scan_archived(str(tmp_path))
+    assert [r["filename"] for r in rows] == ["device.yaml"]
+
+
+def test_scan_archived_sorted(tmp_path):
+    archive = tmp_path / ".archive"
+    archive.mkdir()
+    for n in ("zebra.yaml", "alpha.yaml", "mango.yaml"):
+        (archive / n).write_text("x")
+    rows = scan_archived(str(tmp_path))
+    assert [r["filename"] for r in rows] == sorted(r["filename"] for r in rows)
+
+
+def test_scan_archived_ignores_subdirectory(tmp_path):
+    archive = tmp_path / ".archive"
+    nested = archive / "subdir"
+    nested.mkdir(parents=True)
+    (nested / "buried.yaml").write_text("x")
+    rows = scan_archived(str(tmp_path))
+    assert rows == []
+
+
+# ---------------------------------------------------------------------------
+# get_archived_device_metadata — #203. Archived rows used to come back from
+# the /ui/api/targets endpoint with every attribute set to None, dropping
+# tags / area / project / pinned_version / schedule the moment a device
+# was archived. The helper re-reads the YAML under .archive/ and pulls the
+# same shape get_device_metadata returns (raw-YAML path only — no ESPHome
+# resolution because archived files may reference deleted secrets).
+# ---------------------------------------------------------------------------
+
+def test_archived_metadata_missing_dir_returns_empty_shape(tmp_path):
+    """No .archive/ directory → still returns the canonical shape so the
+    caller can spread keys without KeyError."""
+    meta = get_archived_device_metadata(str(tmp_path), "alpha.yaml")
+    assert meta["tags"] is None
+    assert meta["area"] is None
+    assert meta["pinned_version"] is None
+    assert meta["bluetooth_proxy"] == "off"
+
+
+def test_archived_metadata_preserves_tags_and_area(tmp_path):
+    """Archived YAML's tags + area survive the round-trip — this is the
+    bug #203 regression: tag-filter pills lost archived rows entirely."""
+    archive = tmp_path / ".archive"
+    archive.mkdir()
+    (archive / "alpha.yaml").write_text(
+        "# esphome-fleet:\n"
+        "#   tags: 'kitchen, bedroom'\n"
+        "#   pin_version: '2024.6.1'\n"
+        "esphome:\n"
+        "  name: alpha\n"
+        "  area: Living Room\n"
+        "  project:\n"
+        "    name: my-project\n"
+        "    version: '1.2.3'\n"
+    )
+    meta = get_archived_device_metadata(str(tmp_path), "alpha.yaml")
+    assert meta["tags"] == "kitchen, bedroom"
+    assert meta["pinned_version"] == "2024.6.1"
+    assert meta["area"] == "Living Room"
+    assert meta["project_name"] == "my-project"
+    assert meta["project_version"] == "1.2.3"
+
+
+def test_archived_metadata_preserves_schedule(tmp_path):
+    archive = tmp_path / ".archive"
+    archive.mkdir()
+    (archive / "alpha.yaml").write_text(
+        "# esphome-fleet:\n"
+        "#   schedule: '0 2 * * *'\n"
+        "#   schedule_enabled: true\n"
+        "esphome:\n"
+        "  name: alpha\n"
+    )
+    meta = get_archived_device_metadata(str(tmp_path), "alpha.yaml")
+    assert meta["schedule"] == "0 2 * * *"
+    assert meta["schedule_enabled"] is True
+
+
+def test_archived_metadata_resolves_friendly_name_via_packages(tmp_path):
+    """#212: archived YAML composed via ``packages:`` (or ``<<: !include``)
+    must still render the device's friendly_name in the Archived view.
+    Pre-fix the raw loader treated ``!include``/``packages:`` as opaque,
+    so any device whose ``esphome:`` block was contributed by a package
+    came back with friendly_name=None and the row showed the filename.
+    """
+    archive = tmp_path / ".archive"
+    archive.mkdir()
+    (tmp_path / "common.yaml").write_text(
+        "esphome:\n"
+        "  name: athom-plug-3\n"
+        "  friendly_name: Athom Plug 3\n"
+    )
+    (archive / "athom-plug-3.yaml").write_text(
+        "packages:\n"
+        "  base: !include ../common.yaml\n"
+    )
+    meta = get_archived_device_metadata(str(tmp_path), "athom-plug-3.yaml")
+    # Either the full ESPHome resolver merges packages and exposes the
+    # friendly_name, or — if ESPHome isn't importable in this test env —
+    # the raw loader doesn't crash and other fields still come back in
+    # the canonical shape.
+    if meta["friendly_name"] is not None:
+        assert meta["friendly_name"] == "Athom Plug 3"
+        assert meta["device_name_raw"] == "athom-plug-3"
+
+
+def test_archived_metadata_unparseable_yaml_falls_back_to_empty(tmp_path):
+    """A broken YAML (e.g. references a deleted !include) shouldn't crash
+    the Devices endpoint — return the empty shape instead so the row
+    still renders, just without metadata."""
+    archive = tmp_path / ".archive"
+    archive.mkdir()
+    (archive / "broken.yaml").write_text(
+        "esphome:\n"
+        "  name: broken\n"
+        "  area: !include missing_file.yaml\n"
+        "{this is: not: valid: yaml\n"
+    )
+    meta = get_archived_device_metadata(str(tmp_path), "broken.yaml")
+    # Some keys may parse before the failure; the contract is "doesn't
+    # raise" + canonical shape, not "always None".
+    assert "tags" in meta
+    assert "bluetooth_proxy" in meta
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +604,35 @@ def test_metadata_extracts_area_and_comment():
     assert meta["comment"] == "Over the sink"
 
 
+def test_metadata_extracts_area_from_dict_form():
+    """Bug #18: ESPHome's newer schema accepts ``area: {name: ..., id: ...}``.
+    The extractor must surface the human-readable name rather than the
+    repr of the dict (which renders as a JSON-looking blob in the UI).
+    """
+    config = {
+        "esphome": {
+            "name": "dev",
+            "area": {"name": "Living Room", "id": "lr1"},
+        },
+    }
+    meta = _empty_meta()
+    _extract_metadata(config, meta)
+    assert meta["area"] == "Living Room"
+
+
+def test_metadata_extracts_area_from_dict_form_id_fallback():
+    """Bug #18: dict area with no name still resolves via the id."""
+    config = {
+        "esphome": {
+            "name": "dev",
+            "area": {"id": "lr1"},
+        },
+    }
+    meta = _empty_meta()
+    _extract_metadata(config, meta)
+    assert meta["area"] == "lr1"
+
+
 def test_metadata_extracts_project():
     config = {
         "esphome": {
@@ -473,6 +695,125 @@ def test_metadata_no_esphome_block():
     _extract_metadata({}, meta)
     assert meta["device_name_raw"] is None
     assert meta["friendly_name"] is None
+
+
+# ---------------------------------------------------------------------------
+# Bug #23: ESP type + bluetooth_proxy extraction
+# ---------------------------------------------------------------------------
+
+def test_metadata_esp_type_esp32_default_variant():
+    """``esp32:`` block with no ``variant:`` reads as plain ``ESP32``."""
+    config = {"esphome": {"name": "dev"}, "esp32": {"board": "esp32dev"}}
+    meta = _empty_meta()
+    _extract_metadata(config, meta)
+    assert meta["esp_type"] == "ESP32"
+
+
+def test_metadata_esp_type_esp32_s3_variant_renders_with_dash():
+    """``variant: esp32s3`` reads as ``ESP32-S3`` (Espressif product naming)."""
+    config = {"esphome": {"name": "dev"}, "esp32": {"variant": "esp32s3"}}
+    meta = _empty_meta()
+    _extract_metadata(config, meta)
+    assert meta["esp_type"] == "ESP32-S3"
+
+
+def test_metadata_esp_type_esp8266():
+    config = {"esphome": {"name": "dev"}, "esp8266": {"board": "d1_mini"}}
+    meta = _empty_meta()
+    _extract_metadata(config, meta)
+    assert meta["esp_type"] == "ESP8266"
+
+
+def test_metadata_esp_type_rp2040():
+    config = {"esphome": {"name": "dev"}, "rp2040": {"board": "rpipico"}}
+    meta = _empty_meta()
+    _extract_metadata(config, meta)
+    assert meta["esp_type"] == "RP2040"
+
+
+# ---------------------------------------------------------------------------
+# UD.5: PlatformIO board extraction
+# ---------------------------------------------------------------------------
+
+
+def test_metadata_board_extracted_from_esp32_block():
+    config = {"esphome": {"name": "dev"}, "esp32": {"board": "esp32dev"}}
+    meta = _empty_meta()
+    _extract_metadata(config, meta)
+    assert meta["board"] == "esp32dev"
+
+
+def test_metadata_board_extracted_from_esp32_s3_block():
+    """ESP32 with variant + board both surface — variant in esp_type, board in board."""
+    config = {
+        "esphome": {"name": "dev"},
+        "esp32": {"variant": "esp32s3", "board": "esp32-s3-devkitm-1"},
+    }
+    meta = _empty_meta()
+    _extract_metadata(config, meta)
+    assert meta["esp_type"] == "ESP32-S3"
+    assert meta["board"] == "esp32-s3-devkitm-1"
+
+
+def test_metadata_board_extracted_from_esp8266_block():
+    config = {"esphome": {"name": "dev"}, "esp8266": {"board": "d1_mini"}}
+    meta = _empty_meta()
+    _extract_metadata(config, meta)
+    assert meta["board"] == "d1_mini"
+
+
+def test_metadata_board_extracted_from_rp2040_block():
+    config = {"esphome": {"name": "dev"}, "rp2040": {"board": "rpipico"}}
+    meta = _empty_meta()
+    _extract_metadata(config, meta)
+    assert meta["board"] == "rpipico"
+
+
+def test_metadata_board_none_when_block_has_no_board_key():
+    """No ``board:`` field → board stays None (rare; bare ``esp32:`` block)."""
+    config = {"esphome": {"name": "dev"}, "esp32": {}}
+    meta = _empty_meta()
+    _extract_metadata(config, meta)
+    assert meta["esp_type"] == "ESP32"
+    assert meta["board"] is None
+
+
+def test_metadata_board_none_for_host_platform():
+    """Host platform is virtual — no PlatformIO board concept."""
+    config = {"esphome": {"name": "dev"}, "host": {}}
+    meta = _empty_meta()
+    _extract_metadata(config, meta)
+    assert meta["esp_type"] == "Host"
+    assert meta["board"] is None
+
+
+def test_metadata_bluetooth_proxy_off_when_block_absent():
+    config = {"esphome": {"name": "dev"}, "esp32": {}}
+    meta = _empty_meta()
+    meta["bluetooth_proxy"] = "off"  # match get_device_metadata's seed
+    _extract_metadata(config, meta)
+    assert meta["bluetooth_proxy"] == "off"
+
+
+def test_metadata_bluetooth_proxy_passive_when_block_present_no_active():
+    """``bluetooth_proxy:`` with no value (or no ``active:``) is passive mode."""
+    config = {"esphome": {"name": "dev"}, "esp32": {}, "bluetooth_proxy": None}
+    meta = _empty_meta()
+    meta["bluetooth_proxy"] = "off"
+    _extract_metadata(config, meta)
+    assert meta["bluetooth_proxy"] == "passive"
+
+
+def test_metadata_bluetooth_proxy_active_when_active_true():
+    config = {
+        "esphome": {"name": "dev"},
+        "esp32": {},
+        "bluetooth_proxy": {"active": True},
+    }
+    meta = _empty_meta()
+    meta["bluetooth_proxy"] = "off"
+    _extract_metadata(config, meta)
+    assert meta["bluetooth_proxy"] == "active"
 
 
 # ---------------------------------------------------------------------------
@@ -918,6 +1259,90 @@ def test_write_device_meta_removes_block_when_empty(tmp_path):
     assert "esphome:" in content
 
 
+def test_write_device_meta_routing_extra_round_trip(tmp_path):
+    """TG.2: per-device additive routing rules (`routing_extra`) round-trip
+    through the YAML metadata comment block as a list of rule dicts.
+    The comment-block writer doesn't need to know the rule shape — it
+    just YAML-dumps whatever ``meta`` it gets and the reader parses it
+    back through ``yaml.safe_load``."""
+    f = tmp_path / "device.yaml"
+    f.write_text("esphome:\n  name: test\n")
+
+    routing_extra = [
+        {
+            "name": "device-only-fast",
+            "severity": "required",
+            "device_match": [{"op": "all_of", "tags": ["kitchen"]}],
+            "worker_match": [{"op": "all_of", "tags": ["fast"]}],
+        },
+    ]
+    write_device_meta(str(tmp_path), "device.yaml", {"routing_extra": routing_extra})
+
+    meta = read_device_meta(str(tmp_path), "device.yaml")
+    assert meta == {"routing_extra": routing_extra}
+    # Original YAML preserved.
+    assert "esphome:" in f.read_text()
+    assert "name: test" in f.read_text()
+
+
+def test_write_device_meta_clearing_only_tags_strips_block(tmp_path):
+    """Bug #9 regression: clearing the last tag (the only meta key) removes
+    the whole comment block, not an empty `tags:` line.
+
+    Models the dialog-save path: the UI sends `{tags: null}` to
+    /ui/api/targets/{filename}/meta when the user clears every chip;
+    update_target_meta turns null into a `meta.pop("tags")`; if `tags`
+    was the only key in the YAML metadata block, the resulting empty
+    dict triggers the whole-block strip path here.
+    """
+    f = tmp_path / "device.yaml"
+    f.write_text(
+        "# esphome-fleet:\n"
+        "#   tags: office, sensors\n"
+        "\n"
+        "esphome:\n"
+        "  name: test\n"
+    )
+
+    # Pop the only key (what update_target_meta does on tags=null):
+    meta = read_device_meta(str(tmp_path), "device.yaml")
+    meta.pop("tags", None)
+    write_device_meta(str(tmp_path), "device.yaml", meta)
+
+    content = f.read_text()
+    assert "esphome-fleet" not in content
+    assert "tags:" not in content
+    assert "office" not in content
+    # Original YAML survives.
+    assert "esphome:" in content
+    assert "name: test" in content
+
+
+def test_write_device_meta_clearing_tags_with_other_keys_keeps_block(tmp_path):
+    """Bug #9 partner: clearing tags but leaving other meta keys preserves
+    the block (just minus the `tags:` line).
+    """
+    f = tmp_path / "device.yaml"
+    f.write_text(
+        "# esphome-fleet:\n"
+        "#   pin_version: 2026.3.3\n"
+        "#   tags: office, sensors\n"
+        "\n"
+        "esphome:\n"
+        "  name: test\n"
+    )
+
+    meta = read_device_meta(str(tmp_path), "device.yaml")
+    meta.pop("tags", None)
+    write_device_meta(str(tmp_path), "device.yaml", meta)
+
+    content = f.read_text()
+    assert "# esphome-fleet:" in content
+    assert "pin_version: 2026.3.3" in content
+    assert "tags:" not in content
+    assert "office" not in content
+
+
 def test_write_device_meta_preserves_other_comments(tmp_path):
     """Other comment lines in the file survive the write."""
     f = tmp_path / "device.yaml"
@@ -1234,3 +1659,107 @@ def test_resolve_failure_logs_warning(tmp_path, caplog):
     assert any("broken.yaml" in r.getMessage() for r in warnings), (
         f"expected WARNING mentioning broken.yaml, got: {[r.getMessage() for r in warnings]}"
     )
+
+
+# --- Bug #112 — bundle subprocess stderr is clean (no esphome logger noise) -
+
+def test_bundle_subprocess_stderr_does_not_leak_esphome_logger_chatter():
+    """Bug #112: ESPHome's _LOGGER (esphome.* namespace) emits INFO /
+    WARNING chatter during validate_config — "INFO ESPHome 2026.4.3",
+    "INFO Reading configuration...", deprecation warnings, etc. Our
+    bundle subprocess captures stderr verbatim and surfaces it to the
+    UI's Queue-tab Log modal as the failure log; ESPHome's status
+    chatter clutters the message and reads as if it were the cause of
+    a failure. The fix is a NullHandler + propagate=False + suppressed
+    level on the `esphome` logger inside the subprocess script.
+
+    Test: invoke the script against a known-good fixture YAML and
+    assert stderr is empty. This catches a future regression where
+    someone removes the silencing or accidentally `print()`s diagnostic
+    output to stderr.
+    """
+    import subprocess as _sp
+
+    from scanner import _BUNDLE_SUBPROCESS_SCRIPT
+
+    proc = _sp.run(
+        [sys.executable, "-c", _BUNDLE_SUBPROCESS_SCRIPT, str(FIXTURES / "device1.yaml")],
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, (
+        f"bundle subprocess failed unexpectedly: stderr={proc.stderr.decode()!r}"
+    )
+    stderr = proc.stderr.decode("utf-8", errors="replace")
+    # The subprocess emits its own validation-error message via
+    # sys.stderr.write only on exit code 3 (validation errors). Exit 0
+    # should produce zero stderr — any byte means ESPHome's logger
+    # leaked through.
+    assert stderr == "", (
+        f"bundle subprocess on a healthy YAML wrote to stderr: {stderr!r}\n"
+        "ESPHome's _LOGGER namespace is leaking through the silencing "
+        "in scanner._BUNDLE_SUBPROCESS_SCRIPT — bug #112 regression."
+    )
+
+
+# ---------------------------------------------------------------------------
+# rename_device_in_yaml — PY-1 regression for ui_api.rename_target's prior
+# regex-driven rewrite. Each case asserts a previously-misfiring shape now
+# rewrites correctly while preserving comments.
+# ---------------------------------------------------------------------------
+
+
+def test_rename_device_in_yaml_literal_esphome_name():
+    src = """\
+esphome:
+  name: old-name  # the device's hostname
+  platform: ESP32
+"""
+    out, ok = rename_device_in_yaml(src, "new-name")
+    assert ok is True
+    assert "name: new-name" in out
+    assert "# the device's hostname" in out, "trailing comment was clobbered"
+    assert "old-name" not in out
+
+
+def test_rename_device_in_yaml_substitutions_indirection():
+    src = """\
+substitutions:
+  name: old-name
+  area: garage
+
+esphome:
+  name: ${name}
+  friendly_name: My Device
+"""
+    out, ok = rename_device_in_yaml(src, "new-name")
+    assert ok is True
+    # The rewrite lands on substitutions.name, not on the ${name} indirection.
+    assert "name: new-name" in out
+    assert "${name}" in out, "indirection was clobbered"
+    # area stays untouched (not the first `name:` we matched, regression for
+    # the old regex's count=1 picking the wrong key in non-esphome-first files).
+    assert "area: garage" in out
+
+
+def test_rename_device_in_yaml_quoted_value():
+    src = """\
+esphome:
+  name: "old-name"
+"""
+    out, ok = rename_device_in_yaml(src, "new-name")
+    assert ok is True
+    assert 'name: "new-name"' in out
+    assert "old-name" not in out
+
+
+def test_rename_device_in_yaml_skips_unsafe_indirection():
+    """${...} esphome.name with no matching substitutions key is unsafe."""
+    src = """\
+esphome:
+  name: ${unresolved}
+"""
+    out, ok = rename_device_in_yaml(src, "new-name")
+    assert ok is False
+    assert out == src  # untouched

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import useSWR from 'swr';
+import { mutate as mutateGlobal } from 'swr';
 import { Settings2 } from 'lucide-react';
 import {
   useReactTable,
@@ -11,11 +11,14 @@ import {
   type RowSelectionState,
 } from '@tanstack/react-table';
 import {
-  getArchivedConfigs,
+  deleteArchivedConfig,
   pinTargetVersion,
+  restoreArchivedConfig,
   unpinTargetVersion,
-  type ArchivedConfig,
+  updateTargetMeta,
 } from '../api/client';
+import { TagsEditDialog } from './TagsEditDialog';
+import { TagFilterBar } from './TagFilterBar';
 import type { AddressSource, Device, Job, Target, Worker } from '../types';
 import { stripYaml, haDeepLink, usePersistedState } from '../utils';
 import { StatusDot } from './StatusDot';
@@ -25,11 +28,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from './ui/dialog';
-import { ArchivedDevicesList } from './ArchivedDevicesList';
 import { getAriaSort } from './ui/sort-header';
 import { DeleteModal, RenameModal } from './devices/DeviceTableModals';
 import { useDeviceColumns } from './devices/useDeviceColumns';
 import { DeviceTableActions } from './devices/DeviceTableActions';
+import { hasDriftedConfig } from './devices/drift';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -42,7 +45,7 @@ import {
 } from './ui/dropdown-menu';
 
 /* ---- Column configuration ---- */
-type OptionalColumnId = 'status' | 'ha' | 'ip' | 'mac' | 'running' | 'area' | 'comment' | 'project' | 'net' | 'ipconfig' | 'ap' | 'schedule' | 'last_compiled';
+type OptionalColumnId = 'status' | 'ha' | 'ip' | 'mac' | 'running' | 'area' | 'comment' | 'tags' | 'project' | 'net' | 'ipconfig' | 'ap' | 'esp' | 'ble' | 'schedule' | 'last_compiled';
 
 interface OptionalColumnDef {
   id: OptionalColumnId;
@@ -50,11 +53,23 @@ interface OptionalColumnDef {
   defaultVisible: boolean;
 }
 
-// #69: entries are ordered to match the actual column render order in
-// ``useDeviceColumns.tsx``. The picker renders checkboxes in this
-// order, so keeping them aligned means toggling a column on/off
-// matches the user's left-to-right reading of the table itself.
+// Bug #19: order MUST match the actual column render order in
+// ``useDeviceColumns.tsx`` exactly — the picker renders checkboxes in
+// this order, and a mismatch means toggling a column visually drifts
+// from the user's left-to-right reading of the table. Enforced by
+// ``OPTIONAL_COLUMNS_ORDER_MATCHES_TABLE`` invariant test in
+// ``e2e/column-picker-order.spec.ts``.
+//
+// Current table order (from useDeviceColumns):
+//   select, device, tags, status, ha, ip, mac, net, ipconfig, ap,
+//   esp, ble, schedule, last_compiled, running, area, comment, project, actions
+// Picker covers the optional / hideable subset (everything except
+// select, device, actions which are always-visible).
 const OPTIONAL_COLUMNS: OptionalColumnDef[] = [
+  // TG.5: read-only chip-pill tag column. Default ON so a user adding
+  // tags via YAML (or via TG.4's API) sees them without hunting through
+  // the column-visibility menu first.
+  { id: 'tags', label: 'Tags', defaultVisible: true },
   { id: 'status', label: 'Status', defaultVisible: true },
   { id: 'ha', label: 'HA', defaultVisible: true },
   { id: 'ip', label: 'IP', defaultVisible: true },
@@ -65,6 +80,14 @@ const OPTIONAL_COLUMNS: OptionalColumnDef[] = [
   { id: 'net', label: 'Net', defaultVisible: true },
   { id: 'ipconfig', label: 'IP Config', defaultVisible: false },
   { id: 'ap', label: 'AP', defaultVisible: false },
+  // Bug #23 + UD.5: chip family + PlatformIO board on a stacked
+  // two-line cell, plus BLE proxy mode. Off by default — useful for
+  // fleet-scale scanning ("which devices are ESP32-S3?", "which are
+  // passive BLE proxies?") but adds two narrow columns most users
+  // don't need on the default layout. Renamed "ESP" → "Platform" in
+  // UD.5 to reflect that it now answers chip + board, not just chip.
+  { id: 'esp', label: 'Platform', defaultVisible: false },
+  { id: 'ble', label: 'BLE proxy', defaultVisible: false },
   { id: 'schedule', label: 'Schedule', defaultVisible: true },
   // JH.6: opt-in "Last compiled" column. Off by default so existing users
   // see no layout churn; power users toggle it on to spot stale devices.
@@ -137,14 +160,19 @@ interface Props {
    * in flight (#32).
    */
   activeJobsByTarget: Map<string, Job>;
-  onCompile: (targets: string[] | 'all' | 'outdated') => void;
   /**
    * Per-row click handler for the Upgrade button (#16). Opens the
-   * UpgradeModal which collects worker + ESPHome version preferences. The
-   * onCompile prop is still used for the bulk Upgrade dropdown actions
-   * (Upgrade All, Upgrade Outdated, etc.) — those don't go through the modal.
+   * UpgradeModal which collects worker + ESPHome version preferences.
    */
   onUpgradeOne: (target: string) => void;
+  /**
+   * Bug #107: bulk-upgrade entry point. The four Upgrade dropdown
+   * items (All / Online / Outdated / Selected) materialise their target
+   * lists here and open the UpgradeModal so the user can choose
+   * worker/version/action just like the per-row flow. The chosen
+   * options apply uniformly across the whole set.
+   */
+  onUpgradeMany: (targets: string[], displayName: string) => void;
   onEdit: (target: string) => void;
   onLogs: (target: string) => void;
   onToast: (msg: string, type?: 'info' | 'success' | 'error') => void;
@@ -161,6 +189,12 @@ interface Props {
   onOpenCompileHistory: (target: string) => void;
   /** Bug #16: open the manual-commit dialog for a target. */
   onCommitChanges: (target: string) => void;
+  /** RC.1: open the read-only rendered-config viewer. */
+  onViewRenderedConfig: (target: string) => void;
+  /** DM.2: open the ICMP ping diagnostic modal. */
+  onPing: (target: string) => void;
+  /** DM.3: open the install-to-specific-address modal. */
+  onInstallToAddress: (target: string) => void;
   /** Trigger an immediate SWR revalidation of the devices/targets data. */
   onRefresh: () => void;
 }
@@ -195,12 +229,33 @@ function formatAddressSource(source: AddressSource | null | undefined): string |
   }
 }
 
+// UD.1: explanatory hover copy mirrored from useDeviceColumns.tsx for
+// the unmanaged-row IP cell. Both surfaces should hover-explain the
+// detection mechanism (especially ARP) instead of surfacing the raw
+// enum.
+function formatAddressSourceTooltip(source: AddressSource | null | undefined): string | null {
+  switch (source) {
+    case 'mdns': return 'Detected via mDNS — the device advertises itself on the local network with the hostname from the YAML.';
+    case 'wifi_use_address': return 'From wifi.use_address in the device YAML — overrides hostname-based discovery.';
+    case 'ethernet_use_address': return 'From ethernet.use_address in the device YAML — overrides hostname-based discovery.';
+    case 'openthread_use_address': return 'From openthread.use_address in the device YAML — overrides hostname-based discovery.';
+    case 'wifi_static_ip': return 'From wifi.manual_ip.static_ip in the device YAML — the OTA upload targets this fixed address.';
+    case 'ethernet_static_ip': return 'From ethernet.manual_ip.static_ip in the device YAML — the OTA upload targets this fixed address.';
+    case 'mdns_default': return null;
+    case 'arp': return 'Detected via ARP scan of the local network — mDNS came up empty, so the add-on broadcast an ARP probe and matched the MAC against the device.';
+    default: return null;
+  }
+}
+
 // QS.19: RenameModal + DeleteModal live in ./devices/DeviceTableModals.
 // RenameModal is re-exported so App.tsx's existing import path still works.
 export { RenameModal };
 
-export function DevicesTab({ targets, devices, workers, streamerMode, activeJobsByTarget, onCompile, onUpgradeOne, onEdit, onLogs, onToast, onDelete, onRename, onSchedule, onNewDevice, onDuplicate, onOpenHistory, onOpenCompileHistory, onCommitChanges, onRefresh }: Props) {
+export function DevicesTab({ targets, devices, workers, streamerMode, activeJobsByTarget, onUpgradeOne, onUpgradeMany, onEdit, onLogs, onToast, onDelete, onRename, onSchedule, onNewDevice, onDuplicate, onOpenHistory, onOpenCompileHistory, onCommitChanges, onViewRenderedConfig, onPing, onInstallToAddress, onRefresh }: Props) {
   const [filter, setFilter] = useState('');
+  // TG.5 filter pills — selected tag set, persisted to localStorage so the
+  // "show me kitchen OR bedroom" filter sticks across reloads.
+  const [tagFilter, setTagFilter] = usePersistedState<string[]>('devices-tag-filter', []);
   // QS.27: persist sort across reloads via localStorage.
   const [sorting, setSorting] = usePersistedState<SortingState>('devices-sort', []);
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(loadColumnVisibility);
@@ -210,32 +265,27 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
   // #2: hamburger open state lives here so it survives row remounts
   // triggered by SWR polls. See useDeviceColumns / DeviceContextMenu.
   const [menuOpenTarget, setMenuOpenTarget] = useState<string | null>(null);
+  // TG.5 inline edit — same lift-out-of-row pattern. ``null`` = closed.
+  const [tagsEditTarget, setTagsEditTarget] = useState<string | null>(null);
   const [showUnmanaged, setShowUnmanaged] = useState(() => localStorage.getItem('showUnmanaged') !== 'false');
-  // #62: Devices-toolbar Archive button → shadcn Dialog wrapping the
-  // shared ArchivedDevicesList component. State lives here rather
-  // than in App.tsx because the button's local to this tab.
-  const [archiveOpen, setArchiveOpen] = useState(false);
+  // DM.1: in-tab archived toggle replaces the standalone
+  // ArchivedDevicesList surface. Off by default so a fresh install
+  // doesn't show archived rows; the column picker has a "Show archived
+  // devices" entry that flips this. Persisted to localStorage so the
+  // preference survives reloads (matching the showUnmanaged pattern).
+  const [showArchived, setShowArchived] = useState(() => localStorage.getItem('devices-show-archived') === 'true');
   // #70: "Duplicate existing device" picker state. Opened from the
   // "Add device ▾" dropdown. Shows a list of existing targets the
   // user can pick to duplicate; selection calls onDuplicate() which
   // routes back to the NewDeviceModal in duplicate mode.
   const [duplicatePickerOpen, setDuplicatePickerOpen] = useState(false);
-  // #73: watch archive count so we can (a) gray out the "Restore from
-  // archive" menu item when the archive is empty and (b) auto-close
-  // the archive dialog once the user restores or permanently-deletes
-  // its last item. Both this hook and ArchivedDevicesList subscribe to
-  // the same SWR key, so SWR dedupes the request and a mutate() from
-  // the list re-renders both. revalidateOnFocus stays off to match
-  // the list's config.
-  const { data: archivedConfigs } = useSWR<ArchivedConfig[]>(
-    'archived-configs',
-    getArchivedConfigs,
-    { revalidateOnFocus: false },
-  );
-  const archiveEmpty = !archivedConfigs || archivedConfigs.length === 0;
-  useEffect(() => {
-    if (archiveOpen && archiveEmpty) setArchiveOpen(false);
-  }, [archiveOpen, archiveEmpty]);
+  // DM.1: per-row "permanently delete" two-step confirm. Mirrors the
+  // existing DeleteModal flow but scoped to archived rows (the
+  // restore-and-delete vocabulary is different, so the modal text is
+  // tailored). ``null`` = closed; otherwise the archived filename
+  // pending confirmation.
+  const [permanentDeleteTarget, setPermanentDeleteTarget] = useState<string | null>(null);
+  const [permanentDeleteBusy, setPermanentDeleteBusy] = useState(false);
 
   // VP.4 / QS.20: pin/unpin version from the hamburger menu. Memoized so
   // useDeviceColumns' dep array can actually cache — the hook re-runs only
@@ -266,6 +316,41 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
     }
   }, [onToast]);
 
+  // DM.1: archived-row actions. Restore moves the YAML back under
+  // /config/esphome/; permanent-delete opens the two-step confirm
+  // dialog. The /ui/api/archive* endpoints stay in place for one
+  // release as a soft-deprecate so external scripts don't break.
+  const handleUnarchive = useCallback(async (target: string) => {
+    try {
+      await restoreArchivedConfig(target);
+      onToast(`Restored ${stripYaml(target)}`, 'success');
+      // The targets endpoint now drops the archived row + adds an
+      // active one; the SWR poll will pick that up but a forced
+      // refresh keeps the UI snappy. Plus invalidate the lingering
+      // archived-configs SWR key (still used by the version banner).
+      onRefresh();
+      mutateGlobal('archived-configs');
+    } catch (err) {
+      onToast('Unarchive failed: ' + (err as Error).message, 'error');
+    }
+  }, [onToast, onRefresh]);
+
+  const handlePermanentDeleteConfirm = useCallback(async () => {
+    if (!permanentDeleteTarget) return;
+    setPermanentDeleteBusy(true);
+    try {
+      await deleteArchivedConfig(permanentDeleteTarget);
+      onToast(`Permanently deleted ${stripYaml(permanentDeleteTarget)}`, 'success');
+      onRefresh();
+      mutateGlobal('archived-configs');
+      setPermanentDeleteTarget(null);
+    } catch (err) {
+      onToast('Delete failed: ' + (err as Error).message, 'error');
+    } finally {
+      setPermanentDeleteBusy(false);
+    }
+  }, [permanentDeleteTarget, onToast, onRefresh]);
+
   // Persist column visibility and unmanaged toggle to localStorage
   useEffect(() => {
     saveColumnVisibility(columnVisibility);
@@ -273,6 +358,9 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
   useEffect(() => {
     localStorage.setItem('showUnmanaged', String(showUnmanaged));
   }, [showUnmanaged]);
+  useEffect(() => {
+    localStorage.setItem('devices-show-archived', String(showArchived));
+  }, [showArchived]);
 
   // Build a set of device names that are already shown as managed targets
   // to prevent duplicates when compile_target mapping has a race condition
@@ -301,11 +389,51 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
     [devices, managedDeviceNames, managedIPs]
   );
 
+  // TG.5 filter pills — fleet-wide tag pool with usage counts, sorted
+  // alphabetically. The TagFilterBar component reads this directly.
+  // #203: archived rows contribute their tags only when the user has
+  // archived devices visible; otherwise the pill bar would offer tags
+  // that filter no visible row (and bumping the count for an "Archived
+  // only" tag would mislead — the count is over the visible set).
+  const tagPool = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const t of targets) {
+      if (t.archived && !showArchived) continue;
+      if (t.tags) for (const tag of t.tags.split(',').map(s => s.trim()).filter(Boolean)) {
+        counts.set(tag, (counts.get(tag) ?? 0) + 1);
+      }
+    }
+    return Array.from(counts.entries())
+      .map(([tag, count]) => ({ tag, count }))
+      .sort((a, b) => a.tag.localeCompare(b.tag));
+  }, [targets, showArchived]);
+
   // Filter targets before passing to TanStack (filter state owned here, not in TanStack)
+  // DM.1: archived rows are included in the data set when the toggle is
+  // on. They render in their own group below the active rows
+  // (sorted-by-archived_at-desc), so their inclusion in the TanStack
+  // data set is purely so the table can render them with the same
+  // column flexRender pipeline.
   const filteredTargets = useMemo(() => {
-    const sorted = [...targets].sort((a, b) => a.target.localeCompare(b.target));
-    if (!filter) return sorted;
-    return sorted.filter(t =>
+    const visible = showArchived ? targets : targets.filter(t => !t.archived);
+    const sorted = [...visible].sort((a, b) => a.target.localeCompare(b.target));
+    // TG.5 filter pills: AND-logic across selected tags (#222). A row
+    // matches only when it has *every* selected tag. Pre-#222 this was
+    // OR ("any of"), but in practice users want progressive narrowing —
+    // pick `kitchen`, then `prod` to see kitchen-AND-prod, not the
+    // union. Empty selection = no filter. Applied before the search-box
+    // text filter so a search with active pill filters narrows the
+    // already-pill-filtered set.
+    const tagged = tagFilter.length === 0
+      ? sorted
+      : sorted.filter(t => {
+          const ts = new Set(
+            (t.tags || '').split(',').map(s => s.trim()).filter(Boolean),
+          );
+          return tagFilter.every(x => ts.has(x));
+        });
+    if (!filter) return tagged;
+    return tagged.filter(t =>
       matchesFilter(
         filter,
         t.friendly_name,
@@ -318,11 +446,18 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
         t.area,
         t.comment,
         t.project_name,
+        // TG.5: tags participate in the existing search box (substring,
+        // case-insensitive) on top of the pill filter.
+        t.tags,
       )
     );
-  }, [targets, filter]);
+  }, [targets, filter, tagFilter, showArchived]);
 
   const filteredUnmanaged = useMemo(() => {
+    // TG.5: an active pill filter means "show me devices with these
+    // tags" — unmanaged devices have no tags, so hide them entirely
+    // while a filter is active.
+    if (tagFilter.length > 0) return [];
     if (!filter) return unmanaged;
     return unmanaged.filter(d =>
       matchesFilter(
@@ -334,7 +469,7 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
         d.running_version,
       )
     );
-  }, [unmanaged, filter]);
+  }, [unmanaged, filter, tagFilter]);
 
   const columns = useDeviceColumns({
     activeJobsByTarget,
@@ -352,8 +487,23 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
     onOpenHistory,
     onOpenCompileHistory,
     onCommitChanges,
+    onViewRenderedConfig,
+    onPing,
+    onInstallToAddress,
     menuOpenTarget,
     setMenuOpenTarget,
+    onEditTags: setTagsEditTarget,
+    // Bug #3: Archive directly without opening the Delete confirmation
+    // modal. The configs are restorable from the column-picker "Show
+    // archived devices" toggle (DM.1 retired the separate dialog), so
+    // a confirm step here just slows down a non-destructive action.
+    onArchive: (target: string) => {
+      onDelete(target, true);
+      onToast(`Archived ${stripYaml(target)} — restore from the column picker → Show archived`, 'info');
+    },
+    // DM.1: archived-row actions.
+    onUnarchive: handleUnarchive,
+    onPermanentDelete: setPermanentDeleteTarget,
   });
 
 
@@ -381,9 +531,11 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
 
   const selectedTargets = table.getSelectedRowModel().rows.map(r => r.original.target);
 
-  function handleCompileSelected() {
+  // Bug #107: route every bulk-upgrade entry point through the
+  // UpgradeModal so the user can pick worker/version/action up-front.
+  function handleUpgradeSelected() {
     if (selectedTargets.length === 0) return;
-    onCompile(selectedTargets);
+    onUpgradeMany(selectedTargets, `${selectedTargets.length} selected device${selectedTargets.length === 1 ? '' : 's'}`);
   }
   // QS.18: bulk schedule state + handlers + modal now live in DeviceTableActions.
 
@@ -421,11 +573,10 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
             )}
           </div>
           <div className="actions">
-            {/* #70: "Add device ▾" dropdown consolidates the three ways
-                a device lands in the fleet — blank-slate new, duplicate
-                from an existing YAML, or restore from the soft-delete
-                archive. Replaces the separate "+ New Device" + "Archive…"
-                buttons. */}
+            {/* DM.1: "Restore from archive…" entry retired. Archived
+                devices are now visible in the table itself via the
+                column picker → Show archived devices toggle, and
+                Unarchive lives on each archived row's hamburger. */}
             <DropdownMenu>
               <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg border border-transparent bg-primary px-2.5 h-7 text-[0.8rem] font-medium text-primary-foreground hover:bg-primary/80 cursor-pointer">
                 Add device <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
@@ -442,14 +593,6 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
                   >
                     Duplicate existing device…
                   </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem
-                    onClick={() => setArchiveOpen(true)}
-                    disabled={archiveEmpty}
-                    title={archiveEmpty ? "Archive is empty — delete a device to populate it" : undefined}
-                  >
-                    Restore from archive…
-                  </DropdownMenuItem>
                 </DropdownMenuGroup>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -460,26 +603,74 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="min-w-[180px]">
                 <DropdownMenuGroup>
-                  <DropdownMenuItem onClick={() => {
-                    const all = targets.map(t => t.target);
-                    if (all.length > 0) onCompile(all);
-                  }}>
+                  {/* Bug #107: every bulk-upgrade entry point opens the
+                      shared UpgradeModal — same worker / version /
+                      action picker as the per-row Upgrade button — and
+                      applies the chosen options uniformly across the
+                      affected set. */}
+                  {/* #229: every bulk-Upgrade predicate excludes archived
+                      rows up front. The `/ui/api/targets` response merges
+                      `.archive/*.yaml` into the same list (DM.1 in-tab
+                      surface) with `online=null` / `needs_update=null` /
+                      `config_modified=null`, and the server's
+                      `start_compile` silently filters them out via
+                      `set(scan_configs(...))`. Without these guards the
+                      toast counts the optimistic UI total (e.g. "queued
+                      95") while the queue only ever holds the active
+                      subset (e.g. 68 actually compile). The two filters
+                      that *would* leak — `Upgrade All` (no predicate at
+                      all) and `Upgrade All Online` (`online !== false`
+                      passes `null`) — are now corrected; the others get
+                      the same `!t.archived` guard for symmetry so a
+                      future schema tweak can't reintroduce the leak. */}
+                  <DropdownMenuItem
+                    onClick={() => {
+                      const all = targets.filter(t => !t.archived).map(t => t.target);
+                      if (all.length > 0) onUpgradeMany(all, `all ${all.length} device${all.length === 1 ? '' : 's'}`);
+                    }}
+                    disabled={!targets.some(t => !t.archived)}
+                  >
                     Upgrade All
                   </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => {
-                    const onlineTargets = targets.filter(t => t.online !== false).map(t => t.target);
-                    if (onlineTargets.length > 0) onCompile(onlineTargets);
-                  }}>
+                  <DropdownMenuItem
+                    onClick={() => {
+                      const onlineTargets = targets.filter(t => !t.archived && t.online !== false).map(t => t.target);
+                      if (onlineTargets.length > 0) onUpgradeMany(onlineTargets, `${onlineTargets.length} online device${onlineTargets.length === 1 ? '' : 's'}`);
+                    }}
+                    disabled={!targets.some(t => !t.archived && t.online !== false)}
+                  >
                     Upgrade All Online
                   </DropdownMenuItem>
                   <DropdownMenuItem
-                    onClick={() => onCompile('outdated')}
-                    disabled={!targets.some(t => t.needs_update)}
+                    onClick={() => {
+                      const outdated = targets.filter(t => !t.archived && t.needs_update).map(t => t.target);
+                      if (outdated.length > 0) onUpgradeMany(outdated, `${outdated.length} outdated device${outdated.length === 1 ? '' : 's'}`);
+                    }}
+                    disabled={!targets.some(t => !t.archived && t.needs_update)}
                   >
                     Upgrade Outdated
                   </DropdownMenuItem>
+                  {/* 115: "Upgrade Changed" — devices whose YAML has
+                      drifted from what's currently flashed. Shares the
+                      `hasDriftedConfig` helper with the per-row drift
+                      indicator so the menu picks the same set the user
+                      already sees marked. Distinct from "Outdated" (the
+                      latter is firmware-version mismatch; this is
+                      configuration drift). */}
+                  <DropdownMenuItem
+                    onClick={() => {
+                      const changed = targets.filter(t => !t.archived && hasDriftedConfig(t)).map(t => t.target);
+                      if (changed.length > 0) onUpgradeMany(changed, `${changed.length} changed device${changed.length === 1 ? '' : 's'}`);
+                    }}
+                    disabled={!targets.some(t => !t.archived && hasDriftedConfig(t))}
+                  >
+                    Upgrade Changed
+                  </DropdownMenuItem>
                   <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={handleCompileSelected}>
+                  <DropdownMenuItem
+                    onClick={handleUpgradeSelected}
+                    disabled={selectedTargets.length === 0}
+                  >
                     Upgrade Selected
                   </DropdownMenuItem>
                 </DropdownMenuGroup>
@@ -525,11 +716,26 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
                   >
                     Show unmanaged devices
                   </DropdownMenuCheckboxItem>
+                  {/* DM.1: in-tab archived toggle — replaces the
+                      separate ArchivedDevicesList surface. When on,
+                      archived rows render below active rows at
+                      opacity-50. */}
+                  <DropdownMenuCheckboxItem
+                    checked={showArchived}
+                    onCheckedChange={() => setShowArchived(v => !v)}
+                  >
+                    Show archived devices
+                  </DropdownMenuCheckboxItem>
                 </DropdownMenuGroup>
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
         </div>
+        {/* TG.5: filter pill bar — one pill per fleet tag with usage
+            count, OR-logic across selections, persisted via
+            usePersistedState above. Hidden when the fleet has no
+            tags so a fresh install doesn't show an empty bar. */}
+        <TagFilterBar tags={tagPool} selected={tagFilter} onChange={setTagFilter} />
         <div className="table-wrap">
           <table>
             <thead>
@@ -559,15 +765,48 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
                 </tr>
               ) : (
                 <>
-                  {table.getRowModel().rows.map(row => (
-                    <tr key={row.id}>
-                      {row.getVisibleCells().map(cell => (
-                        <td key={cell.id}>
-                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
+                  {/* DM.1: split TanStack rows into two groups so
+                      archived rows always sort below active rows
+                      (regardless of which column the user clicked to
+                      sort), and so each archived row carries
+                      ``opacity-50`` + the ``data-archived`` hook the
+                      e2e suite asserts on. The active group respects
+                      whatever column sort TanStack produced; the
+                      archived group is re-sorted by archived_at desc
+                      so the most recently archived sits at the top. */}
+                  {(() => {
+                    const allRows = table.getRowModel().rows;
+                    const activeRows = allRows.filter(r => !r.original.archived);
+                    const archivedRows = allRows
+                      .filter(r => r.original.archived)
+                      .sort((a, b) => (b.original.archived_at ?? 0) - (a.original.archived_at ?? 0));
+                    return (
+                      <>
+                        {activeRows.map(row => (
+                          <tr key={row.id}>
+                            {row.getVisibleCells().map(cell => (
+                              <td key={cell.id}>
+                                {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                        {archivedRows.map(row => (
+                          <tr
+                            key={row.id}
+                            data-archived="true"
+                            className="opacity-50"
+                          >
+                            {row.getVisibleCells().map(cell => (
+                              <td key={cell.id}>
+                                {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </>
+                    );
+                  })()}
                   {showUnmanaged && filteredUnmanaged.map(d => (
                     <UnmanagedRow key={d.name} device={d} isVisible={isVisible} />
                   ))}
@@ -602,18 +841,90 @@ export function DevicesTab({ targets, devices, workers, streamerMode, activeJobs
         />
       )}
 
+      {tagsEditTarget && (() => {
+        const t = targets.find(x => x.target === tagsEditTarget);
+        if (!t) return null;
+        const initial = (t.tags || '')
+          .split(',')
+          .map(s => s.trim())
+          .filter(Boolean);
+        // Bug #11: fleet-wide tag pool for autocomplete. Union of every
+        // device's tags + every worker's tags, sorted, deduped, scoped
+        // to non-empty entries. Computed inline because it's tiny (a
+        // handful of strings) and SWR already keeps both lists fresh.
+        const pool = new Set<string>();
+        for (const dt of targets) {
+          if (dt.tags) for (const x of dt.tags.split(',').map(s => s.trim()).filter(Boolean)) pool.add(x);
+        }
+        for (const w of workers) {
+          if (w.tags) for (const x of w.tags) pool.add(x);
+        }
+        const suggestions = Array.from(pool).sort();
+        return (
+          <TagsEditDialog
+            open
+            onOpenChange={(open) => { if (!open) setTagsEditTarget(null); }}
+            subject={`Device ${stripYaml(t.target)}`}
+            initial={initial}
+            suggestions={suggestions}
+            onSave={async (tags) => {
+              // Existing /ui/api/targets/{filename}/meta endpoint stores
+              // the comment block as one comma-joined string — re-use it
+              // verbatim so tags round-trip through read_device_meta /
+              // write_device_meta unchanged. Bug #9: send `null` (not "")
+              // when the user clears every tag — `null` triggers the
+              // server's `meta.pop(key)` path, and write_device_meta
+              // strips the whole comment block once the dict is empty.
+              const value: string | null = tags.length > 0 ? tags.join(',') : null;
+              await updateTargetMeta(t.target, { tags: value });
+              await onRefresh();
+              onToast(`Saved tags for ${stripYaml(t.target)}`, 'success');
+            }}
+          />
+        );
+      })()}
+
       {/* QS.18: bulk schedule UpgradeModal moved into DeviceTableActions. */}
 
-      {/* #62: Archive modal — toolbar "Archive…" button opens a Dialog
-          that wraps the shared ArchivedDevicesList. Same list the
-          Settings drawer renders; only the entry point differs. */}
-      <Dialog open={archiveOpen} onOpenChange={setArchiveOpen}>
+      {/* DM.1: per-row "permanently delete" confirm — destructive. Two
+          steps because once the file leaves ``.archive/`` (and the
+          tracked-history ``git rm``) there's no UI undo. Mirrors the
+          exact copy the retired ArchivedDevicesList used to surface so
+          the move from "separate panel" to "in-tab toggle" is
+          UX-neutral. */}
+      <Dialog
+        open={permanentDeleteTarget !== null}
+        onOpenChange={(o) => { if (!o && !permanentDeleteBusy) setPermanentDeleteTarget(null); }}
+      >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Archived devices</DialogTitle>
+            <DialogTitle>
+              Delete {permanentDeleteTarget} from the archive?
+            </DialogTitle>
           </DialogHeader>
-          <div className="px-4 pb-4 pt-2">
-            <ArchivedDevicesList />
+          <div className="px-4 py-3 text-sm text-[var(--text)]">
+            <p>
+              This removes the file from the archive directory. The device's prior contents
+              stay in the config's git history — a git operator can recover them if needed.
+            </p>
+          </div>
+          <div className="flex justify-end gap-2 px-4 pb-4">
+            <button
+              type="button"
+              onClick={() => setPermanentDeleteTarget(null)}
+              disabled={permanentDeleteBusy}
+              className="inline-flex items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface2)] px-2.5 h-7 text-[0.8rem] font-medium text-[var(--text)] hover:bg-[var(--surface3)] disabled:opacity-50 cursor-pointer"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handlePermanentDeleteConfirm}
+              disabled={permanentDeleteBusy}
+              className="inline-flex items-center gap-1 rounded-lg border border-transparent bg-destructive px-2.5 h-7 text-[0.8rem] font-medium text-destructive-foreground hover:bg-destructive/80 disabled:opacity-50 cursor-pointer"
+            >
+              Delete
+            </button>
           </div>
         </DialogContent>
       </Dialog>
@@ -683,6 +994,9 @@ function UnmanagedRow({ device: d, isVisible }: { device: Device; isVisible: (co
         <span className="device-name text-[var(--text-muted)]">{stripYaml(d.name)}</span>
         <div className="device-filename text-[#6b7280]">No config</div>
       </td>
+      {/* Bug #16: tags column moved to position 2 in useDeviceColumns; mirror
+          here. Unmanaged devices have no YAML so no tags — render empty. */}
+      {isVisible('tags') && <td className="text-[12px]"></td>}
       {isVisible('status') && <td>{statusEl}</td>}
       {isVisible('ha') && (
         <td className="text-[12px]">
@@ -712,11 +1026,10 @@ function UnmanagedRow({ device: d, isVisible }: { device: Device; isVisible: (co
           {(sourceLabel || d.ha_configured) && (
             <div
               className="text-[10px] text-[var(--text-muted)] font-sans"
-              title={
-                d.ha_configured
-                  ? `Address source: ${d.address_source ?? 'unknown'} · Home Assistant confirms this device exists`
-                  : `Address source: ${d.address_source ?? 'unknown'}`
-              }
+              title={(() => {
+                const base = formatAddressSourceTooltip(d.address_source) ?? `Address source: ${d.address_source ?? 'unknown'}`;
+                return d.ha_configured ? `${base} · Home Assistant confirms this device exists.` : base;
+              })()}
             >
               {[sourceLabel, d.ha_configured ? 'in HA' : null].filter(Boolean).join(' · ')}
             </div>
@@ -726,7 +1039,7 @@ function UnmanagedRow({ device: d, isVisible }: { device: Device; isVisible: (co
       {/* #10/#19 — Net/IP Config/AP columns. Unmanaged devices have no YAML
           so we can't know any of this; render dashes. The cell order MUST
           match the columns array order in the columns memo above:
-            status → ha → ip → net → ipconfig → ap → running → area → comment → project */}
+            status → ha → ip → net → ipconfig → ap → running → area → comment → tags → project */}
       {isVisible('net') && <td className="text-[12px]">{dash}</td>}
       {isVisible('ipconfig') && <td className="text-[12px]">{dash}</td>}
       {isVisible('ap') && <td className="text-[12px]">{dash}</td>}

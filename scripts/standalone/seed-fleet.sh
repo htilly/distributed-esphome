@@ -38,8 +38,12 @@ FLEET_SOURCE_DIR="${FLEET_SOURCE_DIR:-/usr/share/hassio/homeassistant/esphome}"
 # references fonts/Arimo-Regular.ttf, fonts/JetBrainsMono-Bold.ttf, and
 # images/flag_{us,in,eu}.png; without them the server-side validator
 # rejects the bundle and the compile is marked failed before the worker
-# ever sees it (#192).
-FLEET_TARGETS="${FLEET_TARGETS:-cyd-world-clock.yaml garage-door-big.yaml .common.yaml secrets.yaml fonts images}"
+# ever sees it (#192). `includes/` carries `common.yaml` (and friends)
+# which `garage-door-big.yaml` pulls in via
+# `packages: common: !include includes/common.yaml`; without it the
+# `parallel compile: garage-door-big pinned to local-worker` smoke
+# fast-fails on file-not-found (#225).
+FLEET_TARGETS="${FLEET_TARGETS:-cyd-world-clock.yaml garage-door-big.yaml .common.yaml secrets.yaml fonts images includes}"
 
 # SSH multiplexing on both ends — see deploy.sh / haos/install-addon.sh
 # for why. Two control sockets, one per remote.
@@ -59,16 +63,24 @@ echo "==> Target:            $STANDALONE_HOST:$STANDALONE_COMPOSE_DIR/config-esp
 echo "==> Files:             $FLEET_TARGETS"
 
 # -----------------------------------------------------------------------
-# 1. Sanity: every file exists on source, target dir exists on dest.
+# 1. Sanity: figure out which FLEET_TARGETS exist on the source host,
+#    warn (don't fail) on missing entries, and ensure the dest dir is
+#    in place.
 # -----------------------------------------------------------------------
 MISSING=""
+AVAILABLE=""
 for f in $FLEET_TARGETS; do
-  if ! ssh "${SSH_OPTS_SRC[@]}" "$FLEET_SOURCE_HOST" "test -e '$FLEET_SOURCE_DIR/$f'" 2>/dev/null; then
+  if ssh "${SSH_OPTS_SRC[@]}" "$FLEET_SOURCE_HOST" "test -e '$FLEET_SOURCE_DIR/$f'" 2>/dev/null; then
+    AVAILABLE="$AVAILABLE $f"
+  else
     MISSING="$MISSING $f"
   fi
 done
 if [[ -n "$MISSING" ]]; then
-  echo "    ERROR: missing on source host:$MISSING" >&2
+  echo "    warning: skipping missing on source host:$MISSING" >&2
+fi
+if [[ -z "${AVAILABLE// /}" ]]; then
+  echo "    ERROR: no FLEET_TARGETS exist on $FLEET_SOURCE_HOST:$FLEET_SOURCE_DIR" >&2
   exit 1
 fi
 
@@ -82,9 +94,9 @@ fi
 # -----------------------------------------------------------------------
 echo ""
 echo "==> Streaming fleet tarball ..."
-# shellcheck disable=SC2029  # $FLEET_TARGETS must expand locally
+# shellcheck disable=SC2029  # $AVAILABLE must expand locally
 ssh "${SSH_OPTS_SRC[@]}" "$FLEET_SOURCE_HOST" \
-    "cd '$FLEET_SOURCE_DIR' && tar cz $FLEET_TARGETS" \
+    "cd '$FLEET_SOURCE_DIR' && tar cz $AVAILABLE" \
   | ssh "${SSH_OPTS_DST[@]}" "$STANDALONE_HOST" \
     "cd '$STANDALONE_COMPOSE_DIR/config-esphome' && tar xzf -"
 

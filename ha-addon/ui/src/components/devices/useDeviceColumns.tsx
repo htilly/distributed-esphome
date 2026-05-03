@@ -1,13 +1,35 @@
 import { useMemo } from 'react';
-import { Calendar, Clock, ExternalLink, GitBranch, Pin } from 'lucide-react';
+import { Archive, Calendar, Clock, ExternalLink, GitBranch, Pin } from 'lucide-react';
 import { createColumnHelper } from '@tanstack/react-table';
 import type { AddressSource, Job, Target } from '../../types';
 import { stripYaml, timeAgo, haDeepLink, formatCronHuman, fmtEpochRelative, fmtEpochAbsolute } from '../../utils';
+// DM.1: archived rows use the relative formatter for "archived 3 days ago"
+// hover/text. Imported above already through the ../../utils barrel.
 import { getJobBadge } from '../../utils/jobState';
 import { StatusDot } from '../StatusDot';
 import { SortHeader } from '../ui/sort-header';
 import { ActionsCell } from './ActionsCell';
 import { driftTooltip, hasDriftedConfig } from './drift';
+import { TagChips } from '../ui/tag-chips';
+
+/**
+ * TG.5: parse the comma-separated ``tags`` string from the YAML metadata
+ * comment block into a list. The wire shape stays a string today (one
+ * source of truth, the YAML comment) — the array is purely for rendering
+ * + autocomplete in the UI.
+ */
+function parseDeviceTags(s: string | null | undefined): string[] {
+  if (!s) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of s.split(',')) {
+    const t = raw.trim();
+    if (!t || seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
+}
 
 /**
  * TanStack column defs for the Devices tab (QS.17).
@@ -40,6 +62,13 @@ interface Options {
   onDuplicate: (target: string) => void;
   onRequestRename: (target: string) => void;
   onRequestDelete: (target: string) => void;
+  /** Bug #3: Archive — first-order hamburger action, no modal. */
+  onArchive: (target: string) => void;
+  /** DM.1: restore an archived row back to ``/config/esphome/``. */
+  onUnarchive: (target: string) => void;
+  /** DM.1: open the two-step permanently-delete dialog for an
+   *  archived row. The dialog itself lives in DevicesTab. */
+  onPermanentDelete: (target: string) => void;
   onPin: (target: string) => void;
   onUnpin: (target: string) => void;
   /** AV.6: open the per-file History panel from the row hamburger menu. */
@@ -48,6 +77,12 @@ interface Options {
   onOpenCompileHistory: (target: string) => void;
   /** Bug #16: open the manual-commit dialog for this target. */
   onCommitChanges: (target: string) => void;
+  /** RC.1: open the read-only rendered-config viewer. */
+  onViewRenderedConfig: (target: string) => void;
+  /** DM.2: open the ICMP ping diagnostic modal. */
+  onPing: (target: string) => void;
+  /** DM.3: open the install-to-specific-address modal. */
+  onInstallToAddress: (target: string) => void;
   /**
    * #2 followup to QS.16: per-row hamburger open state is owned by
    * DevicesTab (not Radix's internal state) so it survives row re-mounts
@@ -56,13 +91,15 @@ interface Options {
    */
   menuOpenTarget: string | null;
   setMenuOpenTarget: (target: string | null) => void;
+  /** TG.5 inline edit — open the tags dialog for the row's target. */
+  onEditTags: (target: string) => void;
 }
 
 /**
  * Mirror of the `OptionalColumnId` type in DevicesTab. Exported here so the
  * two stay in sync when columns are added/removed.
  */
-export type OptionalColumnId = 'status' | 'ha' | 'ip' | 'running' | 'area' | 'comment' | 'project' | 'net' | 'ipconfig' | 'ap' | 'schedule';
+export type OptionalColumnId = 'status' | 'ha' | 'ip' | 'running' | 'area' | 'comment' | 'project' | 'net' | 'ipconfig' | 'ap' | 'esp' | 'ble' | 'schedule' | 'tags';
 
 // --- Small per-cell formatters (kept private to this module) ---------------
 
@@ -89,6 +126,24 @@ function formatAddressSource(source: AddressSource | null | undefined): string |
   }
 }
 
+// UD.1: hover-explain *how* the device's address was discovered, not
+// just a raw enum value. Distinct copy per source so a user reading
+// "via ARP" understands it's a fallback that fired because mDNS came up
+// empty (the most common live confusion in 1.6.x support threads).
+function formatAddressSourceTooltip(source: AddressSource | null | undefined): string | null {
+  switch (source) {
+    case 'mdns': return 'Detected via mDNS — the device advertises itself on the local network with the hostname from the YAML.';
+    case 'wifi_use_address': return 'From wifi.use_address in the device YAML — overrides hostname-based discovery.';
+    case 'ethernet_use_address': return 'From ethernet.use_address in the device YAML — overrides hostname-based discovery.';
+    case 'openthread_use_address': return 'From openthread.use_address in the device YAML — overrides hostname-based discovery.';
+    case 'wifi_static_ip': return 'From wifi.manual_ip.static_ip in the device YAML — the OTA upload targets this fixed address.';
+    case 'ethernet_static_ip': return 'From ethernet.manual_ip.static_ip in the device YAML — the OTA upload targets this fixed address.';
+    case 'mdns_default': return null;
+    case 'arp': return 'Detected via ARP scan of the local network — mDNS came up empty, so the add-on broadcast an ARP probe and matched the MAC against the device.';
+    default: return null;
+  }
+}
+
 // --- The hook --------------------------------------------------------------
 
 const columnHelper = createColumnHelper<Target>();
@@ -110,8 +165,15 @@ export function useDeviceColumns(options: Options) {
     onOpenHistory,
     onOpenCompileHistory,
     onCommitChanges,
+    onViewRenderedConfig,
+    onPing,
+    onInstallToAddress,
     menuOpenTarget,
     setMenuOpenTarget,
+    onEditTags,
+    onArchive,
+    onUnarchive,
+    onPermanentDelete,
   } = options;
 
   return useMemo(() => [
@@ -154,6 +216,18 @@ export function useDeviceColumns(options: Options) {
           <>
             <span className="device-name">
               {t.friendly_name || t.device_name || stripYaml(t.target)}
+              {/* DM.1: archived chip — distinguishes the row at a glance
+                  even with the row-wide opacity-50; same hover gives
+                  the relative archived-at timestamp. */}
+              {t.archived && (
+                <span
+                  className="ml-1.5 inline-flex items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--surface2)] px-1.5 py-0 text-[10px] text-[var(--text-muted)] align-text-bottom"
+                  title={t.archived_at ? `Archived ${fmtEpochRelative(t.archived_at)}` : 'Archived'}
+                >
+                  <Archive className="size-3" aria-hidden />
+                  Archived
+                </span>
+              )}
               {t.schedule && t.schedule_enabled && (
                 <span title={`Recurring schedule: ${t.schedule}`} className="ml-1 inline-flex align-text-bottom opacity-70">
                   <Clock className="size-3" aria-label="Recurring schedule" />
@@ -186,8 +260,56 @@ export function useDeviceColumns(options: Options) {
         sortingFn: 'alphanumeric',
       }
     ),
+    // Bug #16: Tags column placed immediately after Device so it's the
+    // first piece of metadata users see — matches how Pat thinks about
+    // the fleet ("kitchen devices", "office devices") rather than burying
+    // tags down by Comment / Project.
+    columnHelper.accessor(row => row.tags || '', {
+      id: 'tags',
+      header: 'Tags',
+      cell: ({ row: { original: t } }) => {
+        const parsed = parseDeviceTags(t.tags);
+        // Bug #201: archived rows render tag chips read-only — editing
+        // tags on a YAML that lives in `.archive/` would write metadata
+        // the active fleet ignores, and the per-row hamburger already
+        // collapses to Unarchive + Permanently delete for the same
+        // reason.
+        if (t.archived) {
+          return (
+            <span
+              className="inline-block rounded-md border border-transparent px-1.5 py-0.5 min-w-[120px]"
+              aria-label={`Tags for ${stripYaml(t.target)} (archived, read-only)`}
+              title="Tags are read-only on archived devices — Unarchive first to edit."
+            >
+              {parsed.length > 0
+                ? <TagChips tags={parsed} />
+                : <span className="text-[12px] text-[var(--text-muted)] italic">—</span>}
+            </span>
+          );
+        }
+        return (
+          <button
+            type="button"
+            onClick={() => onEditTags(t.target)}
+            className="cursor-pointer rounded-md border border-transparent px-1.5 py-0.5 text-left hover:border-[var(--border)] hover:bg-[var(--surface2)] min-w-[120px]"
+            aria-label={`Tags for ${stripYaml(t.target)}`}
+            title="Click to edit tags"
+          >
+            {parsed.length > 0
+              ? <TagChips tags={parsed} />
+              : <span className="text-[12px] text-[var(--text-muted)] italic">+ tags</span>}
+          </button>
+        );
+      },
+      enableSorting: false,
+    }),
     columnHelper.accessor(
       row => {
+        // #207: archived rows are inert — sort them past every live state and
+        // never poll/compile them, so the status column reflects the archive
+        // state, not whatever stale online/checking value the row carried at
+        // archive time.
+        if (row.archived) return 'e-archived';
         if (activeJobsByTarget.has(row.target)) return 'a-upgrading';
         if (row.online == null) return 'b-unknown';
         return row.online ? 'c-online' : 'd-offline';
@@ -199,6 +321,11 @@ export function useDeviceColumns(options: Options) {
           const lastSeenEl = t.last_seen
             ? <div className="text-[10px] text-[var(--text-muted)]">{timeAgo(t.last_seen)}</div>
             : null;
+          // #207: archived rows render as "Archived" instead of falling
+          // through to checking/online/offline. The Tags column already
+          // shows the archived chip so we omit the dot's date suffix here
+          // — the row is inert.
+          if (t.archived) return <StatusDot status="archived" />;
           const activeJob = activeJobsByTarget.get(t.target);
           if (activeJob) {
             const statusText = activeJob.status_text || (activeJob.state === 'pending' ? 'Pending…' : 'Compiling…');
@@ -268,7 +395,7 @@ export function useDeviceColumns(options: Options) {
             {sourceLabel && (
               <div
                 className="text-[10px] text-[var(--text-muted)] font-sans"
-                title={`Address source: ${t.address_source}`}
+                title={formatAddressSourceTooltip(t.address_source) ?? `Address source: ${t.address_source}`}
               >
                 {sourceLabel}
               </div>
@@ -363,6 +490,55 @@ export function useDeviceColumns(options: Options) {
       ),
       sortingFn: 'alphanumeric',
     }),
+    // Bug #23 + UD.5: chip family on the primary line, PlatformIO board on
+    // a smaller secondary line below. Renamed "ESP" → "Platform" since
+    // the column now answers two questions ("which chip" + "which board")
+    // and the old single-word header didn't fit. Sort key is the bare
+    // chip-family string so ESP32 / ESP32-S3 / ESP8266 group naturally;
+    // board comes along for the ride within each chip family. Renders
+    // as muted em-dash when the YAML failed to resolve (rare).
+    columnHelper.accessor(row => row.esp_type || '', {
+      id: 'esp',
+      header: ({ column }) => <SortHeader label="Platform" column={column} />,
+      cell: ({ row: { original: t } }) => {
+        if (!t.esp_type) {
+          return <span className="text-[12px] text-[var(--text-muted)]">—</span>;
+        }
+        const tip = t.board
+          ? `Chip family + PlatformIO board from the resolved YAML: ${t.esp_type} on ${t.board}`
+          : `Chip family from the resolved YAML: ${t.esp_type}`;
+        return (
+          <span className="inline-flex flex-col leading-tight" title={tip}>
+            <span className="text-[12px] tabular-nums">{t.esp_type}</span>
+            {t.board && (
+              <span className="text-[11px] text-[var(--text-muted)] tabular-nums">{t.board}</span>
+            )}
+          </span>
+        );
+      },
+      sortingFn: 'alphanumeric',
+    }),
+    // Bug #23: Bluetooth proxy state. Sort key is the bare string so the
+    // three states cluster (active < off < passive alphabetically — fine
+    // for grouping). Off renders as a muted em-dash so the column reads
+    // quietly on devices that aren't BLE proxies.
+    columnHelper.accessor(row => row.bluetooth_proxy || 'off', {
+      id: 'ble',
+      header: ({ column }) => <SortHeader label="BLE proxy" column={column} />,
+      cell: ({ row: { original: t } }) => {
+        const mode = t.bluetooth_proxy ?? 'off';
+        if (mode === 'off') {
+          return <span className="text-[12px] text-[var(--text-muted)]" title="No bluetooth_proxy: block in this YAML">—</span>;
+        }
+        const label = mode === 'active' ? 'Active' : 'Passive';
+        const cls = mode === 'active' ? 'text-[var(--success)]' : 'text-[12px]';
+        const tip = mode === 'active'
+          ? 'bluetooth_proxy: { active: true } — forwards advertisements AND opens BLE connections for HA'
+          : 'bluetooth_proxy: present without active:true — forwards BLE advertisements only';
+        return <span className={`text-[12px] ${cls}`} title={tip}>{label}</span>;
+      },
+      sortingFn: 'alphanumeric',
+    }),
     columnHelper.accessor(row => row.schedule || row.schedule_once || '', {
       id: 'schedule',
       header: ({ column }) => <SortHeader label="Schedule" column={column} />,
@@ -419,12 +595,13 @@ export function useDeviceColumns(options: Options) {
           // compiles.
           return <span className="text-[12px] text-[var(--text-muted)]">—</span>;
         }
-        // #77 / UX_REVIEW §1.5: reuse ``getJobBadge`` so the Devices
-        // column's chip matches the Queue tab and JH.5 history surfaces
-        // exactly. Previously we hand-rolled a ✓/✗/· glyph that drifted
-        // in shape + colour from the pill badges on the other two
-        // surfaces.
-        const badge = getJobBadge({
+        // Bug #13: source='device' means the row is synthesized from
+        // the running firmware's ESPHome compilation_time string — no
+        // SQLite history exists for this target. Render with a leading
+        // ``~`` so the user knows it's approximate, and skip the badge
+        // (we don't know success/failed/ota for a remote-built firmware).
+        const fromDevice = lc.source === 'device';
+        const badge = fromDevice ? null : getJobBadge({
           state: lc.state,
           ota_result: lc.ota_result ?? undefined,
           validate_only: lc.validate_only,
@@ -433,16 +610,20 @@ export function useDeviceColumns(options: Options) {
         // PR #64 review: use shared fmtEpochRelative + fmtEpochAbsolute
         // so this cell respects the ``time_format`` Settings preference
         // (auto / 12h / 24h) via the module-local pref in utils/format.
-        // Prior inline ``toLocaleString()`` call ignored that setting.
         const rel = fmtEpochRelative(lc.at);
         const iso = fmtEpochAbsolute(lc.at);
+        const tooltip = fromDevice
+          ? `${iso} — reported by the device's running firmware (no compile history on this server)`
+          : `${iso} · ${lc.state}${lc.ota_result ? ` / ota=${lc.ota_result}` : ''}`;
         return (
           <span
             className="text-[12px] tabular-nums inline-flex items-center gap-1.5"
-            title={`${iso} · ${lc.state}${lc.ota_result ? ` / ota=${lc.ota_result}` : ''}`}
+            title={tooltip}
           >
-            <span className="text-[var(--text-muted)]">{rel}</span>
-            <span className={badge.cls}>{badge.label}</span>
+            <span className="text-[var(--text-muted)]">
+              {fromDevice ? `~${rel}` : rel}
+            </span>
+            {badge && <span className={badge.cls}>{badge.label}</span>}
           </span>
         );
       },
@@ -525,11 +706,17 @@ export function useDeviceColumns(options: Options) {
           onDuplicate={onDuplicate}
           onRequestRename={onRequestRename}
           onRequestDelete={onRequestDelete}
+          onArchive={onArchive}
+          onUnarchive={onUnarchive}
+          onPermanentDelete={onPermanentDelete}
           onPin={onPin}
           onUnpin={onUnpin}
           onOpenHistory={onOpenHistory}
           onOpenCompileHistory={onOpenCompileHistory}
           onCommitChanges={onCommitChanges}
+          onViewRenderedConfig={onViewRenderedConfig}
+          onPing={onPing}
+          onInstallToAddress={onInstallToAddress}
           onMenuOpenChange={(o) => setMenuOpenTarget(o ? t.target : null)}
         />
       ),
@@ -550,7 +737,14 @@ export function useDeviceColumns(options: Options) {
     onOpenHistory,
     onOpenCompileHistory,
     onCommitChanges,
+    onViewRenderedConfig,
+    onPing,
+    onInstallToAddress,
     menuOpenTarget,
     setMenuOpenTarget,
+    onEditTags,
+    onArchive,
+    onUnarchive,
+    onPermanentDelete,
   ]);
 }

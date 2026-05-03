@@ -10,6 +10,12 @@ export interface ServerInfo {
   esphome_install_status?: 'installing' | 'ready' | 'failed';
   /** Version the server is trying to install / has installed. */
   esphome_server_version?: string;
+  /**
+   * DQ.5: fleet-wide default per-worker disk quota in bytes. Surfaced
+   * here so the ConnectWorkerModal's "Use fleet default (X GiB)" radio
+   * label renders without a separate /ui/api/settings call.
+   */
+  default_worker_disk_quota_bytes?: number;
 }
 
 /**
@@ -100,6 +106,27 @@ export interface Target {
    * is treated as a Matter signal too).
    */
   network_matter?: boolean;
+  /**
+   * Bug #23: ESP chip family parsed from the resolved YAML's
+   * ``esp32:`` / ``esp8266:`` / ``rp2040:`` block. ESP32 variants
+   * surface as "ESP32-S3", "ESP32-C3", etc. Null when the YAML
+   * doesn't pick a platform (rare; usually means resolve failed).
+   */
+  esp_type?: string | null;
+  /**
+   * UD.5: PlatformIO board string from inside the chip block
+   * (e.g. ``esp32: { board: esp32dev }``). Surfaced as a secondary
+   * line on the Devices-tab Platform column; null when the YAML
+   * has no board (e.g. host platform) or resolve failed.
+   */
+  board?: string | null;
+  /**
+   * Bug #23: ``bluetooth_proxy:`` block state.
+   *  - ``off``     — block absent (default).
+   *  - ``passive`` — block present, no ``active: true``.
+   *  - ``active``  — block present with ``active: true``.
+   */
+  bluetooth_proxy?: 'off' | 'passive' | 'active';
   /** Per-device pinned ESPHome version from YAML metadata comment. */
   pinned_version?: string | null;
   /** Cron schedule expression (5-field). */
@@ -146,7 +173,11 @@ export interface Target {
   /**
    * JH.6: per-target "last compiled" rollup from the persistent job
    * history DAO. Powers the optional "Last compiled" column on the
-   * Devices tab. Null when there's no history for the target.
+   * Devices tab. Null when there's neither history nor a running
+   * device with a parseable compilation_time. Bug #13: when the
+   * SQLite history is empty for this target, the server falls back
+   * to the running device's reported ``compilation_time`` and sets
+   * ``source: 'device'`` so the UI can render an approximate marker.
    */
   last_compile?: {
     /** Epoch seconds (UTC). */
@@ -155,6 +186,10 @@ export interface Target {
     ota_result: string | null;
     validate_only: boolean;
     download_only: boolean;
+    /** ``history`` = recorded by this server in SQLite. ``device`` = parsed
+     * from the running firmware's ESPHome ``compilation_time`` string
+     * (approximate; build-host local time, success state assumed). */
+    source: 'history' | 'device';
   } | null;
   /**
    * Chip MAC address, lower-case colon-separated (e.g.
@@ -164,6 +199,19 @@ export interface Target {
    * with the native ESPHome integration's device row.
    */
   mac_address?: string | null;
+  /**
+   * DM.1: True when the row represents a YAML in `<config>/.archive/`.
+   * Active rows always carry `archived: false`. Archived rows render
+   * at opacity-50, sort below all active rows by `archived_at` desc,
+   * and expose only Unarchive + Permanently delete in their action
+   * menu. The poller / scheduler / routing engine / queue do not see
+   * these rows — archived is purely a UI surface.
+   */
+  archived?: boolean;
+  /** DM.1: epoch seconds (float) the YAML was moved into `.archive/`. Only present when `archived` is true. */
+  archived_at?: number;
+  /** DM.1: file size in bytes of the archived YAML. Only present when `archived` is true. */
+  archived_size?: number;
 }
 
 /**
@@ -213,6 +261,28 @@ export interface Device {
   ha_device_id?: string | null;
 }
 
+/**
+ * TG.2 / TG.8: routing rule shapes mirrored from `ha-addon/server/routing.py`.
+ * A clause is a single predicate against a tag set; a rule pairs a
+ * `device_match` (when this fires) with a `worker_match` (then the worker
+ * must satisfy this). Severity is reserved for future expansion — only
+ * `"required"` is accepted by the API in 1.7.0.
+ */
+export type RoutingClauseOp = 'all_of' | 'any_of' | 'none_of';
+
+export interface RoutingClause {
+  op: RoutingClauseOp;
+  tags: string[];
+}
+
+export interface RoutingRule {
+  id: string;
+  name: string;
+  severity: 'required';
+  device_match: RoutingClause[];
+  worker_match: RoutingClause[];
+}
+
 export interface SystemInfo {
   os_version?: string;
   cpu_model?: string;
@@ -229,6 +299,17 @@ export interface SystemInfo {
   cached_targets?: number;
   /** Total size of the build cache in MB. */
   cache_size_mb?: number;
+  /**
+   * DQ.6: worker's view of the disk-quota engine's most recent state.
+   * ``disk_usage_bytes`` is the engine's measured byte total under
+   * ``/esphome-versions/`` (venvs + caches + slots + pio-slots).
+   * ``disk_quota_bytes`` echoes the effective quota the worker is
+   * enforcing against. ``last_eviction_freed_bytes`` is the bytes
+   * freed by the most recent post-job sweep.
+   */
+  disk_usage_bytes?: number;
+  disk_quota_bytes?: number;
+  last_eviction_freed_bytes?: number;
 }
 
 /**
@@ -254,6 +335,39 @@ export interface Worker {
   system_info?: SystemInfo;
   current_job_id?: string;
   last_seen?: string;
+  /**
+   * #219: server-side self-pause when the worker reports disk pressure.
+   * `null` / undefined = healthy; `"disk_full"` = the worker's heartbeat
+   * disk_used_pct crossed the enter threshold and the server is refusing
+   * to assign new jobs until it drops back below the exit threshold.
+   * Distinct from `disabled`, which is a sticky operator-set pause.
+   */
+  health_blocked_reason?: string | null;
+  /**
+   * TG.1: user-managed worker tags. Initially seeded from ``WORKER_TAGS``
+   * env on first registration; thereafter authoritative on the server side
+   * (UI edits via TG.4/TG.6 are not clobbered by worker restarts unless
+   * the worker also sets ``WORKER_TAGS_OVERWRITE=1``).
+   */
+  tags?: string[];
+  /**
+   * DQ.5: effective per-worker disk-quota in bytes. The server sends the
+   * effective value (override ?? fleet default) on every /ui/api/workers
+   * GET so the UI can render "X / Y GiB" without a second fetch.
+   */
+  disk_quota_bytes?: number;
+  /**
+   * DQ.5: persisted per-worker override (may be ``null`` = inherit fleet
+   * default). The dialog uses this to drive the radio state ("Use fleet
+   * default" vs "Custom").
+   */
+  disk_quota_override_bytes?: number | null;
+  /**
+   * DQ.5: fleet-wide default; bundled into every row so the Workers tab
+   * + Connect dialog can render the default-radio without a separate
+   * /ui/api/settings call.
+   */
+  default_worker_disk_quota_bytes?: number;
 }
 
 export interface Job {
@@ -298,7 +412,8 @@ export interface Job {
   config_hash?: string | null;
   /** Bug #8 (1.6.1): why this worker got the job. One of
    *  "pinned_to_worker" / "only_online_worker" /
-   *  "fewer_jobs_than_others" / "higher_perf_score" / "first_available".
+   *  "only_eligible_worker" / "fewer_jobs_than_others" /
+   *  "higher_perf_score" / "first_available".
    *  Null on jobs that predate the field. */
   selection_reason?: string | null;
   duration_seconds?: number | null;
@@ -321,4 +436,20 @@ export interface Job {
   firmware_variants?: string[];
   ota_result?: string;
   log?: string;
+  /** TG.3: when state="blocked", the rule that disqualified every online worker.
+   *  Drives the QueueTab BLOCKED-badge tooltip and the click-through to the
+   *  routing-rules editor. Cleared when the job leaves BLOCKED. */
+  blocked_reason?: {
+    rule_id: string;
+    rule_name: string;
+    summary: string;
+  } | null;
+  /** Bug #97: per-job worker-tag filter set at enqueue time from the
+   *  Upgrade modal's "Tag expression" worker-selection radio. Same
+   *  shape as a routing-rule clause — claim_next consults it via the
+   *  same per-worker eligibility predicate that drives global rules. */
+  worker_tag_filter?: {
+    op: RoutingClauseOp;
+    tags: string[];
+  } | null;
 }

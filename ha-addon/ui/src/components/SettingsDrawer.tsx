@@ -222,6 +222,20 @@ export function SettingsDrawer({ open, onOpenChange, dirtyTargets = [], onReques
                   ]}
                   onCommit={v => patch({ time_format: v as 'auto' | '12h' | '24h' })}
                 />
+                {/* Bug #5: date format companion to the time format above. */}
+                <EnumRow
+                  label="Date format"
+                  help="How absolute dates render in row tooltips, the Queue, and History."
+                  value={data.date_format}
+                  options={[
+                    { value: 'auto', label: 'Auto (follow browser locale)' },
+                    { value: 'iso', label: 'ISO (2026-04-27)' },
+                    { value: 'us', label: 'US (4/27/2026)' },
+                    { value: 'eu', label: 'EU (27/04/2026)' },
+                    { value: 'long', label: 'Long (Apr 27, 2026)' },
+                  ]}
+                  onCommit={v => patch({ date_format: v as 'auto' | 'iso' | 'us' | 'eu' | 'long' })}
+                />
               </Section>
               </>}
               {activeTab === 'advanced' && <>
@@ -248,6 +262,15 @@ export function SettingsDrawer({ open, onOpenChange, dirtyTargets = [], onReques
                   onCommit={v => patch({ firmware_cache_max_gb: v })}
                 />
                 <IntRow
+                  label="Firmware retention (days)"
+                  help="Delete cached firmware binaries older than this. Active queue jobs are protected. 0 = unlimited."
+                  min={0}
+                  max={3650}
+                  defaultValue={2}
+                  value={data.firmware_retention_days}
+                  onCommit={v => patch({ firmware_retention_days: v })}
+                />
+                <IntRow
                   label="Job log retention (days)"
                   help="How long to keep per-job build logs on disk. 0 = unlimited."
                   min={0}
@@ -255,6 +278,15 @@ export function SettingsDrawer({ open, onOpenChange, dirtyTargets = [], onReques
                   defaultValue={30}
                   value={data.job_log_retention_days}
                   onCommit={v => patch({ job_log_retention_days: v })}
+                />
+                <IntRow
+                  label="Worker disk quota — fleet default (GiB)"
+                  help="Per-worker cap on the /esphome-versions/ tree (ESPHome venvs + PlatformIO toolchains + per-target build caches). LRU-evicted between jobs. Per-worker overrides live on each worker's row."
+                  min={1}
+                  max={1024}
+                  defaultValue={10}
+                  value={Math.round(data.default_worker_disk_quota_bytes / 1024 ** 3)}
+                  onCommit={v => patch({ default_worker_disk_quota_bytes: v * 1024 ** 3 })}
                 />
               </Section>
               <Section title="Timeouts">
@@ -297,13 +329,8 @@ export function SettingsDrawer({ open, onOpenChange, dirtyTargets = [], onReques
                   onCommit={v => patch({ device_poll_interval: v })}
                 />
               </Section>
-              {/* #92: Archived-devices section lived here briefly
-                  (CF.2). It moved into the Devices-tab "Add device ▾"
-                  dropdown (#70's "Restore from archive…") where Pat
-                  actually expects to find it — an archived device is a
-                  device-lifecycle concern, not a server-settings one.
-                  Section removed here to avoid two entry points with
-                  the same list (which would diverge). */}
+              {/* DM.1: archived devices live inline in the Devices
+                  tab — toggle column picker → Show archived devices. */}
               {/* #109: Diagnostics — one-click thread dump of the
                   server process. Intentionally plain — no knobs, no
                   tabs-within-tabs; the whole flow is click → download

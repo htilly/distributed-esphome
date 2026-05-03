@@ -7,7 +7,8 @@ import {
   createColumnHelper,
   type SortingState,
 } from '@tanstack/react-table';
-import type { Job, SystemInfo, Worker } from '../types';
+import { HardDrive } from 'lucide-react';
+import type { Job, SystemInfo, Target, Worker } from '../types';
 import { Button } from './ui/button';
 import {
   DropdownMenu,
@@ -19,14 +20,27 @@ import {
 import { getJobBadge, stripYaml, timeAgo, usePersistedState } from '../utils';
 import { StatusDot } from './StatusDot';
 import { SortHeader, getAriaSort } from './ui/sort-header';
+import { TagChips } from './ui/tag-chips';
+import { TagsEditDialog } from './TagsEditDialog';
+import { TagFilterBar } from './TagFilterBar';
+import { setWorkerTags } from '../api/client';
+import { useSWRConfig } from 'swr';
+import { SetDiskQuotaDialog } from './SetDiskQuotaDialog';
 
 interface Props {
   workers: Worker[];
+  /** Bug #11: device list for the chip-input autocomplete pool. The
+   *  TagsEditDialog suggests every tag in use across the fleet (devices
+   *  + workers); ``targets`` carries the device side. */
+  targets: Target[];
   queue: Job[];
   serverClientVersion?: string;
   minImageVersion?: string;
   onRemove: (id: string) => void;
   onSetParallelJobs: (id: string, count: number) => void;
+  // DQ.5: per-worker disk-quota override. Null clears the override so
+  // the worker inherits ``default_worker_disk_quota_bytes``.
+  onSetDiskQuota: (id: string, bytes: number | null) => void;
   onCleanCache: (id: string) => void;
   onCleanAllCaches: () => void;
   onConnectWorker: (preset?: import('../types').WorkerPreset | null) => void;
@@ -34,6 +48,10 @@ interface Props {
   // #109: "Request diagnostics" runs py-spy on the worker and downloads
   // the thread dump. Online-workers only (offline workers can't reply).
   onRequestDiagnostics: (id: string) => void;
+  // TG.9: routing-rules modal is now hoisted to App.tsx so the QueueTab
+  // BLOCKED-badge click can target the same instance. Toolbar button calls
+  // this with no arg → list mode.
+  onOpenRoutingRules: () => void;
 }
 
 function workerPlatformHtml(si: SystemInfo): React.ReactNode {
@@ -78,6 +96,26 @@ function workerPlatformHtml(si: SystemInfo): React.ReactNode {
     lines.push(
       <span key="cache" className="text-[10px] text-[var(--text-muted)]" title={`Build cache: ${si.cached_targets} target(s) cached${cacheStr}`}>
         Cache: {si.cached_targets} target{si.cached_targets !== 1 ? 's' : ''}{cacheStr}
+      </span>
+    );
+  }
+  // DQ.11: disk-quota engine view — shown when the worker has surfaced
+  // the new system_info fields (post-DQ.6 worker). Yellow when approaching
+  // the cap, red only when usage has actually hit it — being below quota
+  // is normal operating state, not a warning condition.
+  if (si.disk_usage_bytes != null && si.disk_quota_bytes != null && si.disk_quota_bytes > 0) {
+    const usageGb = si.disk_usage_bytes / (1024 ** 3);
+    const quotaGb = si.disk_quota_bytes / (1024 ** 3);
+    const pct = (si.disk_usage_bytes / si.disk_quota_bytes) * 100;
+    const quotaColor = pct >= 100 ? 'var(--danger)' : pct > 80 ? 'var(--warn)' : 'var(--text-muted)';
+    lines.push(
+      <span
+        key="quota"
+        className="text-[10px]"
+        style={{ color: quotaColor }}
+        title={`Disk quota: ${usageGb.toFixed(1)} / ${quotaGb.toFixed(0)} GiB (${pct.toFixed(0)}% used)`}
+      >
+        Quota: {usageGb.toFixed(1)} / {quotaGb.toFixed(0)} GiB
       </span>
     );
   }
@@ -240,13 +278,24 @@ function getWorkerSortValue(w: Worker, colId: string): string {
 
 const columnHelper = createColumnHelper<Worker>();
 
-export function WorkersTab({ workers, queue, serverClientVersion, minImageVersion, onRemove, onSetParallelJobs, onCleanCache, onCleanAllCaches, onConnectWorker, onViewLogs, onRequestDiagnostics }: Props) {
+export function WorkersTab({ workers, targets, queue, serverClientVersion, minImageVersion, onRemove, onSetParallelJobs, onSetDiskQuota, onCleanCache, onCleanAllCaches, onConnectWorker, onViewLogs, onRequestDiagnostics, onOpenRoutingRules }: Props) {
   // WL.3: lift the actions-dropdown open state out of the TanStack row
   // cell so the 1 Hz SWR poll doesn't tear it down mid-click (bug #2
   // / #71 class — see Design Judgment in CLAUDE.md). Keyed by
   // client_id so only one dropdown is open at a time.
   const [actionsMenuOpenClientId, setActionsMenuOpenClientId] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
+  // TG.6 inline edit — same lift-out-of-row pattern as the Actions menu.
+  const [tagsEditClientId, setTagsEditClientId] = useState<string | null>(null);
+  // DQ.11: same lift-out-of-row pattern — keep the dialog state at the
+  // tab level so the 1 Hz SWR poll doesn't tear it down on row remount.
+  const [diskQuotaEditClientId, setDiskQuotaEditClientId] = useState<string | null>(null);
+  // TG.6 filter pills — selected tag set persisted across reloads.
+  const [tagFilter, setTagFilter] = usePersistedState<string[]>('workers-tag-filter', []);
+  // TG.9: rules modal is now lifted to App.tsx so the QueueTab can also
+  // open it (deep-linked to the rule that fired). Toolbar button calls
+  // onOpenRoutingRules() to flip the App-level state.
+  const { mutate } = useSWRConfig();
   // QS.27: persist sort across reloads via localStorage.
   const [sorting, setSorting] = usePersistedState<SortingState>(
     'workers-sort',
@@ -254,17 +303,42 @@ export function WorkersTab({ workers, queue, serverClientVersion, minImageVersio
   );
 
 
+  // TG.6 filter pills: fleet-wide worker-tag pool with usage counts.
+  const tagPool = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const w of workers) {
+      if (w.tags) for (const tag of w.tags) {
+        counts.set(tag, (counts.get(tag) ?? 0) + 1);
+      }
+    }
+    return Array.from(counts.entries())
+      .map(([tag, count]) => ({ tag, count }))
+      .sort((a, b) => a.tag.localeCompare(b.tag));
+  }, [workers]);
+
   // Filter before handing to TanStack — keeps filter state local, same as DevicesTab pattern
   const filteredWorkers = useMemo(() => {
-    if (!filter) return workers;
+    // TG.6 pill filter first. #222: AND-logic (was OR pre-#222) — a
+    // worker matches only when it carries *every* selected tag, so
+    // picking `linux` then `fast` narrows to linux-AND-fast workers.
+    const tagged = tagFilter.length === 0
+      ? workers
+      : workers.filter(w => {
+          const ts = new Set(w.tags ?? []);
+          return tagFilter.every(t => ts.has(t));
+        });
+    if (!filter) return tagged;
     const q = filter.toLowerCase();
-    return workers.filter(w =>
+    return tagged.filter(w =>
       w.hostname.toLowerCase().includes(q)
       || (w.system_info?.os_version || '').toLowerCase().includes(q)
       || (w.system_info?.cpu_model || '').toLowerCase().includes(q)
       || (w.client_version || '').toLowerCase().includes(q)
+      // TG.6: tags participate in the existing search box too on top of
+      // the pill filter (substring, case-insensitive).
+      || (w.tags ?? []).some(t => t.toLowerCase().includes(q))
     );
-  }, [workers, filter]);
+  }, [workers, filter, tagFilter]);
 
   // UX.2: wrap every sortable column header in SortHeader so the sort
   // glyph renders consistently with Devices/Queue/Schedules (QS.21).
@@ -287,6 +361,14 @@ export function WorkersTab({ workers, queue, serverClientVersion, minImageVersio
     // Non-sortable display columns — included so flexRender can handle headers uniformly
     columnHelper.display({ id: 'platform', header: 'Platform' }),
     columnHelper.display({ id: 'currentJob', header: 'Current Job' }),
+    columnHelper.display({
+      id: 'tags',
+      header: () => (
+        <span title="Tags initially seeded from WORKER_TAGS env var; now stored on the server. Edits here will be authoritative.">
+          Tags
+        </span>
+      ),
+    }),
     columnHelper.display({ id: 'slots', header: 'Slots' }),
     columnHelper.display({ id: 'actions', header: '' }),
   ], []);
@@ -387,6 +469,33 @@ export function WorkersTab({ workers, queue, serverClientVersion, minImageVersio
         );
       }
 
+      // #219: surface the server's self-imposed disk-pressure pause as
+      // an explanatory badge so the user understands why a worker is
+      // online but not claiming. The icon is decorative; aria-label +
+      // title carry the meaning (UI-7 invariant).
+      let healthBlockEl: React.ReactNode = null;
+      if (c.health_blocked_reason === 'disk_full') {
+        const usedPct = c.system_info?.disk_used_pct;
+        const free = c.system_info?.disk_free;
+        const tip = `Auto-paused: worker disk is full. ${
+          usedPct != null ? `Currently ${usedPct}% used` : 'Disk usage above 95%'
+        }${free ? `, ${free} free` : ''}. Won't claim new jobs until usage drops to 90% or below — use Clean cache to recover, or grow the host's disk.`;
+        healthBlockEl = (
+          <>
+            <br />
+            <span
+              className="inline-flex items-center gap-1 text-[10px] font-medium"
+              style={{ color: 'var(--danger)' }}
+              aria-label="Auto-paused: disk full"
+              title={tip}
+            >
+              <HardDrive className="size-3" aria-hidden="true" />
+              disk full
+            </span>
+          </>
+        );
+      }
+
       if (slot === 1) {
         rows.push(
           <tr key={`${c.client_id}-1`} style={rowStyle} className={rowClass}>
@@ -394,8 +503,21 @@ export function WorkersTab({ workers, queue, serverClientVersion, minImageVersio
               {slotNameEl}
               {isLocal && <span className="ml-1.5 text-[9px] font-semibold uppercase text-[var(--accent)]">built-in</span>}
             </td>
+            <td>
+              <button
+                type="button"
+                onClick={() => setTagsEditClientId(c.client_id)}
+                className="cursor-pointer rounded-md border border-transparent px-1 py-px text-left hover:border-[var(--border)] hover:bg-[var(--surface2)]"
+                aria-label={`Tags for ${c.hostname}`}
+                title="Click to edit tags"
+              >
+                {(c.tags && c.tags.length > 0)
+                  ? <TagChips tags={c.tags} />
+                  : <span className="text-[10px] text-[var(--text-muted)] italic">+ tags</span>}
+              </button>
+            </td>
             <td>{c.system_info ? workerPlatformHtml(c.system_info) : null}</td>
-            <td>{statusEl}{uptimeEl}</td>
+            <td>{statusEl}{uptimeEl}{healthBlockEl}</td>
             <td>{jobEl}</td>
             <td><ClientVersionCell ver={c.client_version} scv={serverClientVersion} imageVer={c.image_version} minImageVer={minImageVersion} hostname={c.hostname} onReinstall={() => onConnectWorker({
               hostname: c.hostname,
@@ -436,6 +558,9 @@ export function WorkersTab({ workers, queue, serverClientVersion, minImageVersio
                         Clean cache
                       </DropdownMenuItem>
                     )}
+                    <DropdownMenuItem onClick={() => setDiskQuotaEditClientId(c.client_id)}>
+                      Set disk quota…
+                    </DropdownMenuItem>
                     {!c.online && !isLocal && (
                       <DropdownMenuItem
                         onClick={() => onRemove(c.client_id)}
@@ -456,6 +581,7 @@ export function WorkersTab({ workers, queue, serverClientVersion, minImageVersio
             <td>{slotNameEl}</td>
             <td></td>
             <td></td>
+            <td></td>
             <td>{jobEl}</td>
             <td></td>
             <td></td>
@@ -467,8 +593,11 @@ export function WorkersTab({ workers, queue, serverClientVersion, minImageVersio
   }
 
   // Build header cells from TanStack column defs in the order we want to render them
-  // Column order: hostname, platform, status, currentJob, version, slots, actions
-  const HEADER_ORDER = ['hostname', 'platform', 'status', 'currentJob', 'version', 'slots', 'actions'];
+  // Column order: hostname, tags, platform, status, currentJob, version, slots, actions
+  // Bug #104: Tags promoted to position 2 to mirror the Devices tab's #16
+  // layout — tags are how users group workers in routing rules and the
+  // bulk-actions UX, so they belong adjacent to the identity column.
+  const HEADER_ORDER = ['hostname', 'tags', 'platform', 'status', 'currentJob', 'version', 'slots', 'actions'];
   const headerCells = table.getHeaderGroups()[0].headers;
   const headerByid = Object.fromEntries(headerCells.map(h => [h.id, h]));
 
@@ -509,6 +638,12 @@ export function WorkersTab({ workers, queue, serverClientVersion, minImageVersio
           <div className="actions">
             {/* #88: standardized layout — primary "add new" action FIRST, Actions dropdown LAST */}
             <Button size="sm" onClick={() => onConnectWorker()}>+ Connect Worker</Button>
+            {/* TG.6/TG.8 — primary entry point for the routing rules editor.
+                Lives with the workers because that's where the user thinks
+                about routing (per the spec). */}
+            <Button variant="secondary" size="sm" onClick={() => onOpenRoutingRules()}>
+              Routing rules…
+            </Button>
             <DropdownMenu>
               <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg border border-border bg-background px-2.5 h-7 text-[0.8rem] font-medium text-foreground hover:bg-muted cursor-pointer">
                 Actions <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
@@ -527,6 +662,55 @@ export function WorkersTab({ workers, queue, serverClientVersion, minImageVersio
             </DropdownMenu>
           </div>
         </div>
+        {tagsEditClientId && (() => {
+          const w = workers.find(x => x.client_id === tagsEditClientId);
+          if (!w) return null;
+          // Bug #11: fleet-wide pool — union of every worker's tags + every
+          // device's comma-separated tags string, sorted, deduped.
+          const pool = new Set<string>();
+          for (const wx of workers) {
+            if (wx.tags) for (const t of wx.tags) pool.add(t);
+          }
+          for (const t of targets) {
+            if (t.tags) for (const x of t.tags.split(',').map(s => s.trim()).filter(Boolean)) pool.add(x);
+          }
+          const suggestions = Array.from(pool).sort();
+          return (
+            <TagsEditDialog
+              open
+              onOpenChange={(open) => { if (!open) setTagsEditClientId(null); }}
+              subject={`Worker ${w.hostname}`}
+              initial={w.tags ?? []}
+              suggestions={suggestions}
+              onSave={async (tags) => {
+                await setWorkerTags(w.client_id, tags);
+                // SWR key is 'workers' (see App.tsx); 1Hz poll would catch
+                // up on its own but mutate() snaps the UI immediately.
+                await mutate('workers');
+              }}
+            />
+          );
+        })()}
+        {diskQuotaEditClientId && (() => {
+          const w = workers.find(x => x.client_id === diskQuotaEditClientId);
+          if (!w) return null;
+          return (
+            <SetDiskQuotaDialog
+              key={w.client_id}
+              hostname={w.hostname}
+              currentOverrideBytes={w.disk_quota_override_bytes ?? null}
+              defaultBytes={w.default_worker_disk_quota_bytes ?? 10 * 1024 ** 3}
+              onSave={async (bytes) => {
+                await onSetDiskQuota(w.client_id, bytes);
+                await mutate('workers');
+              }}
+              onClose={() => setDiskQuotaEditClientId(null)}
+            />
+          );
+        })()}
+        {/* TG.6 filter pills — same shape as the Devices tab. Hidden when
+            workers have no tags yet so the bar doesn't show empty. */}
+        <TagFilterBar tags={tagPool} selected={tagFilter} onChange={setTagFilter} />
         <div className="table-wrap">
           <table>
             <thead>
@@ -537,13 +721,16 @@ export function WorkersTab({ workers, queue, serverClientVersion, minImageVersio
             <tbody>
               {workers.length === 0 ? (
                 <tr className="empty-row">
-                  <td colSpan={7}>No workers registered — click &quot;+ Connect Worker&quot; to add one</td>
+                  <td colSpan={8}>No workers registered — click &quot;+ Connect Worker&quot; to add one</td>
                 </tr>
               ) : rows}
             </tbody>
           </table>
         </div>
       </div>
+
+      {/* TG.9: RoutingRulesModal moved to App.tsx so the Queue's
+          BLOCKED-badge click can target the same instance. */}
     </div>
   );
 }

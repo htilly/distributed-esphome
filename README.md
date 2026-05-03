@@ -7,6 +7,8 @@
 
 ![ESPHome Fleet — Devices tab](docs/screenshot.png)
 
+![ESPHome Fleet — fleet tags and tag filter pills](docs/screenshot-tags.png)
+
 ## Why use this instead of the ESPHome builder?
 
 The built-in ESPHome Device Builder does the job — here are the things you get on top of it:
@@ -18,7 +20,8 @@ The built-in ESPHome Device Builder does the job — here are the things you get
 - **Firmware archive, automatically.** Every successful compile keeps its binary on the server — not just the ones you marked "download only". Flash it by hand later, bisect a regression, rescue a device with a broken OTA path. The Download button is on every row, including the history drawer.
 - **Pin an ESPHome version to one device.** Beta-test a new ESPHome release on your garage sensor without upgrading the rest of the house. Hold a picky device back on a known-good version indefinitely. The stock dashboard compiles with whatever ESPHome it was installed with.
 - **Scheduled upgrades.** Upgrade the office lights every Sunday at 3am. One-time *"upgrade this device tomorrow at 8pm when nobody's home"*. The schedule lives in the device YAML so it travels with your config and respects the pin.
-- **Bulk operations for larger fleets.** Upgrade every outdated device tonight. Rebuild the whole fleet against a new ESPHome release. Pin half your devices to a known-good version while the rest move forward.
+- **Tags + routing rules.** Tag devices and workers however makes sense for your fleet (`kitchen`, `production`, `ratgdo`, `os:windows`, …) and write rules like *"compile any `ratgdo`-tagged device on a `windows`-tagged worker"* — the queue surfaces a clear **BLOCKED** state with the rule name when no eligible worker is online. Tags also drive bulk filtering and a tag-expression mode in the Upgrade modal that lets you pick build workers without naming each one.
+- **Bulk operations for larger fleets.** Upgrade every outdated device tonight. Rebuild the whole fleet against a new ESPHome release. Pin half your devices to a known-good version while the rest move forward. Bulk archive, bulk tag, bulk rerun-all-failed.
 
 ## How it works
 
@@ -67,7 +70,7 @@ You don't need one to start — the add-on ships with a built-in local worker th
 
 The worker container is `ghcr.io/weirded/esphome-dist-client:latest`. All it needs on the host is Docker and network reach to (a) the add-on's HTTP API and (b) the ESP devices it'll flash. No inbound ports.
 
-The worker's Python source updates itself from the server whenever the add-on upgrades (so bug fixes to client code reach remote machines automatically). Its **Docker image** doesn't — when the image needs refreshing (system packages, Python version, pinned dependencies), the Workers tab flags it with an **Image stale** badge and you refresh it on the worker host with `docker pull ghcr.io/weirded/esphome-dist-client:latest && docker restart <name>`. See `ha-addon/DOCS.md → Keeping workers up to date` for the full rundown.
+The worker's Python source updates itself from the server whenever the add-on upgrades (so bug fixes to client code reach remote machines automatically). Its **Docker image** doesn't — when the image needs refreshing (system packages, Python version, pinned dependencies), the Workers tab flags it with an **Image stale** badge and you refresh it on the worker host with `docker pull ghcr.io/weirded/esphome-dist-client:latest && docker restart <name>`. [DOCS.md](ha-addon/DOCS.md) has the longer explanation.
 
 ### As a standalone Docker container
 
@@ -85,7 +88,7 @@ docker run -d \
 
 The UI is at `http://your-host:8765`. `--network host` is required so the server can discover ESP devices over mDNS.
 
-To test pre-release builds, use `:develop` instead of `:latest` — that tag advances on every push to `develop` and isn't meant for production.
+For pre-release builds, use `:develop` instead of `:latest` — that tag updates whenever a new development build is published, so it isn't meant for production.
 
 #### What works and what doesn't without Home Assistant
 
@@ -100,16 +103,14 @@ The server auto-detects its deployment shape via the `SUPERVISOR_TOKEN` env var 
 - Supervisor-driven ESPHome version auto-detection. In standalone the server falls back to "latest stable from PyPI" on first boot; change via the version dropdown in the Web UI header.
 
 **Configuration differences**:
-- Settings live in `/data/settings.json` instead of Supervisor options. Edit via the in-app Settings drawer (gear icon, top-right).
+- Settings live in the server's data volume instead of Supervisor options. Edit via the in-app Settings drawer (gear icon, top-right).
 - `require_ha_auth` defaults to **off** for standalone Docker. If `:8765` is reachable from an untrusted network, turn it on in Settings → Authentication and hand out the bearer token; browsers without a token land on a styled 401 page explaining both recovery paths.
-
-See `dev-plans/HA-COUPLING-AUDIT.md` in the repo for the per-site audit of HA-coupled code paths.
 
 ## A tour of the UI
 
-- **Devices** — every ESPHome config you have. One-click Upgrade on any row; Upgrade dropdown for bulk actions (upgrade all outdated, upgrade selected, upgrade everything). Edit YAML inline with autocomplete and validation. Pin a device to a specific ESPHome version. Open a live device log. Deep-link to the HA device page.
-- **Queue** — what's compiling, what just finished, what failed, what's queued. Live build logs. Retry, cancel, clear, download the compiled `.bin`.
-- **Workers** — the workers you have connected, their platform, online status, number of build slots, what they're currently building. One-click **+ Connect Worker** generates the `docker run` / `docker compose` snippet for adding a new one.
+- **Devices** — every ESPHome config you have. One-click Upgrade on any row; Upgrade dropdown for bulk actions (upgrade all outdated, upgrade changed, upgrade selected, upgrade everything). Edit YAML inline with autocomplete and validation. Pin a device to a specific ESPHome version. Tag devices for routing + filtering. Open a live device log. Ping a device or install to a specific address from the row menu. View the fully-rendered config (with `!secret` substituted, `packages:` flattened) before pushing. Deep-link to the HA device page. Toggle archived rows in-line via the column picker.
+- **Queue** — what's compiling, what just finished, what failed, what's queued. Live build logs. Inline **Rerun · Clear · Log** on every row; Cancel, Download firmware, Edit YAML, and the full Devices-tab Device-section actions live behind the per-row hamburger.
+- **Workers** — the workers you have connected, their platform, online status, build slots, current job, **disk usage vs. quota**, and tags. One-click **+ Connect Worker** generates the `docker run` / `docker compose` snippet for adding a new one. **Routing rules…** opens a builder for fleet-wide job-routing rules backed by device + worker tags.
 - **Schedules** — every scheduled upgrade across your fleet in a single view. See what's due next, when it last ran, whether the run succeeded.
 
 Dark/light theme toggle + a "streamer mode" that blurs tokens and secrets for screen-sharing are in the header.

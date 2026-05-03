@@ -54,6 +54,60 @@ def test_dataclass_defaults_match_spec():
     assert s.job_history_retention_days == 365
     assert s.firmware_cache_max_gb == 2.0
     assert s.job_log_retention_days == 30
+    assert s.default_worker_disk_quota_bytes == 10 * 1024 ** 3
+
+
+# ---------------------------------------------------------------------------
+# DQ.14 — default_worker_disk_quota_bytes validator
+# ---------------------------------------------------------------------------
+
+
+async def test_update_settings_accepts_disk_quota_bytes(tmp_path):
+    init_settings(settings_path=tmp_path / "s.json", options_path=tmp_path / "o.json")
+    updated = await update_settings({"default_worker_disk_quota_bytes": 5 * 1024 ** 3})
+    assert updated.default_worker_disk_quota_bytes == 5 * 1024 ** 3
+
+
+async def test_update_settings_rejects_disk_quota_below_floor(tmp_path):
+    init_settings(settings_path=tmp_path / "s.json", options_path=tmp_path / "o.json")
+    # Anything below 1 GiB is rejected (typo guard — a "0" would starve workers).
+    with pytest.raises(SettingsValidationError) as exc:
+        await update_settings({"default_worker_disk_quota_bytes": 1024 ** 3 - 1})
+    assert exc.value.field == "default_worker_disk_quota_bytes"
+
+
+async def test_update_settings_rejects_disk_quota_zero(tmp_path):
+    init_settings(settings_path=tmp_path / "s.json", options_path=tmp_path / "o.json")
+    with pytest.raises(SettingsValidationError) as exc:
+        await update_settings({"default_worker_disk_quota_bytes": 0})
+    assert exc.value.field == "default_worker_disk_quota_bytes"
+
+
+async def test_update_settings_rejects_disk_quota_negative(tmp_path):
+    init_settings(settings_path=tmp_path / "s.json", options_path=tmp_path / "o.json")
+    with pytest.raises(SettingsValidationError) as exc:
+        await update_settings({"default_worker_disk_quota_bytes": -1024 ** 3})
+    assert exc.value.field == "default_worker_disk_quota_bytes"
+
+
+async def test_update_settings_rejects_disk_quota_above_ceiling(tmp_path):
+    init_settings(settings_path=tmp_path / "s.json", options_path=tmp_path / "o.json")
+    # Above 1 TiB is rejected as misconfiguration.
+    with pytest.raises(SettingsValidationError) as exc:
+        await update_settings({"default_worker_disk_quota_bytes": (1024 + 1) * 1024 ** 3})
+    assert exc.value.field == "default_worker_disk_quota_bytes"
+
+
+async def test_update_settings_accepts_disk_quota_at_floor(tmp_path):
+    init_settings(settings_path=tmp_path / "s.json", options_path=tmp_path / "o.json")
+    updated = await update_settings({"default_worker_disk_quota_bytes": 1 * 1024 ** 3})
+    assert updated.default_worker_disk_quota_bytes == 1 * 1024 ** 3
+
+
+async def test_update_settings_accepts_disk_quota_at_ceiling(tmp_path):
+    init_settings(settings_path=tmp_path / "s.json", options_path=tmp_path / "o.json")
+    updated = await update_settings({"default_worker_disk_quota_bytes": 1024 * 1024 ** 3})
+    assert updated.default_worker_disk_quota_bytes == 1024 * 1024 ** 3
 
 
 async def test_update_settings_accepts_git_author(tmp_path):
@@ -504,6 +558,7 @@ def test_init_creates_settings_file_when_absent(tmp_path: Path):
         "git_author_email": "ha@distributed-esphome.local",
         "job_history_retention_days": 365,
         "firmware_cache_max_gb": 2.0,
+        "firmware_retention_days": 2,
         "job_log_retention_days": 30,
         "job_timeout": 600,
         "ota_timeout": 120,
@@ -511,6 +566,8 @@ def test_init_creates_settings_file_when_absent(tmp_path: Path):
         "device_poll_interval": 60,
         "require_ha_auth": False,
         "time_format": "auto",
+        "date_format": "auto",
+        "default_worker_disk_quota_bytes": 10 * 1024 ** 3,
     }
     # Everything else matches the dataclass defaults.
     assert s.auto_commit_on_save is True
@@ -772,6 +829,7 @@ def test_settings_as_dict_round_trips():
         "git_author_email": "ha@distributed-esphome.local",
         "job_history_retention_days": 365,
         "firmware_cache_max_gb": 2.0,
+        "firmware_retention_days": 2,
         "job_log_retention_days": 30,
         "server_token": "abc123",
         "job_timeout": 600,
@@ -780,6 +838,8 @@ def test_settings_as_dict_round_trips():
         "device_poll_interval": 60,
         "require_ha_auth": False,
         "time_format": "auto",
+        "date_format": "auto",
+        "default_worker_disk_quota_bytes": 10 * 1024 ** 3,
     }
 
 

@@ -19,7 +19,7 @@ SECRETS_YAML = "secrets.yaml"
 # fix a stale image (missing system packages, old Python, old requirements).
 # Bump this when a change in the client Dockerfile requires workers to rebuild
 # their image (e.g. adding a new system dep or Python library).
-MIN_IMAGE_VERSION = "7"
+MIN_IMAGE_VERSION = "8"
 
 # Minimum ESPHome version the server is willing to lazy-install into its
 # per-version venv (BD.2 — WORKITEMS-1.6.2). Landing below this floor is
@@ -30,3 +30,15 @@ MIN_IMAGE_VERSION = "7"
 # dispatch jobs. The same guard applies to per-device ``pin_version``
 # so users can't downgrade past the floor via the Devices-tab pin UI.
 MIN_ESPHOME_VERSION = "2026.4.0"
+
+# Worker disk-pressure self-pause thresholds (#219). When a worker's
+# heartbeat reports ``disk_used_pct`` at or above _ENTER_, the registry
+# stamps ``health_blocked_reason = "disk_full"`` on it and the job-claim
+# path returns 204 instead of assigning new work. The block clears when
+# usage drops to or below _EXIT_. Two thresholds (hysteresis) keeps a job
+# whose intermediate writes oscillate around a single line from flapping
+# the gate. The 5-point band (95 → 90) covers the lifecycle of a typical
+# PlatformIO toolchain extract (~600 MB) plus an ESPHome venv install
+# (~1 GiB) on a 50 GiB worker rootfs without false trips.
+WORKER_DISK_BLOCK_ENTER_PCT = 95
+WORKER_DISK_BLOCK_EXIT_PCT = 90

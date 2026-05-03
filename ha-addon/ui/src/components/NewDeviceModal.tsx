@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog';
 import { Button } from './ui/button';
 import { stripYaml } from '../utils';
-import { createTarget } from '../api/client';
+import { createTarget, updateTargetMeta } from '../api/client';
 
 /**
  * Shared "create" + "duplicate" modal (CD.4).
@@ -33,6 +33,9 @@ export function NewDeviceModal({ mode, sourceTarget, existingTargets, onCreate, 
     ? `${stripYaml(sourceTarget)}-copy`
     : '';
   const [name, setName] = useState(defaultName);
+  // TG.7: optional initial tags. Comma-separated; persisted via the
+  // /ui/api/targets/{filename}/meta endpoint after the YAML is created.
+  const [tags, setTags] = useState('');
   const [saving, setSaving] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -68,6 +71,19 @@ export function NewDeviceModal({ mode, sourceTarget, existingTargets, onCreate, 
     try {
       const target = await createTarget(slug, mode === 'duplicate' ? sourceTarget : undefined);
       const displayName = stripYaml(target).replace(/^\.pending\./, '');
+      // TG.7: persist initial tags via the existing meta endpoint. Done
+      // after createTarget so a tag-write failure doesn't orphan a
+      // partial create — the YAML is already on disk + browseable. The
+      // server normalises (trim / drop empties / dedupe).
+      const cleanedTags = tags.split(',').map(s => s.trim()).filter(Boolean);
+      if (cleanedTags.length > 0) {
+        try {
+          await updateTargetMeta(target, { tags: cleanedTags.join(',') });
+        } catch (err) {
+          // Non-fatal — the device exists, just without tags.
+          onToast(`Created ${displayName} but tag write failed: ${(err as Error).message}`, 'error');
+        }
+      }
       onToast(
         mode === 'duplicate'
           ? `Duplicated ${stripYaml(sourceTarget!)} → ${displayName}`
@@ -121,6 +137,29 @@ export function NewDeviceModal({ mode, sourceTarget, existingTargets, onCreate, 
           {error && (
             <p style={{ fontSize: 11, color: 'var(--destructive)', marginTop: 6 }}>{error}</p>
           )}
+          {/* TG.7: optional initial tags. Comma-separated text input — the
+              chip-input editor on the Devices tab can refine later. */}
+          <label style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 14, marginBottom: 6, display: 'block' }}>
+            Tags <span style={{ fontWeight: 'normal', textTransform: 'none' }}>(optional, comma-separated)</span>
+          </label>
+          <input
+            type="text"
+            value={tags}
+            onChange={e => setTags(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && canSubmit) handleSubmit();
+            }}
+            placeholder="e.g. kitchen, sensor, prod"
+            style={{
+              width: '100%',
+              padding: '8px 12px',
+              background: 'var(--surface2)',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius)',
+              color: 'var(--text)',
+              fontSize: 14,
+            }}
+          />
           <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10 }}>
             {mode === 'duplicate'
               ? `Duplicates ${stripYaml(sourceTarget ?? '')}.yaml and rewrites esphome.name to match the new filename. Comments are not preserved.`

@@ -37,6 +37,13 @@ _TARGETS_SCHEMA = vol.Any(
     vol.In(["all", "outdated"]),
 )
 
+# 114: tag-expression resolver — accepts the same operator vocabulary
+# the routing engine and the upgrade-modal worker_tag_filter already use,
+# so an automation reads the same way as a routing rule.
+_TAGS_OPS = ("all_of", "any_of", "none_of")
+_TAGS_SCHEMA = vol.All(cv.ensure_list, [cv.string])
+_TAGS_OP_SCHEMA = vol.In(_TAGS_OPS)
+
 # #53: HA injects the target-resolved ``device_id`` / ``entity_id`` /
 # ``area_id`` keys (even as ``None`` when the user didn't use a target).
 # voluptuous rejects them without explicit declarations, producing the
@@ -59,6 +66,13 @@ COMPILE_SCHEMA = vol.Schema(
         # worker's client_id via the device registry. Replaces the old
         # free-text `worker_id` field (#65).
         vol.Optional("worker"): vol.Any(None, cv.string),
+        # 114: tag-expression alternative to device/targets selection.
+        # `tags` is the list of tag strings; `tags_op` is the matcher
+        # (default `any_of` — same OR-logic the Devices-tab pill filter
+        # uses). The handler resolves matches via the coordinator's
+        # cached `targets` snapshot.
+        vol.Optional("tags"): _TAGS_SCHEMA,
+        vol.Optional("tags_op"): _TAGS_OP_SCHEMA,
         **_TARGET_KEYS,
     }
 )
@@ -72,6 +86,11 @@ CANCEL_SCHEMA = vol.Schema(
 VALIDATE_SCHEMA = vol.Schema(
     {
         vol.Optional("target"): cv.string,
+        # 114: tag expressions on validate too — but validate is single-
+        # target by API contract, so the resolved set must be exactly
+        # one filename or the handler raises.
+        vol.Optional("tags"): _TAGS_SCHEMA,
+        vol.Optional("tags_op"): _TAGS_OP_SCHEMA,
         **_TARGET_KEYS,
     }
 )
@@ -121,6 +140,43 @@ def _resolve_device_ids_to_targets(
     return targets
 
 
+def _resolve_tags_to_targets(
+    coord: Any, tags: list[str], op: str
+) -> list[str]:
+    """Map a tag expression to YAML target filenames (114).
+
+    Reads ``coord.data["targets"]`` — the snapshot the coordinator polls
+    from ``/ui/api/targets``. Each entry's ``tags`` is the YAML-comment-
+    block string (``"office,production"`` or ``None``). Matching mirrors
+    the routing-clause vocabulary (``all_of`` / ``any_of`` / ``none_of``)
+    so an automation reads the same way as a routing rule.
+
+    Archived rows are excluded — they're display-only on the server and
+    can't be compiled without unarchiving first (DM.1).
+    """
+    cleaned = [t.strip() for t in tags if isinstance(t, str) and t.strip()]
+    if not cleaned:
+        return []
+    wanted = set(cleaned)
+    snapshot = (coord.data or {}).get("targets") or []
+    matches: list[str] = []
+    for row in snapshot:
+        filename = row.get("target")
+        if not filename or row.get("archived"):
+            continue
+        raw = row.get("tags") or ""
+        present = {x.strip() for x in raw.split(",") if x.strip()}
+        if op == "all_of":
+            ok = wanted.issubset(present)
+        elif op == "none_of":
+            ok = wanted.isdisjoint(present)
+        else:  # any_of (default)
+            ok = bool(wanted & present)
+        if ok:
+            matches.append(filename)
+    return matches
+
+
 def _resolve_worker_device_id(
     hass: HomeAssistant, device_id: str
 ) -> str | None:
@@ -155,9 +211,25 @@ async def _handle_compile(call: ServiceCall) -> None:
 
     picked_targets = _resolve_device_ids_to_targets(call.hass, device_ids)
 
+    # 114: tag-expression selection. Resolved against the coordinator's
+    # `/ui/api/targets` snapshot. An empty match raises so an automation
+    # owner sees a clear error instead of silently enqueuing nothing.
+    tag_targets: list[str] = []
+    raw_tags = call.data.get("tags")
+    if raw_tags:
+        tag_op = call.data.get("tags_op", "any_of")
+        tag_targets = _resolve_tags_to_targets(coord, list(raw_tags), tag_op)
+        if not tag_targets:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="no_targets_match_tags",
+            )
+
     targets: Any
     if picked_targets:
         targets = picked_targets
+    elif tag_targets:
+        targets = tag_targets
     elif "targets" in call.data:
         targets = call.data["targets"]
     elif device_ids:
@@ -207,6 +279,8 @@ async def _handle_validate(call: ServiceCall) -> None:
     if isinstance(device_ids, str):
         device_ids = [device_ids]
 
+    raw_tags = call.data.get("tags")
+
     if device_ids:
         targets = _resolve_device_ids_to_targets(call.hass, device_ids)
         if not targets:
@@ -215,6 +289,27 @@ async def _handle_validate(call: ServiceCall) -> None:
                 translation_key="no_managed_target_in_selection",
             )
         target = targets[0]
+    elif raw_tags:
+        # 114: validate is single-target — a tag expression must resolve
+        # to exactly one match. Multi-match is a user error (use compile
+        # for a fleet-wide validate-equivalent), zero-match is an error.
+        tag_op = call.data.get("tags_op", "any_of")
+        tag_targets = _resolve_tags_to_targets(coord, list(raw_tags), tag_op)
+        if not tag_targets:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="no_targets_match_tags",
+            )
+        if len(tag_targets) > 1:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="tags_match_multiple",
+                translation_placeholders={
+                    "count": str(len(tag_targets)),
+                    "matches": ", ".join(tag_targets),
+                },
+            )
+        target = tag_targets[0]
     elif "target" in call.data:
         target = call.data["target"]
     else:

@@ -98,6 +98,62 @@ def test_dao_is_idempotent_on_duplicate_id(tmp_path: Path) -> None:
     assert rows[0]["ota_result"] == "failed"
 
 
+def test_dao_latest_firmware_by_hash_returns_only_jobs_with_binaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#211: ``latest_firmware_by_hash`` powers the per-row Download chip
+    in the file-history drawer. Hashes with no successful + has_firmware
+    job, or whose binary has been evicted from disk, must be absent
+    from the returned map so the UI can leave those rows alone.
+    """
+    dao = JobHistoryDAO(db_path=tmp_path / "history.db")
+    # Two successful jobs with firmware on the same target, distinct
+    # hashes; one with firmware still on disk, one evicted (empty list).
+    dao.record_terminal(_make_job(job_id="kept", config_hash="aaa111"))
+    dao.record_terminal(_make_job(
+        job_id="evicted", config_hash="bbb222", finished_offset=10,
+    ))
+    # A failed job at a third hash — must be ignored entirely.
+    dao.record_terminal(_make_job(
+        job_id="failed", state=JobState.FAILED, ota_result="failed",
+        config_hash="ccc333", finished_offset=20,
+    ))
+    # Mark both successful rows as having stored firmware so the SQL
+    # filter picks them up; the live ``list_variants`` probe is what
+    # decides on-disk vs evicted.
+    import sqlite3
+    with sqlite3.connect(tmp_path / "history.db") as conn:
+        conn.execute("UPDATE jobs SET has_firmware = 1 WHERE id IN ('kept', 'evicted')")
+        conn.commit()
+
+    fake_variants = {"kept": ["factory", "ota"], "evicted": []}
+
+    def _fake_list_variants(jid: str) -> list[str]:
+        return fake_variants.get(jid, [])
+
+    import firmware_storage  # noqa: PLC0415
+    monkeypatch.setattr(firmware_storage, "list_variants", _fake_list_variants)
+
+    out = dao.latest_firmware_by_hash("bedroom.yaml", ["aaa111", "bbb222", "ccc333", "missing"])
+    assert "aaa111" in out
+    assert out["aaa111"]["job_id"] == "kept"
+    assert out["aaa111"]["firmware_variants"] == ["factory", "ota"]
+    # Evicted binary → row dropped from the map.
+    assert "bbb222" not in out
+    # Failed job → never considered.
+    assert "ccc333" not in out
+    # Hash never seen by job_history → absent.
+    assert "missing" not in out
+
+
+def test_dao_latest_firmware_by_hash_empty_inputs(tmp_path: Path) -> None:
+    """Empty hash list short-circuits without an SQL scan."""
+    dao = JobHistoryDAO(db_path=tmp_path / "history.db")
+    dao.init()
+    assert dao.latest_firmware_by_hash("anything.yaml", []) == {}
+    assert dao.latest_firmware_by_hash("anything.yaml", ["", None]) == {}  # type: ignore[list-item]
+
+
 def test_dao_get_returns_single_row_by_id(tmp_path: Path) -> None:
     """Bug #1 (1.6.1): ``get(job_id)`` powers firmware download from history.
 
@@ -228,8 +284,10 @@ def test_dao_retention_deletes_old_rows_only(tmp_path: Path) -> None:
     dao.record_terminal(_make_job(job_id="ancient", finished_offset=-400 * 86400))
 
     # Retention window of 365 days: only the ancient one is past cutoff.
-    deleted = dao.evict_older_than(365)
-    assert deleted == 1
+    # Bug #198: evict_older_than now returns the evicted IDs so the
+    # caller can clean up coupled artifacts (firmware `.bin`).
+    evicted = dao.evict_older_than(365)
+    assert evicted == ["ancient"]
     remaining = [r["id"] for r in dao.query()]
     assert remaining == ["recent"]
 
@@ -238,8 +296,8 @@ def test_dao_retention_noop_when_days_non_positive(tmp_path: Path) -> None:
     dao = JobHistoryDAO(db_path=tmp_path / "history.db")
     dao.record_terminal(_make_job(finished_offset=-10 * 86400))
     # 0 and negatives are treated as "unlimited retention".
-    assert dao.evict_older_than(0) == 0
-    assert dao.evict_older_than(-7) == 0
+    assert dao.evict_older_than(0) == []
+    assert dao.evict_older_than(-7) == []
     assert len(dao.query()) == 1
 
 

@@ -15,15 +15,21 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * round-robin scheduling could send the second job to a different worker
  * with a cold cache and the comparison becomes meaningless.
  *
- * Threshold: second ≤ 1.20 × first. Honest about what this test can detect:
+ * Threshold: second ≤ 2.00 × first. Honest about what this test can detect:
  * for a small device like cyd-office-info, most of the wall-clock budget is
  * OTA upload + PlatformIO setup, not the C++ compile that the cache
- * accelerates. Two healthy back-to-back runs have measured ratios of 0.76,
- * 0.83, and 0.88 — the variance is high enough that any threshold below
- * ~1.0 flakes. The realistic regression we catch here is "PlatformIO has
- * to redownload its package cache" — that pushes the ratio well above 1.5.
- * Tune via SPEEDUP_THRESHOLD env if you want a stricter check on a larger
- * project. Ratio is logged so trends can be eyeballed across CI runs.
+ * accelerates. Healthy back-to-back ratios on different hosts span:
+ *   hass-4 (idle)         0.76 / 0.83 / 0.88
+ *   hass-4 (compiles in flight on local-worker for other devices) → 1.70 seen
+ *   standalone-pve (busy docker host)                              → 1.30 seen
+ * Both upper-end measurements are real "no cache wipe, but second compile
+ * was slowed by host load / sibling jobs" — not regressions. The realistic
+ * regression we want to catch is "PlatformIO had to redownload its package
+ * cache between runs" — that pushes the ratio well above 2.0 on every host
+ * we've measured (typical 3–5×), so 2.00 still catches it without misfiring
+ * on host-load variance. Tune via SPEEDUP_THRESHOLD env if you want a
+ * stricter check on a larger project. Ratio is logged so trends can be
+ * eyeballed across CI runs.
  *
  * NOTE: this test consumes ~2 real compiles' worth of build time. It runs
  * inside the existing 10-minute hass-4 suite budget but is the longest
@@ -37,7 +43,7 @@ const EXPECTED_VERSION =
   readFileSync(join(__dirname, '../../VERSION'), 'utf-8').trim();
 
 const COMPILE_BUDGET_MS = parseInt(process.env.COMPILE_BUDGET_MS || '480000', 10);
-const SPEEDUP_THRESHOLD = parseFloat(process.env.SPEEDUP_THRESHOLD || '1.20');
+const SPEEDUP_THRESHOLD = parseFloat(process.env.SPEEDUP_THRESHOLD || '2.00');
 
 interface QueueJob {
   id: string;

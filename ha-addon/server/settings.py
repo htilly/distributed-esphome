@@ -51,6 +51,7 @@ OPTIONS_FILE = Path("/data/options.json")
 IMPORT_FROM_OPTIONS: tuple[str, ...] = (
     "job_history_retention_days",
     "firmware_cache_max_gb",
+    "firmware_retention_days",
     "job_log_retention_days",
     "job_timeout",
     "ota_timeout",
@@ -121,6 +122,14 @@ class AppSettings:
     git_author_email: str = "ha@distributed-esphome.local"
     job_history_retention_days: int = 365
     firmware_cache_max_gb: float = 2.0
+    # Bug #198: time-based eviction for /data/firmware/. The cache_max_gb
+    # ceiling rarely fires in practice — at typical fleet activity the
+    # firmware dir sits well under 2 GiB, so a year of binaries pile up
+    # waiting for a budget pass that never comes (and ride along in
+    # every HA backup). 2 days is enough for the most common
+    # "compile-now-flash-later" use case while keeping the on-disk
+    # footprint bounded to the recent past. 0 = unlimited.
+    firmware_retention_days: int = 2
     job_log_retention_days: int = 30
     # --- Fields migrated from Supervisor options.json in 1.6 (SP.8) ---
     # Shared Bearer token used by workers and (when require_ha_auth is
@@ -153,6 +162,22 @@ class AppSettings:
     # ``utils/format.ts``.
     time_format: str = "auto"
 
+    # Bug #5: date presentation for absolute dates in Queue / History tabs.
+    # Same shape as time_format: ``'auto'`` defers to the browser's resolved
+    # locale; the explicit values force a specific style regardless. Wired
+    # through ``utils/format.ts::setDateFormatPref`` from App.tsx on settings
+    # load and on every drawer commit.
+    date_format: str = "auto"
+
+    # DQ.1: fleet-wide default per-worker disk quota for the
+    # ``/esphome-versions/`` tree (venvs + per-target caches + per-slot
+    # working dirs + pio-slot toolchains). Pushed to every worker on every
+    # heartbeat as ``HeartbeatResponse.set_disk_quota_bytes``; per-worker
+    # overrides in ``WorkerDiskQuotaStore`` win over this default. 10 GiB
+    # is enough for 1 venv + a handful of per-target caches + 1 toolchain
+    # without wasting Pi-class storage.
+    default_worker_disk_quota_bytes: int = 10 * 1024 ** 3
+
 
 # ---------------------------------------------------------------------------
 # Validators
@@ -173,7 +198,9 @@ def _validate_bool(value: Any, field: str) -> bool:
     raise SettingsValidationError(field, f"expected bool, got {value!r}")
 
 
-def _validate_int_range(lo: int, hi: int) -> Callable[[Any, str], int]:
+def _validate_int_range(
+    lo: int, hi: int, *, multiple_of: int | None = None,
+) -> Callable[[Any, str], int]:
     def _v(value: Any, field: str) -> int:
         try:
             coerced = int(value)
@@ -181,6 +208,10 @@ def _validate_int_range(lo: int, hi: int) -> Callable[[Any, str], int]:
             raise SettingsValidationError(field, f"expected integer, got {value!r}")
         if coerced < lo or coerced > hi:
             raise SettingsValidationError(field, f"must be between {lo} and {hi}, got {coerced}")
+        if multiple_of is not None and coerced % multiple_of != 0:
+            raise SettingsValidationError(
+                field, f"must be a multiple of {multiple_of}, got {coerced}",
+            )
         return coerced
 
     return _v
@@ -259,6 +290,9 @@ _VALIDATORS: dict[str, Callable[[Any, str], Any]] = {
     "job_history_retention_days": _validate_int_range(0, 3650),
     # Hard floor at 0.1 GB so a typo ("0") doesn't nuke cached firmware.
     "firmware_cache_max_gb": _validate_float_range(0.1, 1024.0),
+    # Bug #198: 0 = unlimited; 3650 = 10y. Same shape as the other two
+    # retention knobs.
+    "firmware_retention_days": _validate_int_range(0, 3650),
     # 0 = unlimited; 3650 = 10y.
     "job_log_retention_days": _validate_int_range(0, 3650),
     # --- SP.8 migrated fields ---
@@ -278,6 +312,19 @@ _VALIDATORS: dict[str, Callable[[Any, str], Any]] = {
     "require_ha_auth": _validate_bool,
     # #82: enum validator — 'auto' / '12h' / '24h'. See AppSettings.time_format.
     "time_format": _validate_enum("auto", "12h", "24h"),
+    # Bug #5: date enum — 'auto' / 'iso' (2026-04-27) / 'us' (4/27/2026)
+    # / 'eu' (27/04/2026) / 'long' (Apr 27, 2026).
+    "date_format": _validate_enum("auto", "iso", "us", "eu", "long"),
+    # DQ.1: ≥1 GiB floor stops a typo from starving every worker into
+    # constant eviction; 1 TiB ceiling matches firmware_cache_max_gb's
+    # upper bound (anything bigger is misconfiguration). Also pinned to
+    # whole-GiB multiples so the UI's `Math.round(bytes / GiB)` display
+    # round-trips cleanly — without this, an API caller could store
+    # e.g. 10.5 GiB, the Settings drawer would render "11", and the
+    # next save would silently rewrite the value to 11 GiB.
+    "default_worker_disk_quota_bytes": _validate_int_range(
+        1 * 1024 ** 3, 1024 * 1024 ** 3, multiple_of=1024 ** 3,
+    ),
 }
 
 

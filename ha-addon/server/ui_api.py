@@ -6,6 +6,7 @@ import asyncio
 import logging
 import re
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 
 import aiohttp
@@ -18,6 +19,7 @@ from job_queue import JobState
 from scanner import (
     create_stub_yaml,
     duplicate_device,
+    get_archived_device_metadata,
     get_device_metadata,
     get_esphome_version,
     read_device_meta,
@@ -29,6 +31,32 @@ from scanner import (
 logger = logging.getLogger(__name__)
 
 routes = web.RouteTableDef()
+
+
+def _parse_device_compile_epoch(compilation_time: str | None) -> int | None:
+    """Parse the ESPHome ``compilation_time`` string into epoch seconds.
+
+    Bug #13 / #102: serves as the device-firmware fallback for the
+    Devices-tab "Last compiled" column when the SQLite job history has
+    nothing for a target. ``aioesphomeapi`` reports the build time as
+    ``"2026-04-23 06:13:56 -0700"`` (ISO-with-offset); the dev.18 parser
+    hard-coded the older ``"%b %d %Y, %H:%M:%S"`` form ("Mar 29 2026,
+    17:00:00") which never matched in production, so the fallback
+    silently returned None for every device. We try the modern format
+    first, then the older comma-separated form for back-compat. Tz-aware
+    parses produce a UTC-correct epoch; tz-naive parses fall back to
+    server-local time as the closest defensible interpretation (we don't
+    know the build host's timezone).
+    """
+    if not compilation_time:
+        return None
+    from datetime import datetime  # noqa: PLC0415
+    for fmt in ("%Y-%m-%d %H:%M:%S %z", "%b %d %Y, %H:%M:%S"):
+        try:
+            return int(datetime.strptime(compilation_time, fmt).timestamp())
+        except (ValueError, OSError):
+            continue
+    return None
 
 
 def _broadcast_ws(event_type: str, **payload: object) -> None:
@@ -66,6 +94,30 @@ _esphome_components_cache: list[str] | None = None
 
 def _cfg(request: web.Request) -> AppConfig:
     return request.app["config"]
+
+
+async def _ensure_pinned_esphome_bin(pin: str) -> str:
+    """Lazy-install the pinned ESPHome version into ``/data/esphome-versions``
+    and return the path to its ``esphome`` binary.
+
+    Used by the validate and rendered-config endpoints, both of which run
+    a one-off subprocess outside the worker bundle path. Wraps the
+    blocking ``VersionManager.ensure_version`` call so the event loop
+    isn't held for the install duration.
+    """
+    import asyncio as _asyncio  # noqa: PLC0415
+    import sys as _sys  # noqa: PLC0415
+    from pathlib import Path as _Path  # noqa: PLC0415
+    if "/app/client" not in _sys.path:
+        _sys.path.insert(0, "/app/client")
+    from version_manager import VersionManager  # noqa: PLC0415
+    vm = VersionManager(
+        versions_base=_Path("/data/esphome-versions"),
+        max_versions=5,
+    )
+    return await _asyncio.get_running_loop().run_in_executor(
+        None, vm.ensure_version, pin,
+    )
 
 
 @routes.get("/ui/api/_debug/scheduler")
@@ -189,6 +241,22 @@ async def get_file_history(request: web.Request) -> web.Response:
 
     from git_versioning import file_history  # noqa: PLC0415
     entries = file_history(Path(cfg.config_dir), filename, limit=limit, offset=offset)
+    # #211: enrich entries with firmware-availability info so the
+    # History panel can render a per-row Download chip when a stored
+    # binary still matches that commit's config_hash. The map is
+    # naturally sparse — most commits have no matching firmware.
+    history_dao = request.app.get("job_history")
+    if history_dao is not None and entries:
+        hashes = [str(e.get("hash") or "") for e in entries]
+        try:
+            firmware_by_hash = history_dao.latest_firmware_by_hash(filename, hashes)
+        except Exception:
+            firmware_by_hash = {}
+        for e in entries:
+            match = firmware_by_hash.get(str(e.get("hash") or ""))
+            if match:
+                e["firmware_job_id"] = match["job_id"]
+                e["firmware_variants"] = match["firmware_variants"]
     return web.json_response(entries)
 
 
@@ -476,8 +544,9 @@ async def get_server_info(request: web.Request) -> web.Response:
     else:
         esphome_install_status = "installing"
     from settings import get_settings as _gs  # noqa: PLC0415
+    settings = _gs()
     return web.json_response({
-        "token": _gs().server_token,
+        "token": settings.server_token,
         "port": cfg.port,
         "server_ip": server_ip,
         "server_addresses": addrs,
@@ -487,6 +556,9 @@ async def get_server_info(request: web.Request) -> web.Response:
         # SE.8: ESPHome install lifecycle fields for the UI banner.
         "esphome_install_status": esphome_install_status,
         "esphome_server_version": _scanner.get_esphome_version(),
+        # DQ.5: ConnectWorkerModal needs the fleet default to label its
+        # "Use fleet default (X GiB)" radio without a separate fetch.
+        "default_worker_disk_quota_bytes": settings.default_worker_disk_quota_bytes,
     })
 
 
@@ -660,6 +732,11 @@ async def get_targets(request: web.Request) -> web.Response:
         except Exception:
             logger.debug("job_history.last_per_target() raised; continuing")
 
+    def _device_compile_epoch(dev: Device | None) -> int | None:
+        if not dev:
+            return None
+        return _parse_device_compile_epoch(dev.compilation_time)
+
     # Build device lookup by compile_target filename
     devices_by_target: dict[str, Device] = {}
     if device_poller:
@@ -780,6 +857,12 @@ async def get_targets(request: web.Request) -> web.Response:
             "network_ipv6": meta.get("network_ipv6", False),
             "network_ap_fallback": meta.get("network_ap_fallback", False),
             "network_matter": meta.get("network_matter", False),
+            # Bug #23: chip family + BLE proxy mode for the new Devices columns.
+            "esp_type": meta.get("esp_type"),
+            # UD.5: PlatformIO board string (esp32dev, nodemcu_32s, …) — secondary
+            # line on the Platform column.
+            "board": meta.get("board"),
+            "bluetooth_proxy": meta.get("bluetooth_proxy", "off"),
             # Per-device metadata from the # esphome-fleet: comment block.
             "pinned_version": meta.get("pinned_version"),
             "schedule": meta.get("schedule"),
@@ -811,7 +894,14 @@ async def get_targets(request: web.Request) -> web.Response:
             # JH.6: tuple of (finished_at, state) for the Devices tab's
             # optional "Last compiled" column. Shape chosen so the UI
             # can render relative time + a success/failure chip without
-            # a second API call.
+            # a second API call. Bug #13: when the SQLite history has
+            # nothing for this target (fresh server, YAML compiled by
+            # another install, history evicted by retention), fall back
+            # to the running device's reported ``compilation_time`` so
+            # the column doesn't read "—" for devices that are obviously
+            # running compiled firmware. ``source`` distinguishes the
+            # two so the UI can disambiguate (history is precise; device
+            # is approximate — local-tz parsed, no per-job state).
             "last_compile": (
                 {
                     "at": last_compile_by_target[target]["finished_at"],
@@ -819,12 +909,88 @@ async def get_targets(request: web.Request) -> web.Response:
                     "ota_result": last_compile_by_target[target].get("ota_result"),
                     "validate_only": bool(last_compile_by_target[target].get("validate_only")),
                     "download_only": bool(last_compile_by_target[target].get("download_only")),
+                    "source": "history",
                 }
                 if target in last_compile_by_target
-                else None
+                else (
+                    {
+                        "at": _device_compile_epoch(dev),
+                        "state": "success",
+                        "ota_result": None,
+                        "validate_only": False,
+                        "download_only": False,
+                        "source": "device",
+                    }
+                    if _device_compile_epoch(dev) is not None
+                    else None
+                )
             ),
+            # DM.1: archived flag on every active row so the UI can
+            # apply ``opacity-50`` + reduced action menu uniformly. Rows
+            # produced by ``scan_archived`` below carry archived=True.
+            "archived": False,
         }
         result.append(entry)
+
+    # DM.1: merge archived rows so the Devices tab can render them
+    # inline (toggleable via the column-picker "Show archived devices"
+    # entry). The poller / scheduler / routing engine / queue continue
+    # to see only active targets — archived is purely a UI surface.
+    # #203: re-read each archived YAML so the row keeps tags / area /
+    # project / comment / pinned_version / schedule / network / chip /
+    # BLE-proxy. Without this the Devices tab silently dropped every
+    # attribute the moment a device was archived (and the tag-filter
+    # pills lost the archived rows' tags entirely).
+    from scanner import scan_archived  # noqa: PLC0415
+    for arch in scan_archived(cfg.config_dir):
+        meta = get_archived_device_metadata(cfg.config_dir, arch["filename"])
+        result.append({
+            "target": arch["filename"],
+            "friendly_name": meta.get("friendly_name"),
+            "device_name": meta.get("device_name"),
+            "comment": meta.get("comment"),
+            "area": meta.get("area"),
+            "project_name": meta.get("project_name"),
+            "project_version": meta.get("project_version"),
+            "online": None,
+            "running_version": None,
+            "compilation_time": None,
+            "config_modified": None,
+            "needs_update": None,
+            "ip_address": None,
+            "address_source": None,
+            "last_seen": None,
+            "server_version": server_version,
+            "has_api_key": False,
+            "has_web_server": meta.get("has_web_server", False),
+            "has_restart_button": meta.get("has_restart_button", False),
+            "ha_configured": False,
+            "ha_connected": False,
+            "ha_device_id": None,
+            "mac_address": None,
+            "network_type": meta.get("network_type"),
+            "network_static_ip": meta.get("network_static_ip", False),
+            "network_ipv6": meta.get("network_ipv6", False),
+            "network_ap_fallback": meta.get("network_ap_fallback", False),
+            "network_matter": meta.get("network_matter", False),
+            "esp_type": meta.get("esp_type"),
+            "board": meta.get("board"),
+            "bluetooth_proxy": meta.get("bluetooth_proxy", "off"),
+            "pinned_version": meta.get("pinned_version"),
+            "schedule": meta.get("schedule"),
+            "schedule_enabled": meta.get("schedule_enabled", False),
+            "schedule_last_run": meta.get("schedule_last_run"),
+            "schedule_once": meta.get("schedule_once"),
+            "schedule_tz": None,
+            "tags": meta.get("tags"),
+            "has_uncommitted_changes": False,
+            "last_flashed_config_hash": None,
+            "config_drifted_since_flash": None,
+            "last_compile": None,
+            "archived": True,
+            "archived_at": arch["archived_at"],
+            "archived_size": arch["size"],
+        })
 
     return web.json_response(result)
 
@@ -1346,7 +1512,14 @@ async def _get_workers_response(request: web.Request) -> web.Response:
     registry = request.app["registry"]
     queue = request.app["queue"]
     from settings import get_settings as _gs  # noqa: PLC0415
-    threshold = _gs().worker_offline_threshold
+    s = _gs()
+    threshold = s.worker_offline_threshold
+    # DQ.5: surface the effective per-worker quota alongside the persisted
+    # override so the UI can render "Custom: 5 GiB" vs "Default: 10 GiB"
+    # without a second fetch. The fleet default is also returned at the
+    # row level (cheap, lets the ConnectWorkerModal default-radio render
+    # without a separate /ui/api/settings call).
+    default_quota = s.default_worker_disk_quota_bytes
 
     result = []
     for worker in registry.get_all():
@@ -1356,6 +1529,8 @@ async def _get_workers_response(request: web.Request) -> web.Response:
             job = queue.get(d["current_job_id"])
             if job:
                 d["current_job_target"] = job.target
+        d["disk_quota_bytes"] = worker.effective_disk_quota_bytes(default_quota)
+        d["default_worker_disk_quota_bytes"] = default_quota
         result.append(d)
     return web.json_response(result)
 
@@ -1638,20 +1813,8 @@ async def validate_config(request: web.Request) -> web.Response:
 
     if pin and pin != installed_binary_version:
         try:
-            from pathlib import Path as _Path  # noqa: PLC0415
-            import sys as _sys  # noqa: PLC0415
-            # The version manager lives in the bundled client code
-            if "/app/client" not in _sys.path:
-                _sys.path.insert(0, "/app/client")
-            from version_manager import VersionManager  # noqa: PLC0415
-            vm = VersionManager(
-                versions_base=_Path("/data/esphome-versions"),
-                max_versions=5,
-            )
             logger.info("Validating %s: ensuring ESPHome %s is installed for pinned version", target, pin)
-            esphome_bin = await _asyncio.get_event_loop().run_in_executor(
-                None, vm.ensure_version, pin,
-            )
+            esphome_bin = await _ensure_pinned_esphome_bin(pin)
         except Exception as exc:
             logger.warning("Could not install pinned ESPHome %s for validation: %s", pin, exc)
             # Fall back to server default
@@ -1690,6 +1853,201 @@ async def validate_config(request: web.Request) -> web.Response:
     else:
         logger.warning("Validation failed for %s (exit %d)", target, proc.returncode or -1)
     return web.json_response({"success": success, "output": output})
+
+
+# ---------------------------------------------------------------------------
+# RC.1 — rendered-config endpoint
+# ---------------------------------------------------------------------------
+
+# RC.1: in-process LRU cache for rendered configs. Key = (filename,
+# file_mtime_ns, secrets_mtime_ns) so any save/commit on the file or its
+# secrets.yaml busts the entry automatically (a fresh stat returns a
+# different mtime → cache miss → fresh subprocess run). Capped at 32
+# entries with FIFO eviction so a long-running session doesn't grow it
+# unbounded. Single-process server so a plain dict is sufficient.
+_rendered_config_cache: "OrderedDict[tuple[str, int, int], tuple[bool, str]] | None" = None
+_RENDERED_CONFIG_CACHE_MAX = 32
+
+# ESPHome wraps `!secret` references in ANSI conceal escapes
+# (`\x1b[8m...\x1b[28m`) so terminals visually mask them; Monaco renders
+# the literal escape bytes as garbage text. Strip the full SGR family
+# (CSI ... letter) since `esphome config` may also emit colour codes
+# from its `_LOGGER` chatter that we want to clean before display.
+_ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def _get_rendered_cache() -> "OrderedDict[tuple[str, int, int], tuple[bool, str]]":
+    """Lazy-init the module-level OrderedDict so test harnesses that
+    re-import this module land on a fresh cache."""
+    global _rendered_config_cache
+    if _rendered_config_cache is None:
+        _rendered_config_cache = OrderedDict()
+    return _rendered_config_cache
+
+
+def _rendered_cache_key(config_dir: str, filename: str) -> tuple[str, int, int]:
+    """Build the cache key for *filename* under *config_dir*. The
+    secrets.yaml mtime participates so a `!secret` value change re-runs
+    `esphome config` even when the device YAML is byte-identical."""
+    file_mtime = 0
+    secrets_mtime = 0
+    try:
+        file_path = safe_resolve(Path(config_dir), filename)
+        if file_path is not None and file_path.exists():
+            file_mtime = file_path.stat().st_mtime_ns
+    except Exception:
+        file_mtime = 0
+    try:
+        secrets_path = Path(config_dir) / "secrets.yaml"
+        if secrets_path.exists():
+            secrets_mtime = secrets_path.stat().st_mtime_ns
+    except Exception:
+        secrets_mtime = 0
+    return (filename, file_mtime, secrets_mtime)
+
+
+@routes.get("/ui/api/targets/{filename}/rendered-config")
+async def get_rendered_config(request: web.Request) -> web.Response:
+    """RC.1 — return the YAML *as ESPHome will compile it* for *filename*.
+
+    Runs ``esphome config <abs-path>`` (same venv-binary discovery as
+    ``/ui/api/validate``), captures stdout (the rendered YAML on
+    success) or the captured output (validation/parse errors on
+    failure), and returns ``{"success": bool, "output": str,
+    "cached": bool}``.
+
+    The rendered output resolves ``!include`` / ``!secret`` /
+    ``substitutions:`` / ``packages:`` / ``<<: *anchor`` merges to
+    their final values — including plaintext ``!secret`` values, which
+    is exactly the diagnostic context the user wants but means the
+    response *must not* be logged server-side. Logger calls below
+    intentionally never reference ``output``.
+    """
+    filename = request.match_info["filename"]
+    cfg = _cfg(request)
+    config_path = safe_resolve(Path(cfg.config_dir), filename)
+    if config_path is None or not config_path.exists():
+        return json_error("Target not found", 404)
+
+    # secrets.yaml itself isn't a device config — same skip the
+    # validate endpoint applies for the same reason.
+    if Path(filename).name == "secrets.yaml":
+        return web.json_response({
+            "success": True,
+            "output": (
+                "secrets.yaml holds !secret values — there is no device "
+                "config to render here. Open a device YAML to view its "
+                "rendered output.\n"
+            ),
+            "cached": False,
+            "skipped": True,
+        })
+
+    cache = _get_rendered_cache()
+    key = _rendered_cache_key(cfg.config_dir, filename)
+    hit = cache.get(key)
+    if hit is not None:
+        # LRU bump so the most recently viewed entries stay warmest.
+        cache.move_to_end(key)
+        success, output = hit
+        return web.json_response({"success": success, "output": output, "cached": True})
+
+    # Same ESPHome-binary discovery as /ui/api/validate so a pinned
+    # device's rendered view matches what its compile would produce.
+    import scanner as _scanner  # noqa: PLC0415
+    from scanner import _get_installed_esphome_version  # noqa: PLC0415
+    meta = read_device_meta(cfg.config_dir, filename)
+    pin = meta.get("pin_version")
+    if _scanner._esphome_ready.is_set() and _scanner._server_esphome_bin:
+        esphome_bin = _scanner._server_esphome_bin
+    else:
+        esphome_bin = "esphome"
+    installed_binary_version = _get_installed_esphome_version()
+
+    if not pin and not _scanner._esphome_ready.is_set():
+        import shutil as _shutil  # noqa: PLC0415
+        if _shutil.which("esphome") is None:
+            return web.json_response(
+                {
+                    "success": False,
+                    "output": "ESPHome still installing, please retry in a moment",
+                    "cached": False,
+                },
+                status=503,
+            )
+
+    if pin and pin != installed_binary_version:
+        try:
+            logger.info("Rendering %s: ensuring ESPHome %s is installed for pinned version", filename, pin)
+            esphome_bin = await _ensure_pinned_esphome_bin(pin)
+        except Exception as exc:
+            logger.warning("Could not install pinned ESPHome %s for rendering: %s", pin, exc)
+
+    logger.info("Rendering %s via %s config (direct subprocess)", filename, esphome_bin)
+    try:
+        # Bug #113: capture stdout and stderr separately. ESPHome's
+        # `command_config` (esphome/__main__.py) writes the rendered
+        # YAML to stdout via `safe_print` and writes its `_LOGGER`
+        # status chatter ("INFO ESPHome 2026.4.3", "INFO Reading
+        # configuration...", "WARNING GPIO12 is a strapping PIN...",
+        # trailing "INFO Configuration is valid!") to stderr. Pre-#113
+        # we used `stderr=STDOUT` which merged them, so the modal
+        # showed the YAML buried between INFO/WARNING lines. Now we
+        # show the user just the YAML on success and surface stderr
+        # only when the render fails (where the diagnostic context
+        # belongs).
+        proc = await asyncio.create_subprocess_exec(
+            esphome_bin, "config", str(config_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cfg.config_dir,
+        )
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=60)
+        stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
+        stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
+        success = proc.returncode == 0
+        if success:
+            output = _ANSI_SGR_RE.sub("", stdout)
+        else:
+            # On failure, the validation error lives in stderr (cv.Invalid
+            # messages, traceback). stdout may also carry partial render
+            # output from a YAML that started parsing then errored mid-
+            # tree, so concatenate to give the user the full diagnostic
+            # context. Stderr first because the actionable message lives there.
+            output = _ANSI_SGR_RE.sub("", stderr + (stdout if stdout else ""))
+    except asyncio.TimeoutError:
+        return web.json_response(
+            {"success": False, "output": "Rendering timed out after 60 seconds", "cached": False},
+            status=200,
+        )
+    except FileNotFoundError:
+        return web.json_response(
+            {"success": False, "output": "esphome binary not found on the server", "cached": False},
+            status=500,
+        )
+    except Exception as exc:
+        logger.exception("Render subprocess failed for %s", filename)
+        return web.json_response(
+            {"success": False, "output": f"Internal error: {exc}", "cached": False},
+            status=500,
+        )
+
+    if success:
+        # NEVER log the rendered output — it carries plaintext !secret
+        # values. Length is fine; content is not.
+        logger.info("Rendered config produced for %s (%d bytes)", filename, len(output))
+    else:
+        logger.warning("Render failed for %s (exit %d)", filename, proc.returncode or -1)
+
+    # Cache after the run so the same edit-session's repeat opens are
+    # subprocess-free. Successful AND failed renders both cache so a
+    # known-bad YAML doesn't burn a fresh subprocess on every retry.
+    cache[key] = (success, output)
+    cache.move_to_end(key)
+    while len(cache) > _RENDERED_CONFIG_CACHE_MAX:
+        cache.popitem(last=False)
+
+    return web.json_response({"success": success, "output": output, "cached": False})
 
 
 # ---------------------------------------------------------------------------
@@ -1772,8 +2130,18 @@ async def update_target_meta(request: web.Request) -> web.Response:
             meta[key] = value
     write_device_meta(cfg.config_dir, filename, meta)
     logger.info("Updated metadata for %s: %s%s", filename, list(body.keys()), _who(request))
+    # Bug #22: derive a specific commit-message action from the body so
+    # the git log says what actually changed (e.g. "Updated device tags"
+    # rather than "Updated device metadata"). Single-key bodies get a
+    # per-key subject; multi-key bodies fall back to the generic "meta".
+    if len(body) == 1:
+        only_key = next(iter(body.keys()))
+        cleared = body[only_key] is None
+        action = f"meta {only_key}{' cleared' if cleared else ''}"
+    else:
+        action = "meta"
     from git_versioning import commit_file  # noqa: PLC0415
-    await commit_file(Path(cfg.config_dir), filename, "meta")
+    await commit_file(Path(cfg.config_dir), filename, action)
     return web.json_response({"ok": True})
 
 
@@ -1963,6 +2331,20 @@ async def start_compile(request: web.Request) -> web.Response:
 
     targets_param = body.get("targets", "all")
     pinned_client_id = body.get("pinned_client_id")  # optional: pin job to specific worker
+    # Bug #97: optional per-job worker_tag_filter from the Upgrade
+    # modal's "Tag expression" worker-selection radio. Same shape as a
+    # routing-rule clause — ``{"op": "all_of"|"any_of"|"none_of",
+    # "tags": [...]}``. Validated minimally here; the eligibility
+    # builder accepts any well-shaped clause and skips malformed ones.
+    worker_tag_filter_raw = body.get("worker_tag_filter")
+    worker_tag_filter: dict | None = None
+    if isinstance(worker_tag_filter_raw, dict):
+        op = worker_tag_filter_raw.get("op")
+        tags = worker_tag_filter_raw.get("tags")
+        if op in ("all_of", "any_of", "none_of") and isinstance(tags, list):
+            cleaned_tags = [str(t).strip() for t in tags if isinstance(t, str) and str(t).strip()]
+            if cleaned_tags:
+                worker_tag_filter = {"op": op, "tags": cleaned_tags}
     # #16: optional per-run ESPHome version override. Falls back to the global
     # default from set_esphome_version when not provided. We do NOT mutate the
     # global default — this is a per-job override only.
@@ -1972,6 +2354,35 @@ async def start_compile(request: web.Request) -> web.Response:
     # the user downloads it from the Queue tab. Mutually exclusive with
     # validate_only (which isn't exposed through this endpoint anyway).
     download_only = bool(body.get("download_only", False))
+    # Bug #110: per-job override flag for routing rules. Set when the
+    # user picked a Specific worker / Tag expression that conflicts
+    # with active rules and confirmed the warning in the Upgrade modal.
+    # The eligibility checks (BLOCKED-vs-PENDING re-eval and the
+    # per-worker claim_next predicate) ignore routing rules for jobs
+    # carrying this flag; the user's tag-filter / pin still applies.
+    bypass_routing_rules = bool(body.get("bypass_routing_rules", False))
+    # DM.3: optional per-job OTA address override from the
+    # InstallToAddressModal. When set, must accompany a single-element
+    # ``targets`` array (multi-target + address is meaningless and 400's
+    # below). Goes through the same ``Job.ota_address`` plumbing the
+    # rename auto-recompile already uses (#65 / ui_api.py:2795 region),
+    # so no protocol change is needed.
+    address_override_raw = body.get("address")
+    address_override: str | None = None
+    if address_override_raw is not None:
+        if not isinstance(address_override_raw, str):
+            return web.json_response(
+                {"error": "address must be a string"}, status=400,
+            )
+        address_override = address_override_raw.strip()
+        if not address_override:
+            address_override = None
+        elif len(address_override) > 253:
+            # Same upper bound as a DNS hostname — anything longer can't
+            # be a real target.
+            return web.json_response(
+                {"error": "address too long (max 253 chars)"}, status=400,
+            )
     cfg = _cfg(request)
     queue = request.app["queue"]
     device_poller = request.app.get("device_poller")
@@ -2008,6 +2419,15 @@ async def start_compile(request: web.Request) -> web.Response:
     else:
         return web.json_response({"error": "Invalid targets value"}, status=400)
 
+    # DM.3: address override is single-target only (multi-target +
+    # address makes no sense — every device gets the same OTA target,
+    # which is wrong for any batch).
+    if address_override and len(selected) != 1:
+        return web.json_response(
+            {"error": "address override requires exactly one target"},
+            status=400,
+        )
+
     # Build a map of target → device IP for OTA addressing
     # Bug #18 (1.6.1): resolve_ota_address picks a real IP over a
     # stale ``.local`` fallback so static-IP devices can't regress
@@ -2019,6 +2439,11 @@ async def start_compile(request: web.Request) -> web.Response:
                 addr = device_poller.resolve_ota_address(dev.name)
                 if addr:
                     ota_addresses[dev.compile_target] = addr
+    # DM.3: per-job address override wins over the auto-resolved value
+    # for the single selected target. Stored on the job's ``ota_address``
+    # field so the worker uses it as ``--device <addr>`` for the OTA pass.
+    if address_override:
+        ota_addresses[selected[0]] = address_override
 
     run_id = str(uuid.uuid4())
     enqueued = 0
@@ -2047,6 +2472,8 @@ async def start_compile(request: web.Request) -> web.Response:
             ota_address=ota_addresses.get(target),
             pinned_client_id=pinned_client_id,
             config_hash=_get_head(Path(cfg.config_dir)),
+            worker_tag_filter=worker_tag_filter,
+            bypass_routing_rules=bypass_routing_rules,
         )
         if job is not None:
             # Bug 27: flag the job as triggered by a Home Assistant
@@ -2077,6 +2504,11 @@ async def start_compile(request: web.Request) -> web.Response:
         f" pinned={pinned_client_id}" if pinned_client_id else "",
         _who(request),
     )
+    # TG.3: a freshly-enqueued job whose target has rules with no
+    # eligible online worker should land in BLOCKED, not PENDING.
+    if enqueued > 0:
+        from routing_eligibility import fire_and_forget  # noqa: PLC0415
+        fire_and_forget(request.app)
     return web.json_response({"run_id": run_id, "enqueued": enqueued})
 
 
@@ -2307,15 +2739,41 @@ async def delete_target(request: web.Request) -> web.Response:
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=500)
 
-    # Cancel any pending jobs for this target
+    # Cancel any non-terminal jobs for this target. PENDING is the obvious
+    # case; BLOCKED jobs would otherwise stick around forever pointing at a
+    # deleted target; WORKING jobs may still be compiling on a worker and
+    # the cancel won't actually stop the in-flight subprocess (the worker
+    # will surface a "job in unexpected state CANCELLED" warning when it
+    # reports back), but at least the queue state is correct after delete.
     queue = request.app["queue"]
-    job_ids = [j.id for j in queue.get_all() if j.target == filename and j.state == JobState.PENDING]
+    job_ids = [
+        j.id for j in queue.get_all()
+        if j.target == filename
+        and j.state in (JobState.PENDING, JobState.BLOCKED, JobState.WORKING)
+    ]
     if job_ids:
         await queue.cancel(job_ids)
 
     # Invalidate config cache for the deleted file
     from scanner import _config_cache  # noqa: PLC0415
     _config_cache.pop(filename, None)
+
+    # DM.1: evict the just-archived device from the poller so the UI's
+    # archived row freezes at last_seen=now rather than staying "online"
+    # for ~4 h until the TTL prune fires. Mirrors the eviction in
+    # ``rename_target`` above. Skipped on permanent-delete because the
+    # row vanishes from the table entirely in that case.
+    if archive:
+        device_poller = request.app.get("device_poller")
+        if device_poller:
+            stale_name = None
+            for d in device_poller.get_devices():
+                if d.compile_target == filename:
+                    stale_name = d.name
+                    break
+            if stale_name and stale_name in device_poller._devices:
+                del device_poller._devices[stale_name]
+                logger.debug("Evicted device %s after archive of %s", stale_name, filename)
 
     logger.info("Deleted config %s (archive=%s)%s", filename, archive, _who(request))
     if not archive:
@@ -2446,19 +2904,26 @@ async def rename_target(request: web.Request) -> web.Response:
 
     try:
         content = old_path.read_text(encoding="utf-8")
-        # Update the esphome.name field to match the new filename stem.
-        # Matches:  name: old-name  or  name: "old-name"  or  name: 'old-name'
+        # PY-1: parse YAML to identify the right binding (substitutions.name
+        # preferred, esphome.name as fallback) and the OLD value, then do a
+        # literal-value rewrite on that single line. Comments are preserved;
+        # ${...} indirection is handled correctly. The previous regex misfired
+        # on substitutions, on quoted-with-trailing-comment values, and on
+        # configs where esphome: wasn't the first top-level block.
+        from scanner import rename_device_in_yaml  # noqa: PLC0415
         base_name = new_filename.replace(".yaml", "")
-        content = re.sub(
-            r"(^\s*name:\s*[\"']?)[\w-]+([\"']?\s*$)",
-            rf"\g<1>{base_name}\g<2>",
-            content,
-            count=1,
-            flags=re.MULTILINE,
-        )
-        new_path.write_text(content, encoding="utf-8")
+        new_content, rewritten = rename_device_in_yaml(content, base_name)
+        new_path.write_text(new_content, encoding="utf-8")
         if new_path != old_path:
             old_path.unlink()
+        if not rewritten:
+            logger.warning(
+                "rename_target: %s → %s renamed on disk but the YAML's "
+                "internal name binding wasn't safely rewriteable "
+                "(no substitutions.name, no literal esphome.name, or "
+                "an unresolvable ${...} reference) — user must edit it manually",
+                filename, new_filename,
+            )
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=500)
 
@@ -2510,6 +2975,9 @@ async def rename_target(request: web.Request) -> web.Response:
         config_hash=_get_head(config_dir),
     )
     logger.info("Enqueued compile+OTA for renamed device %s", new_filename)
+    # TG.3: re-eval the just-enqueued job against current rules.
+    from routing_eligibility import fire_and_forget  # noqa: PLC0415
+    fire_and_forget(request.app)
 
     # AV.2: commit both paths so the rename shows up as a
     # delete-of-old + add-of-new. `git add --all -- <path>` picks up
@@ -2718,6 +3186,104 @@ async def restart_device(request: web.Request) -> web.Response:
         )
 
 
+@routes.post("/ui/api/targets/{filename}/ping")
+async def ping_device(request: web.Request) -> web.Response:
+    """DM.2: ICMP ping a device and return RTT / loss stats.
+
+    Resolves the target's address through ``device_poller.resolve_ota_address``
+    so the ping target matches what an OTA upload would hit (real IP from
+    mDNS / static-IP override beats a stale ``.local`` hostname per #18).
+    Runs ``icmplib.async_ping(host, count=10, interval=0.2, timeout=2,
+    privileged=False)`` — unprivileged ICMP via ``net.ipv4.ping_group_range``,
+    which the HA add-on container and the standalone Docker container both
+    inherit. No new dependencies (icmplib already pinned for the
+    device_poller's ping fallback). Worst-case wall time for an unreachable
+    host is `(count-1)*interval + timeout` ≈ 3.8 s — batch UX, no streaming.
+
+    Returns: flat dict with ``is_alive``, ``packets_sent``, ``packets_received``,
+    ``packet_loss``, ``min_rtt``, ``avg_rtt``, ``max_rtt``, ``jitter``, plus
+    ``target``, ``address``, ``ran_at``. Errors:
+      - 404 ``no_resolved_address`` — poller has no address for this device
+        (ESPHome device never came up on mDNS, no ``use_address`` override).
+      - 404 ``unknown_target`` — the YAML filename doesn't match any device
+        the poller has seen.
+    """
+    import time as _time  # noqa: PLC0415
+
+    filename = request.match_info["filename"]
+    device_poller = request.app.get("device_poller")
+    if device_poller is None:
+        return web.json_response(
+            {"error": "device poller unavailable"}, status=503,
+        )
+
+    # Find the device that compiles to this YAML — same lookup pattern as
+    # the restart endpoint above. We look up by ``compile_target`` so the
+    # filename-to-device mapping is authoritative against the live poll.
+    dev = None
+    for d in device_poller.get_devices():
+        if d.compile_target == filename:
+            dev = d
+            break
+    if dev is None:
+        return web.json_response(
+            {"error": "unknown_target", "target": filename}, status=404,
+        )
+
+    address = device_poller.resolve_ota_address(dev.name)
+    if not address:
+        return web.json_response(
+            {
+                "error": "no_resolved_address",
+                "target": filename,
+                "device_name": dev.name,
+            },
+            status=404,
+        )
+
+    logger.info(
+        "Ping: target=%s name=%s address=%s (count=10, interval=0.2s, timeout=2s)",
+        filename, dev.name, address,
+    )
+
+    # #206: try unprivileged ICMP first (Linux hosts where
+    # ``net.ipv4.ping_group_range`` allows it), fall back to a raw-socket
+    # ping (HA addon container with ``NET_RAW`` capability granted via
+    # ``ha-addon/config.yaml``). HAOS ships ``ping_group_range = 1 0``
+    # (empty) so unprivileged ICMP fails with ``SocketPermissionError``;
+    # without the fallback the modal would always immediately fail there.
+    try:
+        from icmplib import SocketPermissionError, async_ping  # noqa: PLC0415
+        try:
+            host = await async_ping(
+                address, count=10, interval=0.2, timeout=2, privileged=False,
+            )
+        except SocketPermissionError:
+            host = await async_ping(
+                address, count=10, interval=0.2, timeout=2, privileged=True,
+            )
+    except Exception as exc:
+        logger.warning("Ping %s (%s) failed: %s", filename, address, exc)
+        return web.json_response(
+            {"error": "ping_failed", "detail": str(exc), "target": filename, "address": address},
+            status=500,
+        )
+
+    return web.json_response({
+        "target": filename,
+        "address": address,
+        "ran_at": _time.time(),
+        "is_alive": bool(host.is_alive),
+        "packets_sent": int(host.packets_sent),
+        "packets_received": int(host.packets_received),
+        "packet_loss": float(host.packet_loss),
+        "min_rtt": float(host.min_rtt),
+        "avg_rtt": float(host.avg_rtt),
+        "max_rtt": float(host.max_rtt),
+        "jitter": float(host.jitter),
+    })
+
+
 @routes.post("/ui/api/retry")
 async def retry_jobs(request: web.Request) -> web.Response:
     """Re-enqueue failed/timed_out jobs.
@@ -2837,6 +3403,58 @@ async def set_worker_parallel_jobs(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "max_parallel_jobs": value})
 
 
+@routes.post("/ui/api/workers/{client_id}/disk-quota")
+async def set_worker_disk_quota(request: web.Request) -> web.Response:
+    """DQ.5 — set or clear a worker's disk-quota override.
+
+    Body ``{"disk_quota_bytes": <int> | null}``. Null clears the override
+    so the worker inherits ``AppSettings.default_worker_disk_quota_bytes``.
+    The next heartbeat (≤10s) carries the new effective value to the worker
+    via ``HeartbeatResponse.set_disk_quota_bytes`` — no restart required.
+    """
+    client_id = request.match_info["client_id"]
+    registry = request.app["registry"]
+    worker = registry.get(client_id)
+    if not worker:
+        return web.json_response({"error": "Worker not found"}, status=404)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+    value = body.get("disk_quota_bytes")
+    if value is not None:
+        if not isinstance(value, int) or isinstance(value, bool):
+            return web.json_response(
+                {"error": "disk_quota_bytes must be an integer or null"},
+                status=400,
+            )
+        # Same floor/ceiling/granularity as the fleet default validator
+        # (settings.py). Whole-GiB multiples keep the UI's
+        # `Math.round(bytes / GiB)` display honest — see the validator
+        # comment for the silent-rewrite scenario.
+        if value < 1 * 1024 ** 3 or value > 1024 * 1024 ** 3:
+            return web.json_response(
+                {"error": "disk_quota_bytes must be between 1 GiB and 1 TiB"},
+                status=400,
+            )
+        if value % (1024 ** 3) != 0:
+            return web.json_response(
+                {"error": "disk_quota_bytes must be a whole-GiB multiple"},
+                status=400,
+            )
+    quota_store = request.app.get("worker_disk_quota_store")
+    if quota_store is not None:
+        identity = worker.hostname or worker.client_id
+        quota_store.set_quota(identity, value)
+    registry.set_disk_quota(client_id, value)
+    logger.info(
+        "Worker %s (%s): disk_quota_bytes set to %r",
+        client_id, worker.hostname, value,
+    )
+    _broadcast_ws("workers_changed")
+    return web.json_response({"ok": True, "disk_quota_bytes": value})
+
+
 @routes.post("/ui/api/workers/{client_id}/clean")
 async def clean_worker_cache(request: web.Request) -> web.Response:
     """Request a worker to clean its build cache. Pushed via next heartbeat."""
@@ -2848,6 +3466,200 @@ async def clean_worker_cache(request: web.Request) -> web.Response:
     worker.pending_clean = True
     logger.info("Worker %s (%s): clean build cache requested", client_id, worker.hostname)
     _broadcast_ws("workers_changed")
+    return web.json_response({"ok": True})
+
+
+@routes.post("/ui/api/workers/{client_id}/tags")
+async def set_worker_tags(request: web.Request) -> web.Response:
+    """TG.4: authoritative worker-tag edit from the UI.
+
+    Body: ``{"tags": ["a", "b"]}`` — a JSON array of strings (the wire shape
+    the routing-rules engine works with). The store normalises (trim / drop
+    empties / dedupe, case-sensitive, preserves first-seen order). Persists
+    to ``/data/worker-tags.json`` and updates the in-memory registry record
+    so the next ``/ui/api/workers`` poll surfaces the change.
+    """
+    client_id = request.match_info["client_id"]
+    registry = request.app["registry"]
+    worker = registry.get(client_id)
+    if not worker:
+        return web.json_response({"error": "Worker not found"}, status=404)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "Expected a JSON object"}, status=400)
+    raw_tags = body.get("tags", [])
+    if not isinstance(raw_tags, list) or not all(isinstance(t, str) for t in raw_tags):
+        return web.json_response({"error": "tags must be an array of strings"}, status=400)
+
+    tag_store = request.app.get("worker_tag_store")
+    identity = worker.hostname or client_id
+    if tag_store is not None:
+        normalised = tag_store.set_tags(identity, raw_tags)
+    else:
+        # Test rigs without a store: normalise inline so behaviour matches.
+        from worker_tags import _normalise  # noqa: PLC0415
+        normalised = _normalise(raw_tags)
+    registry.set_tags(client_id, normalised)
+    logger.info(
+        "Worker %s (%s): tags set to %r%s",
+        client_id, worker.hostname, normalised, _who(request),
+    )
+    _broadcast_ws("workers_changed")
+    # TG.3: tag change may unblock or newly-block jobs.
+    from routing_eligibility import fire_and_forget  # noqa: PLC0415
+    fire_and_forget(request.app)
+    return web.json_response({"ok": True, "tags": normalised})
+
+
+# ---------------------------------------------------------------------------
+# TG.4 — routing-rules CRUD. Global rule list lives in /data/routing-rules.json
+# (RoutingRuleStore); per-device additive rules ride along in the YAML
+# metadata comment block via the existing ``meta`` endpoint (TG.5
+# round-trip is verified by tests/test_scanner.py).
+# ---------------------------------------------------------------------------
+
+
+def _rule_to_dict_handler(request: web.Request, rule_obj):  # type: ignore[no-untyped-def]
+    """Serialise a Rule for the wire — re-uses routing._rule_to_dict but
+    keeps the import local so a bare ``import routing`` in this module
+    doesn't pull the dataclass model into every UI handler that doesn't
+    need it."""
+    from routing import _rule_to_dict  # noqa: PLC0415
+    return _rule_to_dict(rule_obj)
+
+
+def _slugify(name: str) -> str:
+    """Auto-generate a URL-safe rule id from ``name``. Lowercase, ASCII
+    alphanum + dashes, collapsed runs, trimmed leading/trailing dashes.
+    Empty input → empty string (caller validates)."""
+    out: list[str] = []
+    prev_dash = False
+    for ch in name.lower():
+        if ch.isalnum():
+            out.append(ch)
+            prev_dash = False
+        elif ch in (" ", "-", "_"):
+            if not prev_dash:
+                out.append("-")
+                prev_dash = True
+    s = "".join(out).strip("-")
+    return s
+
+
+def _parse_clauses(raw: object, side_name: str) -> list:
+    """Convert the wire shape (list of dicts) into a list of Clause."""
+    from routing import RoutingRuleError, _clause_from_dict  # noqa: PLC0415
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise RoutingRuleError(f"{side_name} must be a list of clauses")
+    return [_clause_from_dict(c if isinstance(c, dict) else {}) for c in raw]
+
+
+def _parse_rule(body: dict, *, default_id: str | None = None):  # type: ignore[no-untyped-def]
+    """Build a Rule from a JSON body, auto-slugging ``id`` from ``name``
+    when absent. Raises RoutingRuleError on shape problems."""
+    from routing import Rule, RoutingRuleError  # noqa: PLC0415
+    name = str(body.get("name") or "").strip()
+    if not name:
+        raise RoutingRuleError("rule 'name' is required")
+    rule_id = str(body.get("id") or default_id or _slugify(name))
+    if not rule_id:
+        raise RoutingRuleError("rule 'id' could not be derived from 'name' — provide one explicitly")
+    severity = body.get("severity") or "required"
+    if severity != "required":
+        # Defensive — RoutingRuleStore validates this too, but catching it
+        # here gives the same shape error every API field gets.
+        raise RoutingRuleError(
+            f"severity must be 'required' (got {severity!r}); "
+            "preferred-with-weight is reserved for a future release",
+        )
+    return Rule(
+        id=rule_id,
+        name=name,
+        severity="required",  # narrowed by the check above; satisfies mypy
+        device_match=_parse_clauses(body.get("device_match"), "device_match"),
+        worker_match=_parse_clauses(body.get("worker_match"), "worker_match"),
+    )
+
+
+@routes.get("/ui/api/routing-rules")
+async def list_routing_rules(request: web.Request) -> web.Response:
+    store = request.app.get("routing_rule_store")
+    if store is None:
+        return web.json_response({"rules": []})
+    rules = [_rule_to_dict_handler(request, r) for r in store.list_rules()]
+    return web.json_response({"rules": rules})
+
+
+@routes.post("/ui/api/routing-rules")
+async def create_routing_rule(request: web.Request) -> web.Response:
+    store = request.app.get("routing_rule_store")
+    if store is None:
+        return web.json_response({"error": "Routing not configured"}, status=503)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "Expected a JSON object"}, status=400)
+    from routing import RoutingRuleError  # noqa: PLC0415
+    try:
+        rule = _parse_rule(body)
+        created = store.create_rule(rule)
+    except RoutingRuleError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    logger.info("Created routing rule %s (%s)%s", created.id, created.name, _who(request))
+    _broadcast_ws("routing_rules_changed")
+    # TG.3: a new rule may push PENDING jobs to BLOCKED.
+    from routing_eligibility import fire_and_forget  # noqa: PLC0415
+    fire_and_forget(request.app)
+    return web.json_response(_rule_to_dict_handler(request, created), status=201)
+
+
+@routes.put("/ui/api/routing-rules/{rule_id}")
+async def update_routing_rule(request: web.Request) -> web.Response:
+    store = request.app.get("routing_rule_store")
+    if store is None:
+        return web.json_response({"error": "Routing not configured"}, status=503)
+    rule_id = request.match_info["rule_id"]
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "Expected a JSON object"}, status=400)
+    from routing import RoutingRuleError  # noqa: PLC0415
+    try:
+        rule = _parse_rule(body, default_id=rule_id)
+        updated = store.update_rule(rule_id, rule)
+    except RoutingRuleError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    logger.info("Updated routing rule %s (%s)%s", updated.id, updated.name, _who(request))
+    _broadcast_ws("routing_rules_changed")
+    # TG.3: rule edit may shift jobs PENDING ↔ BLOCKED in either direction.
+    from routing_eligibility import fire_and_forget  # noqa: PLC0415
+    fire_and_forget(request.app)
+    return web.json_response(_rule_to_dict_handler(request, updated))
+
+
+@routes.delete("/ui/api/routing-rules/{rule_id}")
+async def delete_routing_rule(request: web.Request) -> web.Response:
+    store = request.app.get("routing_rule_store")
+    if store is None:
+        return web.json_response({"error": "Routing not configured"}, status=503)
+    rule_id = request.match_info["rule_id"]
+    if not store.delete_rule(rule_id):
+        return web.json_response({"error": "Rule not found"}, status=404)
+    logger.info("Deleted routing rule %s%s", rule_id, _who(request))
+    _broadcast_ws("routing_rules_changed")
+    # TG.3: a deleted rule may unblock previously-BLOCKED jobs.
+    from routing_eligibility import fire_and_forget  # noqa: PLC0415
+    fire_and_forget(request.app)
     return web.json_response({"ok": True})
 
 

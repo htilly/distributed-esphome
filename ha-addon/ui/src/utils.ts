@@ -20,9 +20,10 @@ export {
   fmtTimeOfDay,
   fmtDateTime,
   setTimeFormatPref,
+  setDateFormatPref,
   haDeepLink,
 } from './utils/format';
-export type { TimeFormatPref } from './utils/format';
+export type { TimeFormatPref, DateFormatPref } from './utils/format';
 export { formatCronHuman } from './utils/cron';
 export { usePersistedState } from './utils/persistState';
 export {

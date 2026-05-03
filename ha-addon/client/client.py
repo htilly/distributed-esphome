@@ -7,6 +7,7 @@ import fcntl
 import io
 import logging
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -45,7 +46,7 @@ from sysinfo import collect_system_info
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.6.2"
+CLIENT_VERSION = "1.7.0"
 
 
 def _read_image_version() -> Optional[str]:
@@ -127,6 +128,40 @@ MAX_ESPHOME_VERSIONS = int(os.environ.get("MAX_ESPHOME_VERSIONS", "3"))
 MAX_PARALLEL_JOBS = int(os.environ.get("MAX_PARALLEL_JOBS", "2"))
 HOSTNAME = os.environ.get("HOSTNAME", socket.gethostname())
 PLATFORM = os.environ.get("PLATFORM", sys.platform)
+# TG.1: comma-separated tag list. Empty / unset → register without seeding.
+# WORKER_TAGS_OVERWRITE=1 forces clobber-on-registration so scripted multi-
+# worker deployments retain the "tags travel with the docker invocation"
+# semantics (server-side wins is the default).
+def _parse_tags_env(raw: Optional[str]) -> Optional[list[str]]:
+    if raw is None:
+        return None
+    parts = [p.strip() for p in raw.split(",")]
+    return [p for p in parts if p]
+WORKER_TAGS = _parse_tags_env(os.environ.get("WORKER_TAGS"))
+WORKER_TAGS_OVERWRITE = os.environ.get("WORKER_TAGS_OVERWRITE", "0").strip().lower() in ("1", "true", "yes")
+# DQ.9: per-worker disk-quota override baked into the docker invocation.
+# Integer GiB; converted to bytes on the wire. The server seeds its
+# persistent override from this on the *first* registration; subsequent
+# heartbeats push the effective value (override ?? fleet default) back
+# to us via HeartbeatResponse.set_disk_quota_bytes — see _current_disk_quota.
+def _parse_disk_quota_gb_env(raw: Optional[str]) -> Optional[int]:
+    if raw is None or not raw.strip():
+        return None
+    try:
+        gb = int(raw.strip())
+    except ValueError:
+        logger.warning("Ignoring invalid WORKER_DISK_QUOTA_GB=%r (not an integer)", raw)
+        return None
+    if gb < 1:
+        logger.warning("Ignoring invalid WORKER_DISK_QUOTA_GB=%d (must be ≥ 1)", gb)
+        return None
+    return gb * 1024 ** 3
+WORKER_DISK_QUOTA_BYTES = _parse_disk_quota_gb_env(os.environ.get("WORKER_DISK_QUOTA_GB"))
+# DQ.9: emergency host-disk floor — same default as version_manager (10%);
+# triggers an out-of-quota sweep in disk_quota.host_disk_floor when host
+# free% drops below this regardless of our usage. Workers share the disk
+# with HA core, Docker, and logs.
+MIN_FREE_DISK_PCT = int(os.environ.get("MIN_FREE_DISK_PCT", "10"))
 ESPHOME_BIN = os.environ.get("ESPHOME_BIN")  # If set, skip version manager
 ESPHOME_SEED_VERSION = os.environ.get("ESPHOME_SEED_VERSION")  # Pre-download on startup
 # Base directory for per-slot PlatformIO core dirs (avoids cross-slot conflicts)
@@ -164,6 +199,73 @@ _state_lock: threading.Lock = threading.Lock()
 _server_reachable: bool = True   # False once we've logged "server offline"
 _auth_ok: bool = True            # False once we've logged "auth failed"
 _reregister_needed: threading.Event = threading.Event()  # set by heartbeat on 404
+# Bug #4: clean-cache request received from the server but deferred until
+# all active jobs drain. The poll loops also check this and skip claiming
+# new jobs while it's set, so the cache only gets wiped on a quiescent
+# worker — never mid-compile.
+_clean_pending: threading.Event = threading.Event()
+
+# DQ.9: thread-safe disk-quota cell. Boot-time default = WORKER_DISK_QUOTA_GB
+# env var (or None — meaning "no opinion, use whatever the server sends").
+# The heartbeat handler stores HeartbeatResponse.set_disk_quota_bytes here
+# on every response so a UI edit (or a fleet-default change) propagates
+# within one heartbeat tick without a worker restart. ``last_eviction_freed_bytes``
+# is the bytes freed by the most recent post-job sweep — surfaced in
+# system_info so the UI can show "evicted N bytes" toasts.
+_disk_quota_lock: threading.Lock = threading.Lock()
+_current_disk_quota_bytes: Optional[int] = WORKER_DISK_QUOTA_BYTES
+_last_eviction_freed_bytes: int = 0
+# DQ.9: active-set tracker for pinning during eviction sweeps. run_job
+# uses ``active_job_set.pin(...)`` while a compile is in flight; the
+# disk_quota engine reads ``snapshot()`` to know which dirs are off-limits.
+from disk_quota import ActiveJobSet  # noqa: E402, PLC0415
+_active_job_set: ActiveJobSet = ActiveJobSet()
+
+
+def _get_current_disk_quota_bytes() -> Optional[int]:
+    with _disk_quota_lock:
+        return _current_disk_quota_bytes
+
+
+def _set_current_disk_quota_bytes(value: Optional[int]) -> None:
+    global _current_disk_quota_bytes
+    with _disk_quota_lock:
+        _current_disk_quota_bytes = value
+
+
+def _record_eviction_freed_bytes(freed: int) -> None:
+    global _last_eviction_freed_bytes
+    with _disk_quota_lock:
+        _last_eviction_freed_bytes = freed
+
+
+def _get_last_eviction_freed_bytes() -> int:
+    with _disk_quota_lock:
+        return _last_eviction_freed_bytes
+
+
+def _build_system_info() -> "SystemInfo":  # noqa: F821
+    """Collect sysinfo + enrich with the disk-quota engine's current view.
+
+    Kept as a helper so register and heartbeat both surface the same
+    ``disk_usage_bytes`` / ``disk_quota_bytes`` / ``last_eviction_freed_bytes``
+    triple (DQ.6). ``compute_usage`` is a single os.scandir walk per call —
+    not free, but heartbeats are 10s apart and the dir's small.
+    """
+    import disk_quota  # noqa: PLC0415
+
+    sysinfo_dict = collect_system_info(_ESPHOME_VERSIONS_DIR)
+    base = Path(_ESPHOME_VERSIONS_DIR)
+    if base.exists():
+        try:
+            sysinfo_dict["disk_usage_bytes"] = disk_quota.compute_usage(base).total_bytes
+        except Exception:
+            logger.debug("disk_quota.compute_usage failed", exc_info=True)
+    quota = _get_current_disk_quota_bytes()
+    if quota is not None:
+        sysinfo_dict["disk_quota_bytes"] = quota
+    sysinfo_dict["last_eviction_freed_bytes"] = _get_last_eviction_freed_bytes()
+    return SystemInfo.model_validate(sysinfo_dict)
 
 
 def _is_idle() -> bool:
@@ -310,7 +412,10 @@ def register() -> str:
                 image_version=IMAGE_VERSION,
                 client_id=existing_id,
                 max_parallel_jobs=MAX_PARALLEL_JOBS,
-                system_info=SystemInfo.model_validate(sysinfo),
+                system_info=_build_system_info(),
+                tags=WORKER_TAGS,
+                overwrite_tags=WORKER_TAGS_OVERWRITE,
+                disk_quota_bytes=WORKER_DISK_QUOTA_BYTES,
             )
             resp = post("/api/v1/workers/register", req.model_dump(exclude_none=True))
             resp.raise_for_status()
@@ -345,24 +450,312 @@ def _restart_self() -> None:
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
+# #214 / #220: PlatformIO does not validate package integrity between
+# runs — once a `pio-slot-N/` subtree is partially extracted, missing a
+# binary, or has lost a file, every subsequent compile on the same slot
+# fails identically. The remedy is always the same (wipe the broken
+# subtree, retry once, let PIO re-fetch). These regexes match the
+# distinct symptoms observed in the home lab so the worker can detect
+# every flavor of corruption with one self-heal hook. New patterns get
+# added here, not at every call site.
+_BROKEN_PIO_SIGNATURES: tuple[re.Pattern[str], ...] = (
+    # toolchain-xtensa-esp-elf missing the cc1 binary (#214 original).
+    re.compile(r"posix_spawnp.*(?:cc1|C compiler)|(?:cc1|C compiler).*posix_spawnp", re.DOTALL),
+    # framework-libs / framework-arduinoespressif32-libs partially extracted —
+    # the metadata files are present but the actual library blobs aren't.
+    re.compile(r"Missing framework-\S+ package"),
+    # tool-* package extracted with no Python project files (only
+    # metadata) — PIO's `pip install -e <tool>` then fails with this.
+    re.compile(r"does not appear to be a Python project, as neither"),
+    # esptool half-installed inside penv/.espidf-*/ — directory exists
+    # but missing __init__.py, so Python sees it as a non-package.
+    re.compile(r"ModuleNotFoundError: No module named ['\"]esptool|esptool['\"] is not a package"),
+    # PIO penv binary missing — sh's "not found" form (followed by the
+    # generic Error 127 below).
+    re.compile(r"/penv/bin/\S+: not found"),
+    # Generic Error 127 from a PIO bootloader/firmware build (catches
+    # everything else where some PIO-invoked subcommand is missing).
+    re.compile(r"\*\*\* \[\.pioenvs/[^\]]+/(?:bootloader|firmware)\.bin\] Error 127"),
+)
+
+
+def _is_broken_pio_state(log: str) -> bool:
+    """#214 / #220: detect signatures of a corrupted ``pio-slot-N/`` tree
+    in a PlatformIO compile log. See ``_BROKEN_PIO_SIGNATURES`` for the
+    exhaustive list.
+
+    Triggers ``_wipe_broken_toolchain`` + a one-shot retry on the same
+    job — the worker re-extracts everything PIO needs from scratch, the
+    operator never has to babysit it.
+    """
+    return any(pat.search(log) for pat in _BROKEN_PIO_SIGNATURES)
+
+
+def _wipe_broken_toolchain(pio_dir: str) -> bool:
+    """#214 / #220: wipe the corrupted parts of ``pio-slot-N/`` so PIO
+    can re-bootstrap on the next compile.
+
+    Removes both ``packages/`` (extracted toolchain + framework + tool
+    packages) and ``penv/`` (the PIO Python venv where ``esptool``,
+    ``esp-coredump``, etc. live). Either subtree can rot independently:
+    the original #214 incident was ``packages/toolchain-xtensa-esp-elf``
+    missing ``cc1``; #220 added cases where ``penv/bin/esptool`` was
+    gone (``Error 127``) and where ``packages/framework-arduinoespressif32-libs``
+    held only metadata files. A surgical "wipe just packages/" misses
+    the latter two — wipe both.
+
+    The PIO core dir itself, the per-target build slots
+    (``slots/<N>/<stem>/``), the shared ESPHome cache, ``dist/``
+    (downloaded source archives — re-extracts from these without
+    re-download), and ``platforms/`` are all left alone.
+
+    Returns True if at least one subtree was wiped, False if neither
+    existed (nothing to recover) or if the disk-pressure guard fired.
+    """
+    targets = [
+        os.path.join(pio_dir, "packages"),
+        os.path.join(pio_dir, "penv"),
+    ]
+    existing = [t for t in targets if os.path.isdir(t)]
+    if not existing:
+        logger.warning("[#214] no packages/ or penv/ under %s — nothing to wipe", pio_dir)
+        return False
+    # #219: if the host is out of disk, wiping the broken state only to
+    # have the next extract hit ENOSPC mid-tarball (re-corrupting what
+    # we just cleaned) is a guaranteed loop. Fail fast with one honest
+    # log line the operator can act on. A fresh xtensa toolchain
+    # extracts to ~600 MB; require at least 1 GiB free as headroom.
+    try:
+        usage = shutil.disk_usage(pio_dir)
+        free_gib = usage.free / (1024 ** 3)
+        if free_gib < 1.0:
+            logger.warning(
+                "[#214/#219] skipping self-heal of %s — only %.2f GiB free on the "
+                "worker's filesystem; a fresh toolchain extract needs >1 GiB. "
+                "Free disk on the worker host (Clean cache, prune Docker images, "
+                "or grow the volume) and retry.",
+                pio_dir, free_gib,
+            )
+            return False
+    except OSError as exc:
+        # disk_usage failure is itself diagnostic — log and proceed.
+        logger.warning("[#214/#219] disk_usage probe failed on %s: %s", pio_dir, exc)
+    wiped_any = False
+    for target in existing:
+        logger.warning(
+            "[#214] wiping broken PlatformIO state at %s — next compile will "
+            "re-fetch (~5–10 min cold).",
+            target,
+        )
+        # ef-2n2: two-pass wipe. The strict first pass surfaces real
+        # problems (read-only fs, EPERM) in the log. If it raises a
+        # benign mid-walk ENOENT — the live AI-MacBook-Pro repro on
+        # 2026-05-02 was ``FileNotFoundError: 'CMakeLists.txt'``, a
+        # concurrent mutator or already-removed inode — the lenient
+        # second pass sweeps whatever's left so the retry compile
+        # doesn't land on a half-rotted toolchain. ``os.path.exists``
+        # decides ``wiped_any``: a real permission failure leaves the
+        # subtree intact through both passes and returns False (the
+        # ``test_wipe_broken_toolchain_swallows_rmtree_failure`` case).
+        try:
+            shutil.rmtree(target, ignore_errors=False)
+        except Exception as exc:
+            logger.warning(
+                "[#214] strict wipe of %s raised %s — sweeping leftover "
+                "state with ignore_errors=True.",
+                target, exc,
+            )
+            try:
+                shutil.rmtree(target, ignore_errors=True)
+            except Exception:
+                pass
+        if os.path.exists(target):
+            logger.warning(
+                "[#214] subtree at %s still present after wipe — retry "
+                "compile will likely fail; investigate filesystem state.",
+                target,
+            )
+        else:
+            wiped_any = True
+    return wiped_any
+
+
+def _log_toolchain_state(pio_dir: str, reason: str) -> None:
+    """#214: dump the PlatformIO toolchain layout to the worker log so the
+    next ``cc1: posix_spawnp: No such file or directory`` failure has
+    actionable context. Recursive ``ls`` of the xtensa-esp-elf packages
+    dir, plus disk-free + active-job count. Best-effort — we never raise.
+
+    Called from the compile failure path when the captured log mentions
+    a posix_spawnp ENOENT on cc1, so this only fires when we actually
+    need the data (no overhead on the happy path).
+    """
+    try:
+        toolchain_root = os.path.join(pio_dir, "packages")
+        if not os.path.isdir(toolchain_root):
+            logger.warning("[#214] no packages/ under %s — pio dir was wiped", pio_dir)
+            return
+        for entry in os.listdir(toolchain_root):
+            if "toolchain" not in entry and "esp" not in entry:
+                continue
+            sub = os.path.join(toolchain_root, entry)
+            try:
+                proc = subprocess.run(
+                    ["/bin/ls", "-laR", sub],
+                    check=False, capture_output=True, text=True, timeout=10,
+                )
+                logger.warning("[#214] %s — %s tree:\n%s", reason, sub, (proc.stdout or "")[:8000])
+            except (OSError, subprocess.SubprocessError) as exc:
+                logger.warning("[#214] ls failed on %s: %s", sub, exc)
+        try:
+            st = os.statvfs(pio_dir)
+            free_gb = (st.f_frsize * st.f_bavail) / (1024 ** 3)
+            logger.warning("[#214] free disk on %s: %.1f GB", pio_dir, free_gb)
+        except OSError:
+            pass
+        with _active_jobs_lock:
+            logger.warning("[#214] active jobs on this worker: %d", _active_jobs)
+    except Exception:
+        logger.warning("[#214] toolchain-state diagnostic crashed", exc_info=True)
+
+
 def _clean_build_cache() -> None:
-    """Remove all build artifacts from the esphome-versions directory."""
+    """Remove build artifacts from the esphome-versions directory.
+
+    Preserves both:
+      - **Installed ESPHome venvs** (anything with ``bin/esphome``) —
+        bug #119; the embedded local-worker shares
+        ``/data/esphome-versions/`` with the server's lazy-installed
+        venv cache (see ``main.py``'s
+        ``ESPHOME_VERSIONS_DIR=/data/esphome-versions`` in the local-
+        worker spawn). Pre-#119, Clean Cache wiped the server's active
+        venv, leaving ``scanner._server_esphome_bin`` pointing at a
+        deleted path and every subsequent bundle failing with
+        ``FileNotFoundError: '.../bin/python'`` until the add-on
+        restarted. Venv lifecycle is already bounded by
+        ``MAX_ESPHOME_VERSIONS`` LRU eviction in ``VersionManager``,
+        so leaving them in place is not a leak.
+      - **PlatformIO core dirs** (``pio-slot-*/`` — toolchain home) —
+        bug #214; the xtensa-esp-elf toolchain is ~500 MB and takes
+        5–10 min to re-download via curl/tar. Wiping it on every Clean
+        Cache click forces every subsequent compile through that
+        re-download, and a partially-extracted toolchain surfaces as
+        ``cc1: posix_spawnp: No such file or directory`` on jobs that
+        race the first post-clean compile. The user's intent for Clean
+        Cache is "wipe build artifacts so the next compile is honest"
+        (i.e. ``slots/<N>/<stem>/`` and ``cache/<stem>/``), NOT "spend
+        10 minutes re-downloading the compiler."
+    """
     import shutil
-    from version_manager import VERSIONS_BASE
-    base = Path(VERSIONS_BASE)
+    base = Path(_ESPHOME_VERSIONS_DIR)
     if not base.exists():
         logger.info("No build cache to clean (%s does not exist)", base)
         return
-    removed = 0
+    removed: list[str] = []
+    preserved: list[str] = []
     for entry in base.iterdir():
-        if entry.is_dir():
-            try:
-                shutil.rmtree(entry)
-                removed += 1
-                logger.info("Removed %s", entry.name)
-            except Exception as exc:
-                logger.warning("Failed to remove %s: %s", entry.name, exc)
-    logger.info("Build cache clean complete — removed %d version(s)", removed)
+        if not entry.is_dir():
+            continue
+        # #119: preserve any directory that's an ESPHome venv.
+        if (entry / "bin" / "esphome").exists():
+            preserved.append(entry.name)
+            continue
+        # #214: preserve PlatformIO core dirs so the toolchain isn't
+        # re-downloaded on every Clean Cache. Slot/cache build
+        # artifacts under ``pio-slot-<N>/cache/`` (PlatformIO's HTTP
+        # cache, scratch builds) are tiny vs the packages tree, so
+        # "preserve the whole pio-slot-N" is the right granularity.
+        if entry.name.startswith("pio-slot-"):
+            preserved.append(entry.name)
+            continue
+        try:
+            shutil.rmtree(entry)
+            removed.append(entry.name)
+            logger.info("Removed %s", entry.name)
+        except Exception as exc:
+            logger.warning("Failed to remove %s: %s", entry.name, exc)
+    if preserved:
+        logger.info(
+            "Build cache clean complete — removed %d cache dir(s); "
+            "preserved %d (venvs + pio-slot-*): %s",
+            len(removed), len(preserved), preserved,
+        )
+    else:
+        logger.info(
+            "Build cache clean complete — removed %d cache dir(s)",
+            len(removed),
+        )
+
+
+# ---------------------------------------------------------------------------
+# DQ.9: disk-quota sweep — runs at startup, between jobs, and after a
+# heartbeat brings a lower set_disk_quota_bytes. Logs one tidy summary
+# line per sweep ("evicted: 0 orphans, 1 stale venv, ...") so the user
+# can spot eviction churn in the worker log without trawling per-file
+# logs.
+# ---------------------------------------------------------------------------
+
+
+def _run_disk_quota_sweep(
+    *,
+    label: str,
+    prune_orphans_first: bool = False,
+) -> None:
+    """Run :func:`disk_quota.enforce_quota` (and optionally :func:`prune_orphans`)
+    against the current effective quota.
+
+    Safe to call from any thread. No-op when no quota is in effect (e.g.
+    a worker that hasn't received its first heartbeat yet — the sweep
+    will run on the next trigger). Updates ``_last_eviction_freed_bytes``
+    so the next heartbeat surfaces the result via ``system_info``.
+    """
+    import disk_quota  # noqa: PLC0415
+
+    quota = _get_current_disk_quota_bytes()
+    if quota is None:
+        # Pre-first-heartbeat OR explicit "no override; server hasn't replied
+        # yet" — skip silently. We'll catch up on the next trigger.
+        return
+
+    base = Path(_ESPHOME_VERSIONS_DIR)
+    if not base.exists():
+        return
+
+    pinned = _active_job_set.snapshot()
+    total_freed = 0
+    summary_parts: list[str] = []
+
+    if prune_orphans_first:
+        orphan_result = disk_quota.prune_orphans(base, max_slots=MAX_PARALLEL_JOBS)
+        total_freed += orphan_result.freed_bytes
+        if orphan_result.orphan_slots_evicted:
+            summary_parts.append(f"{orphan_result.orphan_slots_evicted} orphans")
+
+    quota_result = disk_quota.enforce_quota(base, quota, pinned=pinned)
+    total_freed += quota_result.freed_bytes
+    if quota_result.venvs_evicted:
+        summary_parts.append(f"{quota_result.venvs_evicted} stale venv(s)")
+    if quota_result.targets_evicted:
+        summary_parts.append(f"{quota_result.targets_evicted} target(s)")
+    if quota_result.pio_slots_evicted:
+        summary_parts.append(f"{quota_result.pio_slots_evicted} pio-slot(s)")
+
+    floor_result = disk_quota.host_disk_floor(base, MIN_FREE_DISK_PCT, pinned=pinned)
+    total_freed += floor_result.freed_bytes
+    if floor_result.freed_bytes > 0:
+        summary_parts.append(f"+{floor_result.freed_bytes} B (host-disk floor)")
+
+    _record_eviction_freed_bytes(total_freed)
+
+    usage = disk_quota.compute_usage(base).total_bytes
+    summary = ", ".join(summary_parts) if summary_parts else "nothing"
+    logger.info(
+        "disk-quota[%s]: %.1f / %.1f GiB — evicted: %s",
+        label,
+        usage / 1024 ** 3,
+        quota / 1024 ** 3,
+        summary,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -590,7 +983,7 @@ def heartbeat_loop(client_id: str, stop_event: threading.Event) -> None:
         try:
             hb = HeartbeatRequest(
                 client_id=client_id,
-                system_info=SystemInfo.model_validate(collect_system_info(_ESPHOME_VERSIONS_DIR)),
+                system_info=_build_system_info(),
             )
             resp = post("/api/v1/workers/heartbeat", hb.model_dump(exclude_none=True))
             if resp.status_code == 401:
@@ -629,6 +1022,30 @@ def heartbeat_loop(client_id: str, stop_event: threading.Event) -> None:
                             "Worker update available: local=%s server=%s", CLIENT_VERSION, sv
                         )
                         _update_available.set()
+                # DQ.9: server pushes the effective disk quota on every
+                # heartbeat. Lower-quota transitions trigger an immediate
+                # sweep so the worker doesn't keep sitting on bytes the
+                # operator just told it to evict.
+                new_quota = data.set_disk_quota_bytes
+                if new_quota is not None:
+                    prev_quota = _get_current_disk_quota_bytes()
+                    if prev_quota != new_quota:
+                        _set_current_disk_quota_bytes(new_quota)
+                        if prev_quota is None:
+                            # #ef-a5l: first heartbeat to bring a quota.
+                            # Worker may have booted over budget — startup
+                            # sweep no-op'd because quota was None then.
+                            # Sweep now rather than waiting for the next
+                            # successful compile.
+                            try:
+                                _run_disk_quota_sweep(label="initial-quota")
+                            except Exception:
+                                logger.exception("disk-quota: sweep on initial quota failed")
+                        elif new_quota < prev_quota:
+                            try:
+                                _run_disk_quota_sweep(label="quota-lowered")
+                            except Exception:
+                                logger.exception("disk-quota: sweep on lower quota failed")
                 # Check for max_parallel_jobs config change from UI
                 new_jobs = data.set_max_parallel_jobs
                 if new_jobs is not None and new_jobs != MAX_PARALLEL_JOBS:
@@ -639,10 +1056,24 @@ def heartbeat_loop(client_id: str, stop_event: threading.Event) -> None:
                     # Write new value to env so it persists across restart
                     os.environ["MAX_PARALLEL_JOBS"] = str(new_jobs)
                     _restart_self()
-                # Check for clean build cache request from UI
+                # Bug #4: defer the clean until all in-flight compiles finish.
+                # Cleaning mid-compile wipes the .esphome/build/* directory the
+                # running ``esphome run`` is mid-way through writing, which
+                # silently breaks the upload. Set a pending flag here; the
+                # main loop drains active jobs and runs the actual clean
+                # below at idle. Pollers also skip claiming new jobs while
+                # this is set so the worker reaches quiescence.
                 if data.clean_build_cache:
-                    logger.info("Server requested build cache clean — clearing esphome-versions")
-                    _clean_build_cache()
+                    if _is_idle():
+                        logger.info("Server requested build cache clean — worker is idle, clearing immediately")
+                        _clean_build_cache()
+                    else:
+                        if not _clean_pending.is_set():
+                            logger.info(
+                                "Server requested build cache clean — deferring until "
+                                "active job(s) finish",
+                            )
+                        _clean_pending.set()
                 # WL.2: start/stop the log pusher thread based on the
                 # server's watch state. The heartbeat is the single
                 # signal source; pusher never polls the server for
@@ -1099,6 +1530,11 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
     target_stem = os.path.splitext(target)[0]
     build_dir = _slot_dir(worker_id, target_stem)
     os.makedirs(build_dir, exist_ok=True)
+    # DQ.9: pin the venv + target stem + slot for the duration of the
+    # job so the disk-quota engine doesn't evict files we're using.
+    # Refcounted so two parallel jobs on the same target both protect it.
+    pin_cm = _active_job_set.pin(esphome_version, target_stem, worker_id)
+    pin_cm.__enter__()
     try:
         # Seed this slot's .pio/.esphome from the shared cache if this is
         # the first compile of this target on this slot. No-op otherwise.
@@ -1153,6 +1589,24 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
                 env=subprocess_env,
                 job_id=job_id,
             )
+            # #214: same self-heal as the OTA path — see the comment on
+            # the run_cmd retry block below for context.
+            if not compile_ok and _is_broken_pio_state(compile_log):
+                _log_toolchain_state(pio_dir, "download_only compile failed with broken pio-slot signature")
+                if _wipe_broken_toolchain(pio_dir):
+                    _flush_log_text(
+                        job_id,
+                        "\n--- #214 self-heal: PlatformIO state was broken. "
+                        "Wiped pio-slot/packages/ + penv/ and retrying compile. ---\n",
+                    )
+                    compile_log, compile_ok = _run_subprocess(
+                        compile_cmd,
+                        cwd=build_dir,
+                        timeout=timeout_seconds,
+                        label="compile (retry after pio-slot wipe)",
+                        env=subprocess_env,
+                        job_id=job_id,
+                    )
             if not compile_ok:
                 _submit_result(job_id, "failed", log=None, ota_result=None)
                 return
@@ -1210,6 +1664,35 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
             env=subprocess_env,
             job_id=job_id,
         )
+
+        # #214 / #220: when the compile failed with any of the broken-
+        # pio-slot signatures (see ``_BROKEN_PIO_SIGNATURES``), the
+        # worker's ``pio-slot-N/`` tree is corrupted in steady state and
+        # PlatformIO won't self-recover — so the worker has to: dump the
+        # toolchain layout for the log, wipe ``packages/`` + ``penv/``,
+        # and retry the compile once so the next attempt re-extracts
+        # everything via curl/tar (~5–10 min on a cold link). The retry
+        # happens in-process before we submit "failed", so the original
+        # job succeeds on the second try and the operator never has to
+        # babysit the worker manually.
+        if not run_ok and _is_broken_pio_state(run_log):
+            _log_toolchain_state(pio_dir, "compile failed with broken pio-slot signature")
+            if _wipe_broken_toolchain(pio_dir):
+                _flush_log_text(
+                    job_id,
+                    "\n--- #214 self-heal: PlatformIO state was broken. "
+                    "Wiped pio-slot/packages/ + penv/ and retrying compile — "
+                    "the re-extract takes 5–10 min on cold networks, so "
+                    "subsequent jobs may queue behind this one. ---\n",
+                )
+                run_log, run_ok = _run_subprocess(
+                    run_cmd,
+                    cwd=build_dir,
+                    timeout=total_timeout,
+                    label="compile+OTA (retry after toolchain wipe)",
+                    env=subprocess_env,
+                    job_id=job_id,
+                )
 
         if run_ok:
             # #45: compile succeeded — sync the slot's .pio/.esphome back to
@@ -1289,6 +1772,22 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
         _log_context.current_target = None
         with _active_jobs_lock:
             _active_jobs -= 1
+        # DQ.9: drop the disk-quota pin first so the post-job sweep can
+        # reclaim caches our slot will no longer touch. The exception
+        # path is fine — pin_cm.__exit__ accepts the exc tuple shape
+        # contextlib injected, but here we bail without exception data
+        # and let the running exception propagate via the outer try.
+        try:
+            pin_cm.__exit__(None, None, None)
+        except Exception:
+            logger.exception("disk-quota: pin __exit__ raised")
+        # DQ.9: post-job sweep — same trigger point as _sync_slot_into_cache
+        # was already running. If the quota cell hasn't been seeded yet
+        # (no heartbeat reply yet) the sweep is a no-op.
+        try:
+            _run_disk_quota_sweep(label="post-job")
+        except Exception:
+            logger.exception("disk-quota: post-job sweep failed")
         # #13: intentionally NOT cleaning up build_dir — the .esphome/
         # subdirectory contains PlatformIO's compiled object cache. Keeping
         # it turns a 60-90s full compile into a 5-10s incremental build.
@@ -1682,9 +2181,14 @@ def worker_loop(
     _log_context.current_target = None
     logger.info("Worker %d started", worker_id)
     while not stop_event.is_set():
-        # Pause polling when update or re-register is pending so the main
-        # thread can reach idle state and handle the event.
-        if _reregister_needed.is_set() or _update_available.is_set():
+        # Pause polling when update / re-register / pending clean is set so
+        # the main thread can reach idle state and handle the event.
+        # Bug #4: ``_clean_pending`` lands here too — the heartbeat moved
+        # the actual ``_clean_build_cache()`` to the main loop's idle
+        # branch, but pollers must stop CLAIMING new jobs as soon as the
+        # request arrives; otherwise we keep grabbing work and the
+        # "drain to idle" never converges.
+        if _reregister_needed.is_set() or _update_available.is_set() or _clean_pending.is_set():
             stop_event.wait(1)
             continue
 
@@ -1815,6 +2319,16 @@ def main() -> None:
         except Exception as exc:
             logger.warning("Failed to pre-seed ESPHome %s: %s", ESPHOME_SEED_VERSION, exc)
 
+    # DQ.9: startup sweep — prune orphan slot dirs (slot ids >= MAX_PARALLEL_JOBS,
+    # left over from a higher-slot-count run) and run the byte-bound enforce.
+    # The quota cell may still be None at this point (no heartbeat yet); in
+    # that case enforce_quota is a no-op and the first heartbeat will trigger
+    # a sweep if the server pushes a smaller quota than we have on disk.
+    try:
+        _run_disk_quota_sweep(label="startup", prune_orphans_first=True)
+    except Exception:
+        logger.exception("disk-quota: startup sweep failed")
+
     # Register with server
     client_id = register()
 
@@ -1871,6 +2385,15 @@ def main() -> None:
                 # Update failed — restart heartbeat + control-poll and workers
                 stop_heartbeat, hb_thread, cp_thread = _start_bg_threads(client_id)
                 worker_stop, worker_threads = _launch_workers(client_id, version_manager)
+
+            # Bug #4: run the deferred build-cache clean once all workers
+            # have drained. The poll loops are paused while ``_clean_pending``
+            # is set so we'll reach idle as soon as in-flight jobs finish;
+            # then the clean runs on a quiet worker and pollers resume.
+            elif _clean_pending.is_set() and _is_idle():
+                logger.info("Worker is idle — running deferred build-cache clean")
+                _clean_build_cache()
+                _clean_pending.clear()
 
             time.sleep(1)
     except KeyboardInterrupt:

@@ -487,6 +487,15 @@ _DEFAULT_SUBJECTS: dict[str, str] = {
     "pin": "Pinned ESPHome version",
     "unpin": "Unpinned ESPHome version",
     "meta": "Updated device metadata",
+    # Bug #22: per-meta-key specifics so the git log surfaces *what*
+    # changed instead of a generic "Updated device metadata". Emitted by
+    # update_target_meta when the body carries a single key. Multi-key
+    # bodies still fall back to the generic "meta" subject.
+    "meta tags": "Updated device tags",
+    "meta tags cleared": "Cleared device tags",
+    "meta pin_version": "Pinned ESPHome version",
+    "meta routing_extra": "Updated routing rules",
+    "meta routing_extra cleared": "Cleared routing rules",
     "schedule": "Updated scheduled upgrade",
     "unschedule": "Removed scheduled upgrade",
     "schedule toggle": "Toggled scheduled upgrade",
@@ -501,10 +510,20 @@ def _default_subject(action: str, relpath: str) -> str:
     :data:`_DEFAULT_SUBJECTS`. Falls back to ``"<Action>: <relpath>"``
     for unmapped actions so future additions that forget to curate
     here still produce a legible message rather than blank output.
+
+    Bug #22: actions of the form ``"meta <key>"`` / ``"meta <key> cleared"``
+    that aren't curated above degrade to a generic per-key subject so a
+    future metadata key landing without a curated entry still reads
+    cleanly in the log.
     """
     mapped = _DEFAULT_SUBJECTS.get(action)
     if mapped:
         return mapped
+    if action.startswith("meta "):
+        rest = action[len("meta "):]
+        if rest.endswith(" cleared"):
+            return f"Cleared {rest[: -len(' cleared')].replace('_', ' ')}"
+        return f"Updated {rest.replace('_', ' ')}"
     return f"{action.capitalize()}: {relpath}"
 
 
@@ -862,14 +881,34 @@ def _staged_paths(config_dir: Path) -> set[str]:
     non-zero even when the intended paths are in the index — see the
     hass-4 WARNING on 2026-04-19. Empty set on any failure (treated as
     "nothing known to be staged").
+
+    #197: uses ``--name-status`` (not ``--name-only``) so a rename
+    contributes BOTH the source and the destination path. With
+    ``--name-only`` git collapses ``R100\\tsrc\\tdst`` to just ``dst``,
+    which made ``archive_and_commit`` filter out the staged deletion
+    of the source — ``git commit -- dst`` then committed only the
+    addition and left the deletion dangling in the index, so the
+    next ``git status`` showed ``D  src``. Including the source path
+    lets the commit see both halves of the rename together so the
+    commit lands atomically with no leftover index entries.
     """
     diff = _run(
-        ["git", "diff", "--cached", "--name-only"],
+        ["git", "diff", "--cached", "--name-status"],
         cwd=config_dir, check=False,
     )
     if diff.returncode != 0:
         return set()
-    return {line for line in diff.stdout.splitlines() if line}
+    paths: set[str] = set()
+    for line in diff.stdout.splitlines():
+        if not line:
+            continue
+        # ``--name-status`` lines: ``<status>\t<path>`` or, for renames
+        # / copies, ``R100\t<src>\t<dst>``. Splitting on tab handles
+        # both shapes; we want every path that follows the status.
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            paths.update(p for p in parts[1:] if p)
+    return paths
 
 
 async def archive_and_commit(config_dir: Path, relpath: str) -> bool:

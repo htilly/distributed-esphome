@@ -25,8 +25,9 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from './ui/dropdown-menu';
-import { FirmwareDownloadMenu } from './FirmwareDownloadMenu';
 import { QueueHistoryDialog } from './QueueHistoryDialog';
+import { QueueRowMenu } from './queue/QueueRowMenu';
+import { TagChips } from './ui/tag-chips';
 
 interface Props {
   queue: Job[];
@@ -45,11 +46,27 @@ interface Props {
    * panel preset to from=config_hash, to=Current. Same flow as the
    * Log modal's "Diff since compile" button. */
   onOpenHistoryDiff: (target: string, fromHash: string) => void;
+  /** TG.9: BLOCKED-badge click opens the routing-rules editor with the
+   *  offending rule pre-selected. The Queue passes
+   *  ``job.blocked_reason.rule_id`` (empty string if the reason
+   *  surfaces a synthetic combined-rules placeholder). */
+  onOpenRoutingRule: (ruleId: string) => void;
+  /** #209: device-section actions mirrored into the per-row hamburger.
+   *  Same handlers the Devices-tab row hamburger uses. */
+  onToast: (msg: string, type?: 'info' | 'success' | 'error') => void;
+  onLogs: (target: string) => void;
+  onOpenCompileHistory: (target: string) => void;
+  onPing: (target: string) => void;
+  onInstallToAddress: (target: string) => void;
 }
 
 const STATE_ORDER: Record<string, number> = {
   working: 0,
   pending: 1,
+  // TG.9: BLOCKED sorts adjacent to pending — same "in-flight, not yet
+  // claimed" position in the queue, but with a distinct red-orange
+  // badge so the user notices the constraint.
+  blocked: 1.5,
   timed_out: 2,
   failed: 3,
   cancelled: 4,
@@ -84,6 +101,12 @@ export function QueueTab({
   onOpenLog,
   onEdit,
   onOpenHistoryDiff,
+  onOpenRoutingRule,
+  onToast,
+  onLogs,
+  onOpenCompileHistory,
+  onPing,
+  onInstallToAddress,
 }: Props) {
   // QS.27: persist sort across reloads via localStorage.
   const [sorting, setSorting] = usePersistedState<SortingState>(
@@ -94,13 +117,13 @@ export function QueueTab({
   const [filter, setFilter] = useState('');
   // JH.7: fleet-wide history modal open state.
   const [historyOpen, setHistoryOpen] = useState(false);
-  // #71: lift the Download dropdown's open state out of the row cell so
-  // it survives the 1 Hz SWR poll. TanStack Table re-instantiates column
-  // cells on data change, and any state kept inside the `<DropdownMenu>`
-  // would be torn down mid-click. Keyed by job id so only one dropdown
-  // is open at a time. Same pattern we used for the Devices-tab
-  // hamburger in #2 (1.4.1-dev.3) — see Design Judgment in CLAUDE.md.
-  const [downloadMenuOpenJobId, setDownloadMenuOpenJobId] = useState<string | null>(null);
+  // #209: lift the per-row hamburger open state out of the row cell so
+  // it survives the 1 Hz SWR poll. TanStack re-instantiates row cells
+  // on data change; menu state kept inside the `<DropdownMenu>` would
+  // be torn down mid-click. Same pattern we use for the Devices-tab
+  // hamburger (#2) and the Devices-tab Download menu (#71). Keyed by
+  // job id so only one menu is open at a time.
+  const [actionMenuOpenJobId, setActionMenuOpenJobId] = useState<string | null>(null);
   // Bug #112: hide the "Commit" column entirely when versioning is off.
   // The column renders short git hashes that are clickable links into the
   // History drawer — both are meaningless when there's no history to link
@@ -170,6 +193,25 @@ export function QueueTab({
       header: ({ column }) => <SortHeader label="State" column={column} />,
       cell: ({ row: { original: job } }) => {
         const { label: badgeLabel, cls: badgeCls } = getJobBadge(job);
+        // TG.9: when the job is BLOCKED, render the badge as a button
+        // that opens the routing-rules editor pre-selected to the rule
+        // that fired. Tooltip surfaces the reason inline so a hover
+        // tells the user *why* this isn't running yet.
+        if (job.state === 'blocked' && job.blocked_reason) {
+          const r = job.blocked_reason;
+          const tooltip = `Blocked by rule '${r.rule_name}' — no online worker matches ${r.summary}. Click to edit the rule.`;
+          return (
+            <button
+              type="button"
+              className={`${badgeCls} cursor-pointer hover:brightness-125`}
+              title={tooltip}
+              aria-label={tooltip}
+              onClick={() => onOpenRoutingRule(r.rule_id)}
+            >
+              {badgeLabel}
+            </button>
+          );
+        }
         return (
           <span className="inline-flex items-center gap-1.5">
             <span className={badgeCls}>{badgeLabel}</span>
@@ -285,22 +327,70 @@ export function QueueTab({
       },
       sortingFn: 'alphanumeric',
     }),
-    // Bug #8 (1.6.1): surface the worker-selection reason so a user
-    // can answer "why did THIS worker get the job" without reading
-    // the server log. Short label with hover-explanation; dash for
-    // jobs that predate the column.
+    // Bug #8 (1.6.1) + bug #101: combined "Worker selection" column.
+    // Top line shows the routing intent the user picked in the Upgrade
+    // modal (any worker / pinned worker / tag expression — bug #100's
+    // standalone Routing column folded in here so the two never drift).
+    // Bottom line shows the selection reason — why THIS worker won
+    // (Pinned / Only eligible / Least busy / Fastest / First to poll).
+    // The two answer related questions ("what was asked for?" and "why
+    // did this win?") and reading them as one cell makes the routing
+    // story easier to follow without bouncing eyes between columns.
     columnHelper.accessor(row => row.selection_reason || '', {
       id: 'selection_reason',
       header: ({ column }) => <SortHeader label="Worker selection" column={column} />,
       cell: ({ row: { original: job } }) => {
+        // Routing intent — was the standalone Routing column before
+        // bug #101. Suppressed for the unconstrained case so default
+        // rows don't grow a line for a placeholder; "Any worker" is
+        // the implicit default and reads cleaner as absence.
+        const filter = job.worker_tag_filter;
+        const hasTagFilter = !!filter && filter.tags.length > 0;
+        let intentLine: React.ReactNode = null;
+        if (job.pinned_client_id) {
+          intentLine = (
+            <span
+              className="inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)]"
+              title="Pinned to a specific worker via the Upgrade modal — only that worker can claim this job."
+            >
+              <Pin className="size-3" aria-hidden="true" />
+              specific worker
+            </span>
+          );
+        } else if (hasTagFilter) {
+          const opLabel = filter!.op === 'all_of' ? 'all of' : filter!.op === 'any_of' ? 'any of' : 'none of';
+          intentLine = (
+            <span
+              className="inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)]"
+              title={`Worker tag expression — only workers whose tags satisfy "${opLabel} ${filter!.tags.join(', ')}" can claim this job.`}
+            >
+              <span>{opLabel}</span>
+              <TagChips tags={filter!.tags} />
+            </span>
+          );
+        }
+
         const display = formatSelectionReason(job.selection_reason);
-        if (!display) return <span className="text-[var(--text-muted)] text-[12px]">—</span>;
-        return (
+        // UD.2: render the long form at xl: (≥1280 px) and the short
+        // form below — fixes the Worker-selection cell overflowing on
+        // a standard 13" laptop. Tooltip carries the long context.
+        const reasonLine = display ? (
           <span
             className="text-[11px] text-[var(--text-muted)] whitespace-nowrap"
             title={display.title}
           >
-            {display.label}
+            <span className="hidden xl:inline">{display.label}</span>
+            <span className="xl:hidden">{display.shortLabel}</span>
+          </span>
+        ) : null;
+
+        if (!intentLine && !reasonLine) {
+          return <span className="text-[var(--text-muted)] text-[12px]">—</span>;
+        }
+        return (
+          <span className="inline-flex flex-col gap-0.5">
+            {intentLine}
+            {reasonLine}
           </span>
         );
       },
@@ -440,54 +530,70 @@ export function QueueTab({
         // via /ui/api/jobs/{id}/log when the modal opens.
         const hasLog = job.state !== 'pending';
         const canRetry = isJobRetryable(job);
-        const canCancel = inProgress;
         // FD.8 / #69: Download dropdown offers each stored firmware
         // variant (factory for ESP32 first-flash; ota for OTA / ESP8266)
         // plus a gzip toggle. Fallback to a single-item variants=["firmware"]
         // list for pre-#69 blobs still on disk after an upgrade.
-        // Bug #9 (1.6.1): the worker now archives every successful
-        // compile on the server, so the Download button is no longer
-        // gated on ``download_only`` — any successful compile with a
-        // stored binary can offer Download in the live Queue too.
         const canDownload = job.state === 'success' && !!job.has_firmware;
         const variants = (job.firmware_variants && job.firmware_variants.length > 0)
           ? job.firmware_variants
           : (canDownload ? ['firmware'] : []);
+        // #209 / #221: Rerun + Clear + Log stay inline; everything
+        // else (Cancel, Download, Edit YAML, device-section actions)
+        // lives in the hamburger.
+        const target = targets.find(t => t.target === job.target) || null;
         return (
-          <div className="flex gap-1">
-            {canCancel && (
-              <Button variant="destructive" size="sm" onClick={() => onCancel([job.id])}>Cancel</Button>
-            )}
+          <div className="flex gap-1 items-center">
             {canRetry && (
-              // #20: successful jobs get "Rerun" (green) since "Retry" implies
-              // failure recovery — re-running a successful job is just a
-              // re-compile, not a retry. Failed/timed-out jobs keep "Retry"
-              // (warn / amber).
-              isJobSuccessful(job)
-                ? <Button variant="success" size="sm" onClick={() => onRetry([job.id])}>Rerun</Button>
-                : <Button variant="warn" size="sm" onClick={() => onRetry([job.id])}>Retry</Button>
+              // Bug #108: every "redo this job" action reads as "Rerun" in
+              // the UI; success rows keep success-green, failure rows
+              // surface the same verb in warn-amber so the colour still
+              // signals the source state.
+              <Button
+                variant={isJobSuccessful(job) ? 'success' : 'warn'}
+                size="sm"
+                onClick={() => onRetry([job.id])}
+              >
+                Rerun
+              </Button>
             )}
-            {canDownload && variants.length > 0 && (
-              <FirmwareDownloadMenu
-                jobId={job.id}
-                variants={variants}
-                open={downloadMenuOpenJobId === job.id}
-                onOpenChange={(open) => setDownloadMenuOpenJobId(open ? job.id : null)}
-              />
-            )}
-            {hasLog && (
-              <Button variant="secondary" size="sm" onClick={() => onOpenLog(job.id)}>Log</Button>
-            )}
-            <Button variant="secondary" size="sm" onClick={() => onEdit(job.target)}>Edit</Button>
             {isJobFinished(job) && (
               <Button variant="secondary" size="sm" onClick={() => onClear([job.id])}>Clear</Button>
             )}
+            {/* Bug #221: Log button restored as a third inline action.
+                The Queue tab is where users land to investigate failures
+                and successes — burying the log behind a hamburger added
+                friction with no real benefit. */}
+            {hasLog && (
+              <Button variant="secondary" size="sm" onClick={() => onOpenLog(job.id)}>Log</Button>
+            )}
+            <QueueRowMenu
+              job={job}
+              target={target}
+              inProgress={inProgress}
+              canDownload={canDownload}
+              variants={variants}
+              open={actionMenuOpenJobId === job.id}
+              onOpenChange={(o) => setActionMenuOpenJobId(o ? job.id : null)}
+              onCancel={(id) => onCancel([id])}
+              onEdit={onEdit}
+              onToast={onToast}
+              onLogs={onLogs}
+              onOpenCompileHistory={onOpenCompileHistory}
+              onPing={onPing}
+              onInstallToAddress={onInstallToAddress}
+            />
           </div>
         );
       },
     }),
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [workers, onCancel, onRetry, onClear, onOpenLog, onEdit, onOpenHistoryDiff, targetNameMap, downloadMenuOpenJobId, versioningEnabled]);
+  ], [
+    workers, targets, onCancel, onRetry, onClear, onOpenLog, onEdit,
+    onOpenHistoryDiff, onOpenRoutingRule, targetNameMap,
+    actionMenuOpenJobId, versioningEnabled,
+    onToast, onLogs, onOpenCompileHistory, onPing, onInstallToAddress,
+  ]);
 
   const table = useReactTable({
     data: filteredQueue,
@@ -544,12 +650,13 @@ export function QueueTab({
             )}
           </div>
           <div className="actions">
-            {/* Retry dropdown — UX.4: rerun-class actions use the green
-                success colors (same as per-row Retry/Rerun buttons).
-                Orange/amber is reserved for genuine warn states. */}
+            {/* Rerun dropdown — UX.4: rerun-class actions use the green
+                success colors (same as per-row Rerun buttons). Orange/amber
+                is reserved for genuine warn states.
+                Bug #108: "Rerun" everywhere — was "Retry" historically. */}
             <DropdownMenu>
               <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-lg border border-transparent bg-[#14532d] px-2.5 h-7 text-[0.8rem] font-medium text-[#4ade80] hover:bg-[#166534] cursor-pointer">
-                Retry <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                Rerun <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 <DropdownMenuGroup>
@@ -558,14 +665,14 @@ export function QueueTab({
                     disabled={!hasFailedJobs}
                     title={!hasFailedJobs ? 'No failed jobs in the current queue' : undefined}
                   >
-                    Retry All Failed
+                    Rerun All Failed
                   </DropdownMenuItem>
                   <DropdownMenuItem
                     onClick={handleRetrySelected}
                     disabled={queue.length === 0}
                     title={queue.length === 0 ? 'Queue is empty' : undefined}
                   >
-                    Retry Selected
+                    Rerun Selected
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem

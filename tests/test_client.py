@@ -646,3 +646,362 @@ def test_target_cache_lock_is_exclusive(tmp_path, monkeypatch):
     assert seq == ["acquired", "released", "acquired", "released"], (
         f"lock not exclusive, events: {events}"
     )
+
+
+def test_clean_build_cache_preserves_esphome_venvs_and_pio_slots(tmp_path, monkeypatch):
+    """Regression for #119 + #214: ``Clean Cache`` must preserve ESPHome
+    venvs (anything with ``bin/esphome``) AND PlatformIO core dirs
+    (``pio-slot-*``) so the toolchain isn't re-downloaded.
+
+    #119: pre-fix wiped venvs and stranded the server's bundle subprocess
+    on a deleted ``bin/python``.
+
+    #214: pre-fix wiped ``pio-slot-N`` (PlatformIO's toolchain home),
+    forcing every subsequent compile through a 5–10 min toolchain
+    re-download and surfacing the partial-extract case as ``cc1:
+    posix_spawnp: No such file or directory``.
+
+    Anything else (slots, cache, platformio, builds) is build-artifact
+    state — that's what the user is asking us to clean.
+    """
+    import client as client_module  # noqa: PLC0415
+    monkeypatch.setattr(client_module, "_ESPHOME_VERSIONS_DIR", str(tmp_path))
+
+    # Two ESPHome venvs (have bin/esphome) — must survive the clean.
+    for ver in ("2026.4.2", "2026.4.3"):
+        (tmp_path / ver / "bin").mkdir(parents=True)
+        (tmp_path / ver / "bin" / "esphome").write_text("#!/bin/sh\n")
+
+    # Two PlatformIO core dirs — must also survive (toolchain home).
+    (tmp_path / "pio-slot-1" / "packages" / "toolchain-xtensa-esp-elf").mkdir(parents=True)
+    (tmp_path / "pio-slot-2" / "packages" / "toolchain-xtensa-esp-elf").mkdir(parents=True)
+
+    # Build cache directories — these are what Clean Cache should wipe.
+    (tmp_path / "cache" / "dev").mkdir(parents=True)
+    (tmp_path / "slots" / "1" / "dev").mkdir(parents=True)
+    (tmp_path / "platformio").mkdir()
+
+    client_module._clean_build_cache()
+
+    # Venvs preserved
+    assert (tmp_path / "2026.4.2" / "bin" / "esphome").exists()
+    assert (tmp_path / "2026.4.3" / "bin" / "esphome").exists()
+    # PlatformIO core dirs preserved (#214)
+    assert (tmp_path / "pio-slot-1" / "packages" / "toolchain-xtensa-esp-elf").exists()
+    assert (tmp_path / "pio-slot-2" / "packages" / "toolchain-xtensa-esp-elf").exists()
+
+    # Build caches gone
+    assert not (tmp_path / "cache").exists()
+    assert not (tmp_path / "slots").exists()
+    assert not (tmp_path / "platformio").exists()
+
+
+def test_clean_build_cache_removes_unprotected_dirs(tmp_path, monkeypatch):
+    """Directories that aren't venvs or pio-slot-* are removed."""
+    import client as client_module  # noqa: PLC0415
+    monkeypatch.setattr(client_module, "_ESPHOME_VERSIONS_DIR", str(tmp_path))
+
+    (tmp_path / "cache" / "dev").mkdir(parents=True)
+    (tmp_path / "slots").mkdir()
+    (tmp_path / "platformio").mkdir()
+
+    client_module._clean_build_cache()
+
+    assert list(tmp_path.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# #214 — _wipe_broken_toolchain — when a compile fails with cc1 ENOENT,
+# the worker auto-heals by removing the broken PlatformIO toolchain so
+# the next compile re-extracts. Live repro on macdaddy.localdomain in
+# the home-lab fleet: 3-of-65 jobs in a "Compile All Online" run failed
+# with `xtensa-esp-elf-gcc: fatal error: cannot execute 'cc1':
+# posix_spawnp: No such file or directory`, all on the same worker's
+# pio-slot-1.
+# ---------------------------------------------------------------------------
+
+def test_wipe_broken_toolchain_removes_packages_and_penv(tmp_path):
+    import client as client_module  # noqa: PLC0415
+
+    pio_dir = tmp_path / "pio-slot-1"
+    packages = pio_dir / "packages" / "toolchain-xtensa-esp-elf" / "bin"
+    packages.mkdir(parents=True)
+    (packages / "xtensa-esp-elf-gcc").write_text("broken-binary")
+    # #220: penv/ is also wiped — covers the `penv/bin/esptool: not found`
+    # / `Missing framework-…-libs package` failure modes that the cc1-only
+    # wipe missed.
+    penv_bin = pio_dir / "penv" / "bin"
+    penv_bin.mkdir(parents=True)
+    (penv_bin / "esptool").write_text("broken-script")
+    # PIO core dir's own siblings should be untouched.
+    (pio_dir / "dist").mkdir()
+    (pio_dir / "dist" / "downloaded.tar.gz").write_text("keep — saves a re-download")
+    (pio_dir / "appstate.json").write_text("keep")
+
+    assert client_module._wipe_broken_toolchain(str(pio_dir)) is True
+    assert not (pio_dir / "packages").exists()
+    assert not (pio_dir / "penv").exists()
+    # Siblings untouched.
+    assert (pio_dir / "dist" / "downloaded.tar.gz").read_text() == "keep — saves a re-download"
+    assert (pio_dir / "appstate.json").read_text() == "keep"
+
+
+def test_wipe_broken_toolchain_returns_true_when_only_one_subtree_present(tmp_path):
+    """Either packages/ or penv/ alone is enough to count as a wipe."""
+    import client as client_module  # noqa: PLC0415
+
+    pio_dir = tmp_path / "pio-slot-1"
+    (pio_dir / "penv" / "bin").mkdir(parents=True)
+    # No packages/ — the heal still does what it can.
+
+    assert client_module._wipe_broken_toolchain(str(pio_dir)) is True
+    assert not (pio_dir / "penv").exists()
+
+
+def test_wipe_broken_toolchain_noop_when_nothing_to_wipe(tmp_path):
+    """Tolerate the case where there's neither packages/ nor penv/."""
+    import client as client_module  # noqa: PLC0415
+
+    pio_dir = tmp_path / "pio-slot-1"
+    pio_dir.mkdir()
+
+    assert client_module._wipe_broken_toolchain(str(pio_dir)) is False
+
+
+def test_wipe_broken_toolchain_swallows_rmtree_failure(tmp_path, monkeypatch):
+    """A read-only filesystem mid-rmtree must not propagate — the worker
+    still needs to submit ``failed`` and move on."""
+    import client as client_module  # noqa: PLC0415
+
+    pio_dir = tmp_path / "pio-slot-1"
+    (pio_dir / "packages").mkdir(parents=True)
+    (pio_dir / "penv").mkdir(parents=True)
+
+    def fake_rmtree(path, ignore_errors=False):
+        raise PermissionError("read-only fs")
+
+    monkeypatch.setattr(client_module.shutil, "rmtree", fake_rmtree)
+    assert client_module._wipe_broken_toolchain(str(pio_dir)) is False
+
+
+def test_wipe_broken_toolchain_recovers_from_strict_rmtree_enoent_mid_walk(tmp_path, monkeypatch):
+    """Live repro on AI-MacBook-Pro 2026-05-02: strict ``shutil.rmtree``
+    raised ``FileNotFoundError: 'CMakeLists.txt'`` mid-walk on
+    ``packages/`` (concurrent mutator / already-removed inode), the
+    single-pass wipe abandoned the rest of the subtree, and the four
+    follow-up screek-2a-N compiles cascaded on the half-rotted state.
+    After the strict pass raises a benign ENOENT, the wipe must do a
+    lenient ``ignore_errors=True`` sweep so the next compile gets a
+    clean slate.
+    """
+    import client as client_module  # noqa: PLC0415
+
+    pio_dir = tmp_path / "pio-slot-1"
+    # Real on-disk state — the strict pass will be intercepted but the
+    # lenient sweep needs an actual tree to clean.
+    (pio_dir / "packages" / "tool-esptoolpy").mkdir(parents=True)
+    (pio_dir / "packages" / "tool-esptoolpy" / "leftover").write_text("partially-extracted")
+    (pio_dir / "penv" / "bin").mkdir(parents=True)
+    (pio_dir / "penv" / "bin" / "esptool").write_text("broken-script")
+
+    real_rmtree = client_module.shutil.rmtree
+    strict_seen = {"count": 0}
+
+    def flaky_rmtree(path, ignore_errors=False):
+        if not ignore_errors:
+            strict_seen["count"] += 1
+            # Mirror the live error string — relative inner filename.
+            raise FileNotFoundError(2, "No such file or directory", "CMakeLists.txt")
+        return real_rmtree(path, ignore_errors=True)
+
+    monkeypatch.setattr(client_module.shutil, "rmtree", flaky_rmtree)
+
+    assert client_module._wipe_broken_toolchain(str(pio_dir)) is True
+    # Both subtrees were ultimately swept by the lenient retry, even
+    # though the strict pass raised on each.
+    assert not (pio_dir / "packages").exists()
+    assert not (pio_dir / "penv").exists()
+    assert strict_seen["count"] == 2  # one strict attempt per subtree
+
+
+# ---------------------------------------------------------------------------
+# #220 — _is_broken_pio_state — every distinct corruption symptom we've
+# seen in the home lab must trigger the self-heal path. New patterns get
+# added to ``_BROKEN_PIO_SIGNATURES`` and a fixture line goes here.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "log_excerpt",
+    [
+        # #214 original — toolchain-xtensa-esp-elf missing cc1.
+        "xtensa-esp-elf-gcc: fatal error: cannot execute 'cc1': posix_spawnp: No such file or directory",
+        # #220 — framework-libs partially extracted.
+        "Error: Missing framework-arduinoespressif32-libs package",
+        # #220 — tool-* package missing pyproject.toml/setup.py.
+        "error: /esphome-versions/pio-slot-1/packages/tool-esptoolpy does not appear to be a Python project, "
+        "as neither `pyproject.toml` nor `setup.py` are present in the directory",
+        # #220 — esptool half-installed in penv/.espidf-*/.
+        "ModuleNotFoundError: No module named 'esptool.__init__'; 'esptool' is not a package",
+        # #220 — penv binary missing → Error 127.
+        "sh: 1: /esphome-versions/pio-slot-2/penv/bin/esptool: not found\n"
+        "*** [.pioenvs/bbq-gas-valve/bootloader.bin] Error 127",
+        # #220 — generic Error 127 in firmware build.
+        "*** [.pioenvs/screek-1u-1/firmware.bin] Error 127",
+    ],
+)
+def test_is_broken_pio_state_matches_real_lab_failures(log_excerpt):
+    import client as client_module  # noqa: PLC0415
+
+    assert client_module._is_broken_pio_state(log_excerpt) is True
+
+
+@pytest.mark.parametrize(
+    "log_excerpt",
+    [
+        # Clean compile log — should not trigger.
+        "Compiling .pioenvs/foo/firmware.bin\nLinking .pioenvs/foo/firmware.elf\n",
+        # User config error — different bug class, must NOT self-heal.
+        "ERROR Error: Unable to find component 'invalid_platform'",
+        # OTA failure — different bug class, must NOT self-heal.
+        "ERROR Error resolving IP address of 192.168.1.99: [Errno 8] nodename nor servname provided",
+        # Compile error in user code — different bug class.
+        "main.cpp:42:1: error: 'foo' was not declared in this scope",
+        # Other Error 127 (not in .pioenvs/) — keep narrow.
+        "make: *** [unrelated/target] Error 127",
+    ],
+)
+def test_is_broken_pio_state_ignores_non_corruption_failures(log_excerpt):
+    import client as client_module  # noqa: PLC0415
+
+    assert client_module._is_broken_pio_state(log_excerpt) is False
+
+
+# ---------------------------------------------------------------------------
+# DQ.8 — version manager defaults to 1 venv; legacy MAX_ESPHOME_VERSIONS warns
+# ---------------------------------------------------------------------------
+
+
+def test_version_manager_module_default_is_1():
+    """DQ.8: the module-level constant is 1 — disk_quota engine bounds the rest."""
+    import version_manager as vm_mod  # noqa: PLC0415
+
+    assert vm_mod.MAX_ESPHOME_VERSIONS == 1
+
+
+# ---------------------------------------------------------------------------
+# DQ.9 — disk-quota wiring in client.py
+# ---------------------------------------------------------------------------
+
+
+def test_parse_disk_quota_gb_env_accepts_integer():
+    import client as client_mod  # noqa: PLC0415
+    assert client_mod._parse_disk_quota_gb_env("5") == 5 * 1024 ** 3
+
+
+def test_parse_disk_quota_gb_env_rejects_non_integer():
+    import client as client_mod  # noqa: PLC0415
+    assert client_mod._parse_disk_quota_gb_env("5.5") is None
+    assert client_mod._parse_disk_quota_gb_env("abc") is None
+
+
+def test_parse_disk_quota_gb_env_rejects_below_one():
+    import client as client_mod  # noqa: PLC0415
+    assert client_mod._parse_disk_quota_gb_env("0") is None
+    assert client_mod._parse_disk_quota_gb_env("-1") is None
+
+
+def test_parse_disk_quota_gb_env_treats_blank_as_none():
+    import client as client_mod  # noqa: PLC0415
+    assert client_mod._parse_disk_quota_gb_env(None) is None
+    assert client_mod._parse_disk_quota_gb_env("") is None
+    assert client_mod._parse_disk_quota_gb_env("   ") is None
+
+
+def test_disk_quota_cell_round_trip():
+    import client as client_mod  # noqa: PLC0415
+    prev = client_mod._get_current_disk_quota_bytes()
+    try:
+        client_mod._set_current_disk_quota_bytes(7 * 1024 ** 3)
+        assert client_mod._get_current_disk_quota_bytes() == 7 * 1024 ** 3
+        client_mod._set_current_disk_quota_bytes(None)
+        assert client_mod._get_current_disk_quota_bytes() is None
+    finally:
+        client_mod._set_current_disk_quota_bytes(prev)
+
+
+def test_run_disk_quota_sweep_no_op_when_quota_unset(tmp_path, monkeypatch):
+    """DQ.9: pre-first-heartbeat the cell is None; sweep skips silently."""
+    import client as client_mod  # noqa: PLC0415
+
+    monkeypatch.setattr(client_mod, "_ESPHOME_VERSIONS_DIR", str(tmp_path))
+    prev = client_mod._get_current_disk_quota_bytes()
+    try:
+        client_mod._set_current_disk_quota_bytes(None)
+        # Should not raise even though disk_quota engine has nothing to do.
+        client_mod._run_disk_quota_sweep(label="test")
+        assert client_mod._get_last_eviction_freed_bytes() == 0
+    finally:
+        client_mod._set_current_disk_quota_bytes(prev)
+
+
+def test_run_disk_quota_sweep_evicts_when_over_quota(tmp_path, monkeypatch):
+    """DQ.9: when the cell is set and tree is over budget, sweep evicts."""
+    import client as client_mod  # noqa: PLC0415
+
+    # Make a tiny synthetic tree: one venv + one cache target.
+    (tmp_path / "2026.4.3" / "bin").mkdir(parents=True)
+    (tmp_path / "2026.4.3" / "bin" / "esphome").write_bytes(b"")
+    (tmp_path / "2026.4.3" / "lib").mkdir()
+    (tmp_path / "2026.4.3" / "lib" / "padding").write_bytes(b"\x00" * 100)
+
+    cache = tmp_path / "cache" / "device-a"
+    cache.mkdir(parents=True)
+    (cache / "blob").write_bytes(b"\x00" * 5000)
+
+    monkeypatch.setattr(client_mod, "_ESPHOME_VERSIONS_DIR", str(tmp_path))
+    prev = client_mod._get_current_disk_quota_bytes()
+    try:
+        # Quota tight enough that the cache must go (only the venv fits).
+        client_mod._set_current_disk_quota_bytes(500)
+        client_mod._run_disk_quota_sweep(label="test")
+        assert not (tmp_path / "cache" / "device-a").exists()
+        assert client_mod._get_last_eviction_freed_bytes() > 0
+    finally:
+        client_mod._set_current_disk_quota_bytes(prev)
+
+
+def test_active_job_set_pin_protects_target(tmp_path, monkeypatch):
+    """DQ.9: a pinned target survives even when sweep would otherwise evict it."""
+    import client as client_mod  # noqa: PLC0415
+
+    cache = tmp_path / "cache" / "stem-a"
+    cache.mkdir(parents=True)
+    (cache / "blob").write_bytes(b"\x00" * 5000)
+
+    monkeypatch.setattr(client_mod, "_ESPHOME_VERSIONS_DIR", str(tmp_path))
+    prev = client_mod._get_current_disk_quota_bytes()
+    try:
+        client_mod._set_current_disk_quota_bytes(100)  # very tight
+        with client_mod._active_job_set.pin("2026.4.3", "stem-a", 1):
+            client_mod._run_disk_quota_sweep(label="test")
+            assert (tmp_path / "cache" / "stem-a").exists()
+    finally:
+        client_mod._set_current_disk_quota_bytes(prev)
+
+
+def test_default_constructed_version_manager_collapses_to_one(tmp_path):
+    """DQ.8: VersionManager() (no override) keeps at most one venv."""
+    _add_fake_version(tmp_path, "2026.4.1")
+    _add_fake_version(tmp_path, "2026.4.2")
+    _add_fake_version(tmp_path, "2026.4.3")
+
+    vm_one = VersionManager(versions_base=tmp_path)
+    # The constructor's _load_existing accepted all 3 from disk; after the
+    # first ensure_version-style call, the count cap kicks in. Direct
+    # eviction call to verify the cap is 1.
+    assert len(vm_one.installed_versions()) == 3
+    # Force eviction via the internal helper used by ensure_version.
+    while len(vm_one.installed_versions()) > vm_one._max_versions:
+        with vm_one._lock:
+            vm_one._evict_lru(keep_version=None)
+    assert len(vm_one.installed_versions()) == 1

@@ -113,9 +113,16 @@ CONTRACTS: list[tuple[str, Any, Any, set[str]]] = [
         {
             "auto_commit_on_save", "git_author_name", "git_author_email",
             "job_history_retention_days", "firmware_cache_max_gb",
-            "job_log_retention_days", "server_token", "job_timeout",
+            "firmware_retention_days", "job_log_retention_days",
+            "server_token", "job_timeout",
             "ota_timeout", "worker_offline_threshold",
             "device_poll_interval", "require_ha_auth",
+            # 1.7.0 additions: time/date formatting and the fleet-wide
+            # disk quota are all wired into the Settings drawer; if the
+            # server stops returning any of them the drawer field reads
+            # `undefined` and loses its form state on next commit.
+            "time_format", "date_format",
+            "default_worker_disk_quota_bytes",
         },
     ),
     # Targets — Devices tab, integration's device builder, and every

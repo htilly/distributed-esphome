@@ -27,9 +27,14 @@ export function isJobSuccessful(job: JobStatusLike): boolean {
   return job.ota_result === 'success';
 }
 
-/** Job is still in progress (not yet reached a terminal state) */
+/** Job is still in progress (not yet reached a terminal state).
+ *
+ * TG.9: BLOCKED is *not* terminal — it's a Pending-with-a-reason. A
+ * blocked job will move back to Pending the moment an eligible worker
+ * comes online or the rule changes; it must not count as Failed.
+ */
 export function isJobInProgress(job: JobStatusLike): boolean {
-  if (job.state === 'pending' || job.state === 'working') return true;
+  if (job.state === 'pending' || job.state === 'working' || job.state === 'blocked') return true;
   // Compile succeeded but OTA hasn't finished yet. validate_only /
   // download_only jobs don't have an OTA phase and are terminal on
   // state=success (#23).
@@ -77,6 +82,10 @@ const BADGE_VARIANTS: Record<string, string> = {
   failed:    `${BADGE_BASE} bg-[#450a0a] text-[#f87171]`,
   timed_out: `${BADGE_BASE} bg-[#431407] text-[#fb923c]`,
   cancelled: `${BADGE_BASE} bg-[#374151] text-[#9ca3af]`,
+  // TG.9: BLOCKED is its own badge — distinct red-orange so the user can
+  // tell at a glance that a job is held by routing rules, not just sitting
+  // pending in the queue. Click opens the routing-rules editor.
+  blocked:   `${BADGE_BASE} bg-[#3f1d1d] text-[#fb7185]`,
 };
 
 export function getJobBadge(job: {
@@ -95,6 +104,9 @@ export function getJobBadge(job: {
     return { label: 'OTA Retry', cls: BADGE_VARIANTS.timed_out };
   } else if (job.state === 'pending') {
     return { label: 'Pending', cls: BADGE_VARIANTS.pending };
+  } else if (job.state === 'blocked') {
+    // TG.9: distinct from Pending — surfaces routing-rule constraint.
+    return { label: 'Blocked', cls: BADGE_VARIANTS.blocked };
   } else if (job.state === 'working' && job.validate_only) {
     return { label: job.status_text || 'Validating', cls: BADGE_VARIANTS.working };
   } else if (job.state === 'working' && job.download_only) {

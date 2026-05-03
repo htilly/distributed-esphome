@@ -31,9 +31,10 @@ async function openLogModal(page: import('@playwright/test').Page) {
   await page.goto('/');
   await page.getByRole('button', { name: /Queue/ }).click();
   await expect(page.getByText('bedroom-light')).toBeVisible({ timeout: 5000 });
-  // Click the per-row "Log" button on a finished job.
+  // #221: per-row Log button is inline (was hamburgered between #209
+  // and #221).
   const row = page.locator('#tab-queue tbody tr').filter({ hasText: 'bedroom-light' });
-  await row.getByRole('button', { name: 'Log' }).click();
+  await row.getByRole('button', { name: 'Log', exact: true }).click();
   // xterm container appears once the log fetch resolves.
   await expect(page.locator('.xterm-container')).toBeVisible({ timeout: 5000 });
 }
@@ -74,12 +75,12 @@ test('UpgradeModal fits within a short viewport and version list is reachable (#
   expect(dialog).not.toBeNull();
   expect(dialog!.fits, `dialog ${JSON.stringify(dialog!.r)} > viewport ${JSON.stringify(dialog!.viewport)}`).toBe(true);
 
-  // Version "Current" button is the first item in the inline scroll list;
-  // scrollIntoViewIfNeeded inside the dialog's overflow-y container should
-  // bring it on-screen.
-  const currentBtn = page.getByRole('dialog').getByRole('button', { name: /^Current/ });
-  await currentBtn.scrollIntoViewIfNeeded();
-  await expect(currentBtn).toBeInViewport();
+  // #215: "Current" version is now a radio label (was an inline button
+  // in the old scrolling list). The dialog's overflow-y container
+  // should still bring it on-screen via scrollIntoViewIfNeeded.
+  const currentRadio = page.getByRole('dialog').getByRole('radio', { name: /^Current/ });
+  await currentRadio.scrollIntoViewIfNeeded();
+  await expect(currentRadio).toBeInViewport();
 });
 
 for (const viewport of [

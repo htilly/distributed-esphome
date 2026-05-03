@@ -107,7 +107,7 @@ class Device:
     ip_address: str
     online: bool = False
     running_version: Optional[str] = None
-    compilation_time: Optional[str] = None  # e.g. "Mar 29 2026, 17:00:00"
+    compilation_time: Optional[str] = None  # e.g. "2026-04-23 06:13:56 -0700"
     last_seen: Optional[datetime] = None
     compile_target: Optional[str] = None  # e.g. "living_room.yaml"
     mac_address: Optional[str] = None  # e.g. "AA:BB:CC:DD:EE:FF"
@@ -371,13 +371,20 @@ class DevicePoller:
     async def _ping_device(self, name: str, ip: str) -> bool:
         """Ping a device to check if it is reachable. Returns True if alive.
 
-        Uses UDP-based ICMP (privileged=False) so no root or CAP_NET_RAW is
-        required.  Only called when the API connection fails and icmplib is
-        installed; guarded by _PING_AVAILABLE at the call site.
+        Tries unprivileged datagram ICMP first (no caps needed when the host's
+        ``net.ipv4.ping_group_range`` allows it), then falls back to a raw
+        socket — the addon container is granted ``NET_RAW`` via
+        ``ha-addon/config.yaml`` for the HAOS case where the kernel default
+        ``1 0`` disables unprivileged ICMP (#206). Only called when the API
+        connection fails and icmplib is installed; guarded by
+        ``_PING_AVAILABLE`` at the call site.
         """
         try:
-            from icmplib import async_ping  # noqa: PLC0415
-            host = await async_ping(ip, count=1, timeout=2, privileged=False)
+            from icmplib import SocketPermissionError, async_ping  # noqa: PLC0415
+            try:
+                host = await async_ping(ip, count=1, timeout=2, privileged=False)
+            except SocketPermissionError:
+                host = await async_ping(ip, count=1, timeout=2, privileged=True)
             return host.is_alive
         except Exception:
             logger.debug("Ping failed for device %s at %s", name, ip, exc_info=True)

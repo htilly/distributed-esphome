@@ -26,6 +26,14 @@
 #   HA_TIME_ZONE=UTC HA_COUNTRY=US HA_CURRENCY=USD HA_UNIT_SYSTEM=metric
 #   HA_LOCATION_NAME=Home HA_LATITUDE=0 HA_LONGITUDE=0 HA_ELEVATION=0
 #   TOKEN_FILE=$HOME/.config/distributed-esphome/haos-token
+#   HAOS_AUTHORIZED_KEYS_FILE=$HOME/.config/distributed-esphome/haos-authorized-keys
+#       Public keys to authorize on the Advanced SSH add-on. Defaults to the
+#       file above if it exists, otherwise to ~/.ssh/id_ed25519.pub. Set to
+#       the empty string to skip the SSH add-on install entirely.
+#   PVE_HOST=pve  VMID=106
+#       The Advanced SSH add-on is installed via qemu-guest-agent against
+#       the VM (HA's REST Supervisor proxy rejects user tokens). These default
+#       to the same values provision-vm.sh uses.
 
 set -euo pipefail
 
@@ -49,6 +57,24 @@ HA_ELEVATION="${HA_ELEVATION:-0}"
 CLIENT_ID="${HA_URL}/"
 TOKEN_FILE="${TOKEN_FILE:-$HOME/.config/distributed-esphome/haos-token}"
 LL_TOKEN_NAME="${LL_TOKEN_NAME:-distributed-esphome-onboarding}"
+
+# Advanced SSH & Web Terminal add-on (Frenck, slug a0d7b954_ssh) — installed
+# after onboarding so we can SSH into the throwaway HAOS VM with the same
+# id_ed25519 the rest of the home lab uses. The repo at
+# github.com/hassio-addons/repository isn't pre-installed on stock HAOS,
+# so we add it before installing the add-on itself.
+SSH_ADDON_SLUG="a0d7b954_ssh"
+SSH_ADDON_REPO="https://github.com/hassio-addons/repository"
+DEFAULT_SSH_KEYS_FILE="$HOME/.config/distributed-esphome/haos-authorized-keys"
+if [[ -z "${HAOS_AUTHORIZED_KEYS_FILE+x}" ]]; then
+  if [[ -f "$DEFAULT_SSH_KEYS_FILE" ]]; then
+    HAOS_AUTHORIZED_KEYS_FILE="$DEFAULT_SSH_KEYS_FILE"
+  else
+    HAOS_AUTHORIZED_KEYS_FILE="$HOME/.ssh/id_ed25519.pub"
+  fi
+fi
+PVE_HOST="${PVE_HOST:-pve}"
+VMID="${VMID:-106}"
 
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 command -v curl >/dev/null || { echo "curl is required" >&2; exit 2; }
@@ -205,6 +231,119 @@ umask 077
 printf '%s\n' "$LL_TOKEN" > "$TOKEN_FILE"
 log "Long-lived token saved to $TOKEN_FILE"
 
+# --- Advanced SSH add-on ---------------------------------------------------
+# Install via qemu-guest-agent: HA's `/api/hassio/*` Supervisor proxy
+# rejects long-lived user tokens with 401, so we drive `ha` from inside
+# the guest the same way scripts/haos/install-addon.sh does. Each step is
+# idempotent (re-adding a repo, re-installing, or restarting are all safe).
+
+if [[ -z "$HAOS_AUTHORIZED_KEYS_FILE" ]]; then
+  log "HAOS_AUTHORIZED_KEYS_FILE empty — skipping Advanced SSH add-on install"
+elif [[ ! -f "$HAOS_AUTHORIZED_KEYS_FILE" ]]; then
+  log "WARNING: $HAOS_AUTHORIZED_KEYS_FILE not found — skipping Advanced SSH add-on install"
+else
+  AUTHORIZED_KEYS_JSON=$(jq -R -s 'split("\n") | map(select(length > 0 and (startswith("#") | not)))' \
+    < "$HAOS_AUTHORIZED_KEYS_FILE")
+  KEY_COUNT=$(jq 'length' <<<"$AUTHORIZED_KEYS_JSON")
+  if [[ "$KEY_COUNT" == "0" ]]; then
+    log "WARNING: $HAOS_AUTHORIZED_KEYS_FILE has no usable keys — skipping Advanced SSH add-on install"
+  else
+    log "Installing Advanced SSH & Web Terminal add-on ($KEY_COUNT key(s) from $HAOS_AUTHORIZED_KEYS_FILE)"
+
+    # Auto-detect PVE node name (matches install-addon.sh's pattern).
+    PVE_NODE=$(ssh "$PVE_HOST" "pvesh get /nodes --output-format json" 2>/dev/null \
+      | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['node'])" 2>/dev/null) \
+      || { echo "Couldn't auto-detect PVE_NODE on $PVE_HOST" >&2; exit 8; }
+
+    # Run a shell command inside the HAOS guest via qga; prints stdout/stderr,
+    # returns the guest's exit code. SCRIPT_FILE is uploaded to PVE first to
+    # avoid quoting hell when the script contains JSON.
+    guest_exec() {
+      local script="$1" timeout_s="${2:-600}"
+      local remote_script
+      remote_script=$(ssh "$PVE_HOST" mktemp -t guest_exec.XXXXXX)
+      printf '%s' "$script" | ssh "$PVE_HOST" "cat > $remote_script"
+      ssh "$PVE_HOST" "PVE_NODE=$PVE_NODE VMID=$VMID TIMEOUT_S=$timeout_s SCRIPT_FILE=$remote_script bash -s" <<'REMOTE'
+set -euo pipefail
+TMPJSON=$(mktemp)
+trap 'rm -f "$TMPJSON" "$SCRIPT_FILE"' EXIT
+SCRIPT=$(cat "$SCRIPT_FILE")
+pvesh create "/nodes/$PVE_NODE/qemu/$VMID/agent/exec" \
+  --command /bin/sh --command -c --command "$SCRIPT" \
+  --output-format json > "$TMPJSON"
+PID=$(python3 -c "import sys,json; print(json.load(open(sys.argv[1]))['pid'])" "$TMPJSON")
+for _ in $(seq 1 "$TIMEOUT_S"); do
+  pvesh get "/nodes/$PVE_NODE/qemu/$VMID/agent/exec-status" \
+    --pid "$PID" --output-format json > "$TMPJSON"
+  if python3 -c "import sys,json; sys.exit(0 if json.load(open(sys.argv[1])).get('exited') else 1)" "$TMPJSON"; then
+    python3 - "$TMPJSON" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+if d.get("out-data"): sys.stdout.write(d["out-data"])
+if d.get("err-data"): sys.stderr.write(d["err-data"])
+sys.exit(d.get("exitcode", 0))
+PY
+    exit $?
+  fi
+  sleep 1
+done
+echo "guest exec timed out after ${TIMEOUT_S}s" >&2
+exit 124
+REMOTE
+    }
+
+    # 1. Add the community add-ons repo + reload (no-op if already present).
+    log "Adding $SSH_ADDON_REPO to the add-on store"
+    guest_exec "docker exec hassio_cli ha store add '$SSH_ADDON_REPO' --no-progress 2>&1 || true
+docker exec hassio_cli ha store reload --no-progress 2>&1 || true" 120 >/dev/null
+
+    # 2. Install the add-on (no-op if already installed).
+    log "Installing $SSH_ADDON_SLUG (first install pulls ~50MB; up to ~3 min)"
+    guest_exec "docker exec hassio_cli ha apps install $SSH_ADDON_SLUG --no-progress 2>&1 || true" 600 >/dev/null
+
+    # 3. Set options. The `ha` CLI has no first-class options command, so we
+    # POST to the Supervisor REST API from inside the hassio_cli container,
+    # which already has SUPERVISOR_TOKEN in its env. Schema nests SSH config
+    # under .ssh per the a0d7b954_ssh add-on.
+    OPTS_JSON=$(jq -c -n --argjson keys "$AUTHORIZED_KEYS_JSON" '{
+      options: {
+        ssh: {
+          username: "root",
+          password: "",
+          authorized_keys: $keys,
+          sftp: true,
+          compatibility_mode: false,
+          allow_agent_forwarding: false,
+          allow_remote_port_forwarding: false,
+          allow_tcp_forwarding: false
+        },
+        zsh: true,
+        share_sessions: true,
+        packages: [],
+        init_commands: []
+      },
+      network: {"22/tcp": 22}
+    }')
+    OPTS_B64=$(printf '%s' "$OPTS_JSON" | base64 | tr -d '\n')
+
+    log "Configuring $SSH_ADDON_SLUG (authorized_keys + defaults)"
+    guest_exec "set -e
+echo '$OPTS_B64' | base64 -d > /tmp/ssh-addon-options.json
+docker cp /tmp/ssh-addon-options.json hassio_cli:/tmp/ssh-addon-options.json
+docker exec hassio_cli sh -c 'curl -fsS -X POST http://supervisor/addons/$SSH_ADDON_SLUG/options \
+  -H \"Authorization: Bearer \$SUPERVISOR_TOKEN\" \
+  -H \"Content-Type: application/json\" \
+  --data @/tmp/ssh-addon-options.json'
+rm -f /tmp/ssh-addon-options.json
+docker exec hassio_cli ha apps restart $SSH_ADDON_SLUG --no-progress 2>&1 || \
+  docker exec hassio_cli ha apps start $SSH_ADDON_SLUG --no-progress 2>&1
+" 120 >/dev/null
+
+    _haos_host=$(echo "$HA_URL" | sed -E 's#^https?://##; s#:[0-9]+$##; s#/.*$##')
+    log "Advanced SSH add-on running at ssh root@${_haos_host}  (port 22)"
+  fi
+fi
+
 cat >&2 <<EOF
 
 Onboarding complete.
@@ -214,6 +353,10 @@ Onboarding complete.
 
 Verify:
   curl -sH "Authorization: Bearer \$(cat $TOKEN_FILE)" $HA_URL/api/ | jq .
+
+SSH into the VM (Advanced SSH add-on, port 22 — drops you in the
+  add-on container with \`ha\` and \`docker\` available):
+  ssh haos-pve
 
 Next:
   HAOS_URL=$HA_URL push-to-haos.sh

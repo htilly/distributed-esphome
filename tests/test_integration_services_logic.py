@@ -25,9 +25,17 @@ class _FakeCall:
         self.data = data
 
 
-def _hass_with_coordinator() -> tuple[SimpleNamespace, AsyncMock]:
+def _hass_with_coordinator(
+    targets_snapshot: list[dict] | None = None,
+) -> tuple[SimpleNamespace, AsyncMock]:
     post = AsyncMock(return_value={"enqueued": 1, "cancelled": 1, "job_id": "j"})
-    coordinator = SimpleNamespace(async_post_json=post)
+    coordinator = SimpleNamespace(
+        async_post_json=post,
+        # 114: services that resolve tag expressions read this snapshot.
+        # Default to an empty list so tests that don't set targets see
+        # the same shape the coordinator exposes during a normal poll.
+        data={"targets": targets_snapshot or []},
+    )
     hass = SimpleNamespace(data={DOMAIN: {"entry-1": coordinator}})
     return hass, post
 
@@ -408,3 +416,150 @@ def test_services_yaml_parses() -> None:
     assert any(f.get("manufacturer") == "ESPHome Fleet Worker" for f in worker_filter)
     # #65: legacy `worker_id` string field is gone.
     assert "worker_id" not in data[SERVICE_COMPILE]["fields"]
+    # 114: tag-expression fields are exposed on both compile and validate.
+    assert "tags" in data[SERVICE_COMPILE]["fields"]
+    assert "tags_op" in data[SERVICE_COMPILE]["fields"]
+    assert "tags" in data[SERVICE_VALIDATE]["fields"]
+    assert "tags_op" in data[SERVICE_VALIDATE]["fields"]
+
+
+# --- 114: tag-expression service handlers ---
+
+from esphome_fleet.services import _resolve_tags_to_targets  # noqa: E402
+
+
+_TAG_TARGETS = [
+    {"target": "office-a.yaml", "tags": "office,production"},
+    {"target": "office-b.yaml", "tags": "office,staging"},
+    {"target": "kitchen.yaml", "tags": "kitchen"},
+    {"target": "untagged.yaml", "tags": None},
+    {"target": "archived.yaml", "tags": "office", "archived": True},
+]
+
+
+def test_resolve_tags_any_of_default() -> None:
+    coord = SimpleNamespace(data={"targets": _TAG_TARGETS})
+    assert _resolve_tags_to_targets(coord, ["office"], "any_of") == [
+        "office-a.yaml",
+        "office-b.yaml",
+    ]
+
+
+def test_resolve_tags_all_of_intersects_required_tags() -> None:
+    coord = SimpleNamespace(data={"targets": _TAG_TARGETS})
+    assert _resolve_tags_to_targets(
+        coord, ["office", "production"], "all_of"
+    ) == ["office-a.yaml"]
+
+
+def test_resolve_tags_none_of_excludes_tagged_devices() -> None:
+    coord = SimpleNamespace(data={"targets": _TAG_TARGETS})
+    # Devices that carry NEITHER `office` nor `kitchen` — only the
+    # untagged row qualifies. Archived rows are dropped regardless.
+    assert _resolve_tags_to_targets(
+        coord, ["office", "kitchen"], "none_of"
+    ) == ["untagged.yaml"]
+
+
+def test_resolve_tags_skips_archived() -> None:
+    coord = SimpleNamespace(data={"targets": _TAG_TARGETS})
+    matches = _resolve_tags_to_targets(coord, ["office"], "any_of")
+    assert "archived.yaml" not in matches
+
+
+def test_resolve_tags_trims_and_drops_empty_tokens() -> None:
+    coord = SimpleNamespace(data={"targets": _TAG_TARGETS})
+    assert _resolve_tags_to_targets(coord, ["  office  ", ""], "any_of") == [
+        "office-a.yaml",
+        "office-b.yaml",
+    ]
+
+
+def test_resolve_tags_empty_input_returns_empty() -> None:
+    coord = SimpleNamespace(data={"targets": _TAG_TARGETS})
+    assert _resolve_tags_to_targets(coord, [], "any_of") == []
+    assert _resolve_tags_to_targets(coord, ["   "], "any_of") == []
+
+
+async def test_compile_service_resolves_tag_expression() -> None:
+    """114 — tag expressions enqueue every matching target."""
+    hass, post = _hass_with_coordinator(_TAG_TARGETS)
+    await _handle_compile(_FakeCall(hass, {"tags": ["office"]}))
+    _, payload = post.call_args.args
+    assert payload == {"targets": ["office-a.yaml", "office-b.yaml"]}
+
+
+async def test_compile_service_tags_with_all_of_op() -> None:
+    hass, post = _hass_with_coordinator(_TAG_TARGETS)
+    await _handle_compile(
+        _FakeCall(hass, {"tags": ["office", "production"], "tags_op": "all_of"})
+    )
+    _, payload = post.call_args.args
+    assert payload == {"targets": ["office-a.yaml"]}
+
+
+async def test_compile_service_tags_zero_match_raises() -> None:
+    from homeassistant.exceptions import HomeAssistantError
+
+    hass, _ = _hass_with_coordinator(_TAG_TARGETS)
+    with pytest.raises(HomeAssistantError) as excinfo:
+        await _handle_compile(_FakeCall(hass, {"tags": ["nonexistent"]}))
+    assert excinfo.value.translation_key == "no_targets_match_tags"
+
+
+async def test_compile_service_device_picker_wins_over_tags() -> None:
+    """Resolution precedence: device picker > tags > targets."""
+    hass, post = _hass_with_coordinator(_TAG_TARGETS)
+    fake_device = SimpleNamespace(
+        identifiers={(DOMAIN, "target:specific.yaml")},
+    )
+    fake_registry = SimpleNamespace(async_get=lambda did: fake_device)
+    with patch("esphome_fleet.services.dr.async_get", return_value=fake_registry):
+        await _handle_compile(
+            _FakeCall(
+                hass,
+                {"device_id": ["dev-1"], "tags": ["office"]},
+            )
+        )
+    _, payload = post.call_args.args
+    assert payload == {"targets": ["specific.yaml"]}
+
+
+async def test_validate_service_resolves_single_tag_match() -> None:
+    hass, post = _hass_with_coordinator(_TAG_TARGETS)
+    await _handle_validate(_FakeCall(hass, {"tags": ["kitchen"]}))
+    _, payload = post.call_args.args
+    assert payload == {"target": "kitchen.yaml"}
+
+
+async def test_validate_service_tags_multi_match_raises() -> None:
+    from homeassistant.exceptions import HomeAssistantError
+
+    hass, _ = _hass_with_coordinator(_TAG_TARGETS)
+    with pytest.raises(HomeAssistantError) as excinfo:
+        await _handle_validate(_FakeCall(hass, {"tags": ["office"]}))
+    assert excinfo.value.translation_key == "tags_match_multiple"
+
+
+async def test_validate_service_tags_zero_match_raises() -> None:
+    from homeassistant.exceptions import HomeAssistantError
+
+    hass, _ = _hass_with_coordinator(_TAG_TARGETS)
+    with pytest.raises(HomeAssistantError) as excinfo:
+        await _handle_validate(_FakeCall(hass, {"tags": ["nonexistent"]}))
+    assert excinfo.value.translation_key == "no_targets_match_tags"
+
+
+def test_compile_schema_accepts_tags_and_op() -> None:
+    COMPILE_SCHEMA({"tags": ["office", "production"], "tags_op": "all_of"})
+    COMPILE_SCHEMA({"tags": ["office"]})  # tags_op defaults at handler level
+
+
+def test_compile_schema_rejects_unknown_tags_op() -> None:
+    import pytest
+    with pytest.raises(vol.Invalid):
+        COMPILE_SCHEMA({"tags": ["x"], "tags_op": "weird_op"})
+
+
+def test_validate_schema_accepts_tags() -> None:
+    VALIDATE_SCHEMA({"tags": ["office"], "tags_op": "any_of"})

@@ -19,6 +19,7 @@ All hosts below are reachable over SSH with friendly aliases configured in `~/.s
 | `docker-pve` | Ubuntu + Docker host running on `pve`. Standalone-Docker (non-HAOS) server/worker test target. |
 | `optiplex-5` | Second Proxmox hypervisor. |
 | `docker-optiplex-5` | Ubuntu + Docker host running on `optiplex-5`. Second standalone-Docker target — lets us exercise server-on-one-host / worker-on-another topologies on the standalone path. |
+| `haos-pve` | Throwaway HAOS VM at `192.168.226.135` (SSH on port 22). SSH is provided by the Advanced SSH & Web Terminal add-on (`a0d7b954_ssh`), installed by `scripts/haos/onboard.sh` — which authorizes the public keys in `~/.config/distributed-esphome/haos-authorized-keys` and pins the addon's host port to 22. SSH lands you inside the add-on container, not on HAOS itself; from there `ha …` and `docker exec …` reach the rest of the system. |
 
 ## SSH
 
@@ -37,6 +38,8 @@ ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes <alias> ...
 ```
 
 `id_ed25519`'s public key (`SHA256:szoIC2jm7xpjuJAXFuzd0NwFwEfwuhQGd1x236sOrr0 stefan@m3pro-6.local`) is the one authorized in `~root/.ssh/authorized_keys` on every host above. After that, any `ssh <alias>` / `scp` / `rsync` against the hosts above works passwordless. The end-of-turn log tail (`ssh root@hass-4.local "ha addons logs local_esphome_dist_server"`) and `./push-to-hass-4.sh` both depend on this.
+
+Additional dev laptops (e.g. the AI MacBook) keep their own `id_ed25519`. Their public keys are appended to each host's `authorized_keys`. The canonical list for HAOS VMs lives in `~/.config/distributed-esphome/haos-authorized-keys` on the laptop running `scripts/haos/onboard.sh` — that file is what the script feeds into the Advanced SSH add-on. To authorize a new laptop on a fresh `haos-pve`, drop the new public key into that file before running onboard.
 
 ## Lab add-on bearer token
 

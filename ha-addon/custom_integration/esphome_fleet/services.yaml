@@ -42,6 +42,31 @@ compile:
         Leave empty when using the device picker.
       selector:
         object:
+    tags:
+      name: Tags (alternative)
+      description: >
+        Compile every managed device matching this tag expression —
+        useful for "compile every kitchen device" automations. List
+        of tag strings (e.g. ['office', 'production']). Combined with
+        `tags_op` below. Mutually exclusive with the device picker
+        and `targets` (device picker wins, then `tags`, then `targets`).
+      example: "['office']"
+      selector:
+        object:
+    tags_op:
+      name: Tag match
+      description: >
+        How to combine the entries in `tags`. `any_of` matches devices
+        with at least one of the listed tags (default). `all_of`
+        requires every tag. `none_of` matches devices that carry none
+        of the listed tags.
+      default: any_of
+      selector:
+        select:
+          options:
+            - any_of
+            - all_of
+            - none_of
     esphome_version:
       name: ESPHome version
       description: >
@@ -75,3 +100,24 @@ validate:
         Leave empty when using the device picker.
       selector:
         text:
+    tags:
+      name: Tags (alternative)
+      description: >
+        Resolve the validate target via a tag expression instead of
+        picking a device or filename. The expression must match a
+        single device — multi-match is rejected (validate is single-
+        target by API contract).
+      example: "['cyd-office-info']"
+      selector:
+        object:
+    tags_op:
+      name: Tag match
+      description: >
+        How to combine the entries in `tags`. Defaults to `any_of`.
+      default: any_of
+      selector:
+        select:
+          options:
+            - any_of
+            - all_of
+            - none_of

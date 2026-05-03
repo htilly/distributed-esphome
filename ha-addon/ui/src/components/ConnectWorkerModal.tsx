@@ -11,6 +11,7 @@ import { ButtonGroup } from './ui/button-group';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Select } from './ui/select';
+import { TagChipInput } from './ui/tag-chip-input';
 
 interface Props {
   serverInfo: ServerInfo;
@@ -18,6 +19,9 @@ interface Props {
   onClose: () => void;
   /** Pre-populate fields when reconnecting an existing worker (bug #7). */
   preset?: WorkerPreset | null;
+  /** Bug #25: fleet-wide tag pool for the Tags field's autocomplete
+   *  dropdown. Same pool the Devices/Workers tabs feed into TagsEditDialog. */
+  tagSuggestions?: string[];
 }
 
 // UX.10: supported output formats in the Connect Worker modal. `compose`
@@ -35,13 +39,17 @@ function buildDockerCmd(params: {
   maxJobs: number;
   seedVersion: string;
   hostPlatform: string;
+  /** TG.7: comma-joined tag list (already trimmed/deduped by the form). */
+  tags: string;
+  /** DQ.10: integer GiB; ``null`` means "use fleet default" (no env var emitted). */
+  diskQuotaGb: number | null;
   restartPolicy: string;
   clientTag: string;
   format: Format;
 }): string {
   const {
     serverUrl, token, containerName, hostname, maxJobs,
-    seedVersion, hostPlatform, restartPolicy, clientTag, format,
+    seedVersion, hostPlatform, tags, diskQuotaGb, restartPolicy, clientTag, format,
   } = params;
 
   if (format === 'compose') {
@@ -53,6 +61,16 @@ function buildDockerCmd(params: {
     if (hostname) envLines.push(`      - HOSTNAME=${hostname}`);
     if (seedVersion) envLines.push(`      - ESPHOME_SEED_VERSION=${seedVersion}`);
     if (hostPlatform) envLines.push(`      - HOST_PLATFORM=${hostPlatform}`);
+    // TG.7: WORKER_TAGS only emitted when the user typed at least one
+    // tag — keeps the docker invocation clean for users who don't care
+    // about routing yet.
+    if (tags) envLines.push(`      - WORKER_TAGS=${tags}`);
+    // DQ.10: WORKER_DISK_QUOTA_GB only emitted when the user picked
+    // "custom" — default mode lets the worker inherit the fleet default
+    // (the server pushes the effective value on every heartbeat).
+    if (diskQuotaGb !== null) {
+      envLines.push(`      - WORKER_DISK_QUOTA_GB=${diskQuotaGb}`);
+    }
     const yaml = [
       'name: esphome-fleet-worker',
       '',
@@ -96,6 +114,12 @@ function buildDockerCmd(params: {
   if (hostPlatform) {
     lines.push(`  -e HOST_PLATFORM=${JSON.stringify(hostPlatform)} ${cont}`);
   }
+  if (tags) {
+    lines.push(`  -e WORKER_TAGS=${tags} ${cont}`);
+  }
+  if (diskQuotaGb !== null) {
+    lines.push(`  -e WORKER_DISK_QUOTA_GB=${diskQuotaGb} ${cont}`);
+  }
   lines.push(`  -v esphome-versions:/esphome-versions ${cont}`);
   lines.push(`  ghcr.io/weirded/esphome-dist-client:${clientTag}`);
 
@@ -113,6 +137,15 @@ interface FormState {
   maxJobs: number;
   seedVersion: string;
   hostPlatform: string;
+  /** TG.7: comma-separated WORKER_TAGS. The server normalises (trim /
+   *  drop empties / dedupe) on registration; the docker command emits
+   *  the field verbatim so the user can paste this into `.env` later. */
+  tags: string;
+  /** DQ.10: 'default' inherits the fleet default; 'custom' bakes a
+   *  ``WORKER_DISK_QUOTA_GB`` env var into the docker invocation. */
+  diskQuotaMode: 'default' | 'custom';
+  /** DQ.10: integer GiB; only consulted when diskQuotaMode === 'custom'. */
+  diskQuotaGb: number;
   restartPolicy: string;
   // UX.10: renamed from `shell` to cover the new `compose` output too.
   format: Format;
@@ -131,7 +164,7 @@ function formReducer(state: FormState, action: FormAction): FormState {
   }
 }
 
-export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset }: Props) {
+export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset, tagSuggestions = [] }: Props) {
   const port = serverInfo.port || 8765;
   const addrs = serverInfo.server_addresses?.length
     ? serverInfo.server_addresses
@@ -151,6 +184,9 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
     maxJobs: preset?.max_parallel_jobs ?? 2,
     seedVersion: esphomeVersion || '',
     hostPlatform: preset?.host_platform ?? '',
+    tags: '',
+    diskQuotaMode: 'default',
+    diskQuotaGb: 10,
     restartPolicy: 'unless-stopped',
     format: 'bash',
   });
@@ -159,7 +195,7 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
 
   // Convenience aliases so JSX stays readable.
   const { serverUrl, containerName, hostname, maxJobs, seedVersion,
-    hostPlatform, restartPolicy, format } = form;
+    hostPlatform, tags, diskQuotaMode, diskQuotaGb, restartPolicy, format } = form;
   const set = <K extends keyof FormState>(field: K, value: FormState[K]) =>
     dispatch({ type: 'set', field, value });
 
@@ -179,6 +215,10 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
   }, [serverInfo.server_addresses, serverInfo.server_ip, serverInfo.port]);
 
   const clientTag = serverInfo.addon_version || 'latest';
+  const fleetDefaultGb = serverInfo.default_worker_disk_quota_bytes
+    ? Math.round(serverInfo.default_worker_disk_quota_bytes / (1024 ** 3))
+    : 10;
+  const effectiveDiskQuotaGb = diskQuotaMode === 'custom' ? diskQuotaGb : null;
   const dockerCmd = buildDockerCmd({
     serverUrl,
     token: serverInfo.token || '',
@@ -187,6 +227,8 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
     maxJobs,
     seedVersion,
     hostPlatform,
+    tags,
+    diskQuotaGb: effectiveDiskQuotaGb,
     restartPolicy,
     clientTag,
     format,
@@ -280,6 +322,62 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
                 placeholder="e.g. macOS 15.3 (Apple M1 Pro)"
                 onChange={e => set('hostPlatform', e.target.value)}
               />
+            </div>
+            {/* TG.7: WORKER_TAGS — chip-input editor (bug #25) with
+                fleet-wide autocomplete; serialised to a comma-joined
+                string for the docker invocation. Only the *first*
+                registration seeds the server-side store; later edits
+                live in the Workers tab Tags column. */}
+            <div>
+              <Label>
+                Tags{' '}
+                <span className="text-[var(--text-muted)] font-normal normal-case">(optional)</span>
+              </Label>
+              <TagChipInput
+                tags={tags ? tags.split(',').map(s => s.trim()).filter(Boolean) : []}
+                onChange={(next) => set('tags', next.join(','))}
+                suggestions={tagSuggestions}
+                placeholder="e.g. linux, fast, prod"
+              />
+            </div>
+            {/* DQ.10: Disk quota — default radio inherits the fleet default
+                (server pushes effective value via heartbeat); custom radio
+                bakes WORKER_DISK_QUOTA_GB into the docker invocation. */}
+            <div>
+              <Label>Disk Quota</Label>
+              <div className="flex items-center gap-3 flex-wrap">
+                <label className="flex items-center gap-1.5 text-sm">
+                  <input
+                    type="radio"
+                    name="disk-quota-mode"
+                    value="default"
+                    checked={diskQuotaMode === 'default'}
+                    onChange={() => set('diskQuotaMode', 'default')}
+                  />
+                  <span>Use fleet default ({fleetDefaultGb} GiB)</span>
+                </label>
+                <label className="flex items-center gap-1.5 text-sm">
+                  <input
+                    type="radio"
+                    name="disk-quota-mode"
+                    value="custom"
+                    checked={diskQuotaMode === 'custom'}
+                    onChange={() => set('diskQuotaMode', 'custom')}
+                  />
+                  <span>Custom</span>
+                </label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={1024}
+                  value={diskQuotaGb}
+                  disabled={diskQuotaMode !== 'custom'}
+                  onChange={e => set('diskQuotaGb', Math.max(1, parseInt(e.target.value, 10) || 10))}
+                  className="w-24"
+                  aria-label="Disk quota in GiB"
+                />
+                <span className="text-sm text-[var(--text-muted)]">GiB</span>
+              </div>
             </div>
             <div>
               <Label>Restart Policy</Label>

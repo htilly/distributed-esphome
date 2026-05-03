@@ -11,6 +11,23 @@ The goal here is **what isn't automated**. Anything covered by CI, the pre-push 
 ### Claude does
 
 - [ ] **Refresh pinned deps**: `bash scripts/refresh-deps.sh`. Review the diff and commit as `chore: refresh pinned deps for X.Y.Z`.
+- [ ] **Bump pinned ESPHome version to current latest stable.** Find the latest with:
+  ```bash
+  curl -s https://pypi.org/pypi/esphome/json | jq -r '.info.version'
+  ```
+  This is the release's *"latest stable shipped"* pin — distinct from `MIN_ESPHOME_VERSION` in `ha-addon/server/constants.py`, which is the *support floor* and is only bumped when intentionally dropping old versions (a deliberate decision filed as its own workitem, not part of the per-release sweep). The runtime PyPI refresher in `ha-addon/server/main.py` (`_fetch_pypi_versions` / `pypi_version_refresher`) discovers new versions automatically at runtime, so this checklist item is only about static fallbacks/CI/test pins. Touchpoints to update:
+  - `.github/workflows/compile-test.yml` — **both** matrix blocks (`compile-client` and `compile-server`); the existing `# latest stable shipped (bump per release)` comment marks the line in the first block, and the second block must be kept in sync with it.
+  - `scripts/standalone/bootstrap-esphome.sh` — `ESPHOME_VERSION="${ESPHOME_VERSION:-X.Y.Z}"` default *and* the matching `# (default X.Y.Z — pinned to compile-test.yml)` comment in the header.
+  - `scripts/push-to-standalone.sh` — `# ESPHOME_VERSION ... (default X.Y.Z)` header comment.
+  - `tests/test_e2e_client.py` — `ESPHOME_TEST_VERSION = os.environ.get("ESPHOME_TEST_VERSION", "X.Y.Z")` default used by the real-ESPHome e2e tests.
+
+  Confirm nothing got missed:
+  ```bash
+  grep -rn "$OLD_VERSION" --exclude-dir=node_modules --exclude-dir=build --exclude-dir=.git --exclude-dir=.worktrees --exclude-dir=archive .
+  ```
+  Hits in `.github/workflows/`, `scripts/`, or `ha-addon/` runtime code are not OK — bump them. Hits in `dev-plans/archive/`, historical comments documenting old behavior (`# 2026.4.3 deprecation warning fires for...`), `ha-addon/ui/e2e/fixtures.ts` (mocked Playwright fixtures, cosmetic only), and `tests/test_*.py` mock-data version strings *are* OK to leave — they don't pin upstream behavior. When in doubt: if a Python/shell script actually shells out to `esphome` or installs a venv with this version, bump it; if it's a string label inside a mock dict, leave it.
+
+  Commit as `chore: bump pinned ESPHome to X.Y.Z`.
 - [ ] **Dependabot**: confirm no open high/critical alerts. `gh api repos/:owner/:repo/dependabot/alerts --jq '.[] | select(.state=="open" and (.security_advisory.severity=="high" or .security_advisory.severity=="critical"))'` — must be empty. If any are open, upgrade the dep or explicitly accept the risk in WORKITEMS. (`pip-audit` + `npm audit` + ruff + mypy + pytest + invariants + frontend build already gate CI.)
 - [ ] **Ensure CI is green on `develop`**: `gh run list --branch develop --limit 3`.
 - [ ] **Bump version**: `bash scripts/bump-version.sh X.Y.Z`.

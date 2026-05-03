@@ -129,16 +129,22 @@ _output_lock = threading.Lock()
 class _TeeStdout:
     def __init__(self, original: Any) -> None:
         self._orig = original
+        # Python's print() makes two write() calls per line — text first,
+        # then "\n" — so naive per-write splitlines yields a phantom "" for
+        # every line printed. Buffer the unterminated tail across writes
+        # and only emit complete lines.
+        self._partial = ""
 
     def write(self, s: str) -> int:
         n = self._orig.write(s)
         if s:
             with _output_lock:
-                # Append each full line. A trailing partial (no \n) is held
-                # under the assumption a later write completes it; keeping
-                # it simple — split on any newline and drop empty trailing.
-                for line in s.splitlines():
-                    _output_lines.append(line)
+                self._partial += s
+                if "\n" in self._partial:
+                    parts = self._partial.split("\n")
+                    self._partial = parts[-1]
+                    for line in parts[:-1]:
+                        _output_lines.append(line)
         return n
 
     def flush(self) -> None:
@@ -1035,7 +1041,13 @@ _HTML_PAGE = """<!DOCTYPE html>
     if (tab === 'all') return true;
     // Skip the leading HH:MM:SS timestamp and anchor on "[prefix".
     const m = line.match(/^\d{1,2}:\d{2}:\d{2}\s+\[([^\s\]]+)/);
-    if (!m) return false;
+    if (!m) {
+      // Lines without a [prefix] are top-level orchestrator status
+      // ("==> Web UI:", "==> All targets done") emitted via tprint().
+      // Surface them in the Build tab so it's a complete view of the
+      // build/orchestration phase, not just the ghcr poll lines.
+      return tab === 'build' && /^\d{1,2}:\d{2}:\d{2}\s+==>/.test(line);
+    }
     const prefix = m[1];
     if (tab === 'build') return MATRIX_PREFIXES.build.includes(prefix);
     return prefix === tab;

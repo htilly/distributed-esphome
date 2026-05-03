@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import subprocess
 import sys
@@ -327,6 +328,38 @@ def scan_configs(config_dir: str) -> list[str]:
     return results
 
 
+def scan_archived(config_dir: str) -> list[dict]:
+    """List archived YAML config files under ``<config_dir>/.archive/``.
+
+    DM.1: Replaces the standalone ``ArchivedDevicesList`` surface with an
+    in-tab toggle on the Devices tab. The Devices endpoint merges the
+    output of this helper into its response so the frontend can render
+    archived rows alongside active ones (display-only — the poller /
+    scheduler / routing engine / queue continue to see only active
+    targets via :func:`scan_configs`).
+
+    Returns a list of ``{filename, size, archived_at}`` dicts sorted by
+    filename. Missing directory → empty list (a fresh install with
+    nothing archived yet is not an error).
+    """
+    archive_dir = Path(config_dir) / ".archive"
+    if not archive_dir.is_dir():
+        return []
+    results: list[dict] = []
+    for f in sorted(archive_dir.iterdir()):
+        if f.suffix.lower() in (".yaml", ".yml") and f.is_file():
+            try:
+                stat = f.stat()
+            except OSError:
+                continue
+            results.append({
+                "filename": f.name,
+                "size": stat.st_size,
+                "archived_at": stat.st_mtime,
+            })
+    return results
+
+
 # Subprocess-executed inside the ESPHome venv by create_bundle(). Runs
 # validate_config + ConfigBundleCreator in a FRESH Python process and
 # writes the tar.gz to stdout. Fresh-process isolation is required
@@ -349,8 +382,24 @@ def scan_configs(config_dir: str) -> list[str]:
 # explicitly. Overhead ~1-2 seconds per bundle on a 67-target fleet
 # is fine — bundle creation is on the job-claim path, not hot.
 _BUNDLE_SUBPROCESS_SCRIPT = r"""
+import logging
 import sys
 from pathlib import Path
+
+# Bug #112: silence ESPHome's internal _LOGGER chatter — INFO
+# ("Reading configuration..."), WARNING (e.g. the false-positive
+# 2026.4.3 deprecation warning that fires for dict-of-package-strings
+# shape, fixed upstream by PR #15605), DEBUG. Bundle stderr is
+# captured by scanner.create_bundle and surfaced verbatim to the UI's
+# Queue-tab Log modal; ESPHome's status chatter clutters the error
+# message and reads as if it were the cause of an unrelated failure.
+# Our explicit stderr writes below — and Python's default exception
+# handler — still reach the captured stream, which is exactly what
+# the UI should show.
+logging.getLogger("esphome").addHandler(logging.NullHandler())
+logging.getLogger("esphome").propagate = False
+logging.getLogger("esphome").setLevel(logging.CRITICAL + 1)
+
 from esphome.core import CORE
 from esphome.yaml_util import load_yaml
 from esphome.config import validate_config
@@ -459,6 +508,35 @@ def create_bundle(config_dir: str, target: str) -> bytes:
         target, len(data),
     )
     return data
+
+
+# Bug #111: serialise concurrent bundle creations.
+# ESPHome's git.clone_or_update has no inter-process lock — when multiple
+# bundle subprocesses race for the same `<config_dir>/.esphome/<domain>/<sha8>/`
+# clone target (because two queued jobs reference the same `packages:` /
+# `external_components:` git repo with cold caches), the losers observe a
+# partial-state tree and surface a different error per validation step:
+# "Could not find components folder for source", "<file> does not exist in
+# repository", or `AssertionError` from a half-merged packages-pass. Warm
+# caches dodge it because clone_or_update short-circuits on `is_dir()`.
+# A single server-wide asyncio.Lock around the bundle subprocess dispatch
+# eliminates the race at trivial cost: bundles take 0.1–3 s each, batches
+# are infrequent.
+_BUNDLE_LOCK = asyncio.Lock()
+
+
+async def create_bundle_async(config_dir: str, target: str) -> bytes:
+    """Concurrency-safe wrapper around :func:`create_bundle`.
+
+    Serialises bundle creation across overlapping job-claim handlers so
+    ESPHome's lock-free `git.clone_or_update` never sees two writers in
+    the same destination directory. Callers must use this from the
+    job-claim path; `create_bundle` itself is left synchronous so tests
+    that don't exercise the concurrency path can call it directly.
+    """
+    loop = asyncio.get_running_loop()
+    async with _BUNDLE_LOCK:
+        return await loop.run_in_executor(None, create_bundle, config_dir, target)
 
 
 # Cache resolved configs by (target, mtime) to avoid repeated git clones
@@ -627,6 +705,88 @@ def duplicate_device(config_dir: str, source: str, new_name: str) -> str:
                     block.pop("manual_ip", None)
 
     return yaml.dump(data, Dumper=Dumper, sort_keys=False, default_flow_style=False)
+
+
+def rename_device_in_yaml(content: str, new_name: str) -> tuple[str, bool]:
+    """Rewrite the device name binding in *content*, preserving comments.
+
+    Parses *content* via ``yaml.safe_load`` to identify (a) the OLD name
+    string and (b) which top-level block holds it: ``substitutions.name``
+    is preferred (the convention used by ESPHome packages via ``${name}``);
+    a literal ``esphome.name`` is the fallback. ``${...}`` indirection
+    that doesn't resolve to a known substitution is treated as
+    not-safely-rewriteable and the function bails out with
+    ``(content, False)``.
+
+    Once the binding is found, the actual rewrite is a literal string
+    replacement on the single matching ``name:`` line — no regex on YAML
+    structure (PY-1), no `yaml.safe_dump` (which would drop comments and
+    re-flow the file). Returns ``(new_content, rewritten)``.
+
+    The caller decides what to do with ``rewritten=False``: rename can
+    still proceed at the filesystem level, but the device's internal name
+    in YAML will not match the new filename until the user edits it
+    manually. ``ui_api.rename_target`` surfaces this as a warning.
+    """
+    import yaml as _yaml  # noqa: PLC0415
+
+    try:
+        data = _yaml.safe_load(content)
+    except _yaml.YAMLError:
+        return content, False
+    if not isinstance(data, dict):
+        return content, False
+
+    subs = data.get("substitutions") if isinstance(data.get("substitutions"), dict) else None
+    target_block: str
+    old_name: str
+    if subs and isinstance(subs.get("name"), str):
+        target_block = "substitutions"
+        old_name = subs["name"]
+    else:
+        esp = data.get("esphome")
+        if not (isinstance(esp, dict) and isinstance(esp.get("name"), str)):
+            return content, False
+        existing = esp["name"]
+        if existing.startswith("${") and existing.endswith("}"):
+            return content, False  # indirection without a substitutions target — unsafe to touch
+        target_block = "esphome"
+        old_name = existing
+
+    if old_name == new_name:
+        return content, True  # nothing to change but the binding exists
+
+    lines = content.splitlines(keepends=True)
+    out: list[str] = []
+    in_block = False
+    rewritten = False
+    for line in lines:
+        if rewritten:
+            out.append(line)
+            continue
+        stripped = line.lstrip(" \t")
+        if stripped and not stripped.startswith("#"):
+            indent_len = len(line) - len(stripped)
+            if indent_len == 0 and ":" in stripped:
+                key = stripped.split(":", 1)[0].strip()
+                in_block = (key == target_block)
+                out.append(line)
+                continue
+            if in_block and stripped.startswith("name:"):
+                # Literal-value substitution on the identified line. Handle
+                # bare, single-quoted, and double-quoted forms; preserve
+                # any trailing comment by replacing only the value token.
+                for quote in ("\"", "'", ""):
+                    needle = f"name: {quote}{old_name}{quote}"
+                    if needle in line:
+                        replacement = f"name: {quote}{new_name}{quote}"
+                        out.append(line.replace(needle, replacement, 1))
+                        rewritten = True
+                        break
+                if rewritten:
+                    continue
+        out.append(line)
+    return "".join(out), rewritten
 
 
 # ---------------------------------------------------------------------------
@@ -1019,6 +1179,77 @@ def _resolve_esphome_config(config_dir: str, target: str) -> Optional[dict]:
         return None
 
 
+def get_archived_device_metadata(config_dir: str, filename: str) -> dict:
+    """Return display metadata for an archived YAML under ``.archive/``.
+
+    #203: archived rows used to come back with every attribute set to None
+    so the Devices tab couldn't show their tags / area / comment / project,
+    and the tag-filter pills lost the archived rows' tags entirely.
+    Comment-block fields (tags, pinned_version, schedule) come back via
+    :func:`read_device_meta`; YAML-literal fields (friendly_name,
+    device_name, comment, area, project_name, project_version,
+    has_web_server) come back via either the full ESPHome resolver or
+    the raw loader fallback.
+
+    #212: archived YAMLs that compose their ``esphome:`` block via
+    ``packages:`` / ``<<: !include common.yaml`` would lose their
+    friendly_name when the raw loader couldn't see through the include.
+    We attempt :func:`_resolve_esphome_config` first (which handles
+    packages + includes the same way ``esphome compile`` does) and
+    silently fall back to the raw loader when resolution fails — the
+    archive may reference deleted secrets or packages, which is fine.
+    """
+    result = _empty_metadata()
+    archived_target = f".archive/{filename}"
+    device_meta = read_device_meta(config_dir, archived_target)
+    if device_meta:
+        result["pinned_version"] = device_meta.get("pin_version")
+        result["schedule"] = device_meta.get("schedule")
+        result["schedule_enabled"] = device_meta.get("schedule_enabled", False)
+        result["schedule_last_run"] = device_meta.get("schedule_last_run")
+        result["schedule_once"] = device_meta.get("schedule_once")
+        result["tags"] = device_meta.get("tags")
+    config = _resolve_esphome_config(config_dir, archived_target)
+    if config is not None:
+        _extract_metadata(config, result)
+    if config is None or result["friendly_name"] is None or result["area"] is None:
+        raw_config = _load_raw_yaml(config_dir, archived_target)
+        if raw_config is not None:
+            _fill_missing_metadata(raw_config, result)
+    return result
+
+
+def _empty_metadata() -> dict:
+    """Default metadata shape used by :func:`get_device_metadata` and
+    :func:`get_archived_device_metadata`. Kept in one place so both paths
+    return the same keys."""
+    return {
+        "friendly_name": None,
+        "device_name": None,
+        "device_name_raw": None,
+        "comment": None,
+        "area": None,
+        "project_name": None,
+        "project_version": None,
+        "has_web_server": False,
+        "has_restart_button": False,
+        "network_type": None,
+        "network_static_ip": False,
+        "network_ipv6": False,
+        "network_ap_fallback": False,
+        "network_matter": False,
+        "esp_type": None,
+        "board": None,
+        "bluetooth_proxy": "off",
+        "pinned_version": None,
+        "schedule": None,
+        "schedule_enabled": False,
+        "schedule_last_run": None,
+        "schedule_once": None,
+        "tags": None,
+    }
+
+
 def get_device_metadata(config_dir: str, target: str) -> dict:
     """Return display metadata from a YAML config file.
 
@@ -1054,6 +1285,17 @@ def get_device_metadata(config_dir: str, target: str) -> dict:
         "network_ipv6": False,       # top-level network.enable_ipv6 is true
         "network_ap_fallback": False,  # wifi.ap block configured
         "network_matter": False,     # matter: block present OR openthread: present
+        # Bug #23: chip family + bluetooth proxy state surfaced as Devices-tab
+        # columns so operators can scan a fleet for "which devices are ESP32-S3"
+        # or "which devices are passive BLE proxies" without opening each YAML.
+        "esp_type": None,            # 'ESP32' | 'ESP32-S3' | 'ESP8266' | 'RP2040' | ... | None
+        # UD.5: PlatformIO board string from inside the chip block (e.g.
+        # ``esp32: { board: esp32dev }`` → "esp32dev"). Surfaced as a
+        # secondary line under the chip family on the Devices-tab Platform
+        # column so the user can distinguish "ESP32 esp32dev" from
+        # "ESP32 nodemcu_32s" without opening the YAML.
+        "board": None,               # PlatformIO board string, or None
+        "bluetooth_proxy": "off",    # 'off' | 'passive' | 'active'
         # Per-device metadata from the # esphome-fleet: comment block.
         "pinned_version": None,      # pin_version from comment block
         "schedule": None,            # cron expression (5-field)
@@ -1101,7 +1343,15 @@ def _extract_metadata(config: dict, result: dict) -> None:
         comment = esphome_block.get("comment")
         if comment:
             result["comment"] = str(comment)
+        # Bug #18: ESPHome accepts ``area: "Living Room"`` (string) and the
+        # newer ``area: {name: "Living Room", id: "...", ...}`` (dict). The
+        # naive ``str(area)`` on a dict serialises Python's repr (``{'name':
+        # 'Living Room', ...}``) into the cell, which surfaces as a
+        # JSON-looking blob in the Devices tab. Normalise both shapes to the
+        # plain area name string.
         area = esphome_block.get("area")
+        if isinstance(area, dict):
+            area = area.get("name") or area.get("id")
         if area:
             result["area"] = str(area)
         project = esphome_block.get("project")
@@ -1178,6 +1428,62 @@ def _extract_metadata(config: dict, result: dict) -> None:
     if isinstance(config.get("matter"), dict) or blocks["openthread"]:
         result["network_matter"] = True
 
+    # Bug #23: ESP chip type. ESPHome accepts ``esp32:`` / ``esp8266:``
+    # blocks, plus the newer ``rp2040:`` (Pico) and ``host:`` (test
+    # platform). Within ``esp32:``, ``variant:`` distinguishes
+    # ESP32-S2/S3/C3/C6/H2 from the original ESP32 — surface it as
+    # "ESP32-S3" rather than ESPHome's bare "ESP32S3" so the cell reads
+    # the same as Espressif's product names. ``board:`` could narrow
+    # further (e.g. "esp32dev" vs "esp32-c3-devkitm-1") but board
+    # strings are noisy; the chip family is the level the user cares
+    # about for fleet-scale scanning.
+    if isinstance(config.get("esp32"), dict):
+        variant = config["esp32"].get("variant")
+        if variant:
+            v = str(variant).upper()
+            if v.startswith("ESP32") and len(v) > 5:
+                v = "ESP32-" + v[5:]
+            result["esp_type"] = v
+        else:
+            result["esp_type"] = "ESP32"
+        # UD.5: PlatformIO board lives inside the chip block. Esphome's
+        # ``board:`` field can also live at the top level for some
+        # frameworks, but the canonical post-resolve location is here.
+        board = config["esp32"].get("board")
+        if board:
+            result["board"] = str(board)
+    elif "esp8266" in config:
+        result["esp_type"] = "ESP8266"
+        if isinstance(config.get("esp8266"), dict):
+            board = config["esp8266"].get("board")
+            if board:
+                result["board"] = str(board)
+    elif isinstance(config.get("rp2040"), dict):
+        result["esp_type"] = "RP2040"
+        board = config["rp2040"].get("board")
+        if board:
+            result["board"] = str(board)
+    elif "host" in config:
+        # Host platform has no board — it's a virtual platform for
+        # tests / CI runs against the developer's machine.
+        result["esp_type"] = "Host"
+
+    # Bug #23: ``bluetooth_proxy:`` state. The block being absent means
+    # the device is NOT acting as a BLE proxy. Present-but-empty (the
+    # YAML literal ``bluetooth_proxy:`` with no value parses as None,
+    # which still enables the component) means passive — it forwards
+    # advertisements to HA but can't open BLE connections. ``active:
+    # true`` upgrades to active proxying (HA can read GATT services
+    # through the device). Test for KEY presence, not truthiness, so a
+    # bare ``bluetooth_proxy:`` line still flips passive on (#74 same
+    # pattern as web_server detection).
+    if "bluetooth_proxy" in config:
+        bt_block = config["bluetooth_proxy"]
+        if isinstance(bt_block, dict) and bt_block.get("active") is True:
+            result["bluetooth_proxy"] = "active"
+        else:
+            result["bluetooth_proxy"] = "passive"
+
 
 def _is_literal(value: str) -> bool:
     """Return True if value is a literal string (no unresolved ${substitutions})."""
@@ -1249,7 +1555,11 @@ def _fill_missing_metadata(raw_config: dict, result: dict) -> None:
         if result["comment"] is None:
             result["comment"] = _resolve(esphome_block.get("comment") or "")
         if result["area"] is None:
-            result["area"] = _resolve(esphome_block.get("area") or "")
+            # Bug #18: handle both string and {name, id, ...} dict forms.
+            raw_area = esphome_block.get("area")
+            if isinstance(raw_area, dict):
+                raw_area = raw_area.get("name") or raw_area.get("id") or ""
+            result["area"] = _resolve(raw_area or "")
         if result["project_name"] is None:
             project = esphome_block.get("project")
             if isinstance(project, dict):

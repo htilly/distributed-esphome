@@ -314,20 +314,28 @@ async def timeout_checker(app: web.Application) -> None:
             logger.exception("Error in timeout checker")
 
 
-async def firmware_budget_enforcer(app: web.Application) -> None:
-    """Bug #38: evict oldest firmware binaries when over
-    ``firmware_cache_max_gb`` Settings budget.
+async def firmware_retention_enforcer(app: web.Application) -> None:
+    """Bug #198 (extending #38): evict firmware binaries on age first,
+    then on disk-budget pressure.
+
+    Two passes per tick:
+
+    1. **Time-based retention** — delete every `.bin` whose mtime is
+       older than ``firmware_retention_days`` (default 2). Live-queue
+       jobs are protected; *history-protected binaries are NOT exempt*
+       (a successful compile from last week shouldn't pin a binary on
+       disk for a year just because the history row still exists).
+    2. **Budget-based eviction (#38)** — if on-disk usage still exceeds
+       ``firmware_cache_max_gb``, evict oldest-mtime first. Both live
+       queue and history-protected binaries are kept here; this pass
+       is a hard ceiling against catastrophic growth between retention
+       ticks.
 
     First tick 90 s after startup (lets reconcile_orphans run first
-    and the queue settle), then every 30 min. Protected set unions
-    the live-queue IDs with the download-only successes still in
-    history — #38's contract is that download-only binaries survive
-    queue coalescing + user Clear, so by the first budget tick the
-    live queue no longer contains them. PR #64 review: pre-fix we
-    only protected ``queue.get_all()``, which silently evicted
-    downloads older than 30 minutes.
-
-    No-op when the budget Setting resolves to ``<= 0`` (unlimited).
+    and the queue settle), then every 30 min. PR #64 review: pre-fix
+    we only protected ``queue.get_all()``, which silently evicted
+    downloads older than 30 minutes — fixed by unioning with history
+    rows whose binary is still on disk for the budget pass.
     """
     queue = app.get("queue")
     if queue is None:
@@ -338,20 +346,40 @@ async def firmware_budget_enforcer(app: web.Application) -> None:
         first = False
         try:
             from settings import get_settings  # noqa: PLC0415
-            from firmware_storage import enforce_budget  # noqa: PLC0415
-            gb = float(getattr(get_settings(), "firmware_cache_max_gb", 0.0) or 0.0)
-            max_bytes = int(gb * 1024 * 1024 * 1024)
-            if max_bytes <= 0:
-                continue
-            protected: set[str] = {
+            from firmware_storage import enforce_budget, enforce_retention  # noqa: PLC0415
+            settings = get_settings()
+            # Live-queue jobs are protected from both passes.
+            queue_protected: set[str] = {
                 job.id for job in queue.get_all()
                 if getattr(job, "has_firmware", False)
             }
-            # Union with history rows whose binary is still on disk.
-            # Bug #9 (1.6.1): every successful compile now has an
-            # archived binary, so the protection isn't limited to
-            # ``download_only`` rows anymore. The budget enforcer itself
-            # drives LRU eviction when disk pressure exceeds the limit.
+
+            # ---- Pass 1: time-based retention (#198) ------------------
+            # Only the live-queue is protected here; we deliberately
+            # evict history-protected binaries when they fall out of
+            # the retention window so the disk doesn't accumulate a
+            # year of unused .bins. Setting <= 0 disables this pass.
+            retention_days = int(getattr(settings, "firmware_retention_days", 0) or 0)
+            if retention_days > 0:
+                evicted = enforce_retention(
+                    max_age_seconds=retention_days * 86400,
+                    protected_job_ids=queue_protected,
+                )
+                if evicted:
+                    logger.info(
+                        "Firmware retention enforcer: evicted %d file(s) older than %d day(s)",
+                        evicted, retention_days,
+                    )
+
+            # ---- Pass 2: budget hard-ceiling (#38) --------------------
+            gb = float(getattr(settings, "firmware_cache_max_gb", 0.0) or 0.0)
+            max_bytes = int(gb * 1024 * 1024 * 1024)
+            if max_bytes <= 0:
+                continue
+            # Budget pass also protects history-row binaries — bug #9
+            # (1.6.1) made every successful compile keep an archived
+            # binary, so we LRU-evict only when disk pressure forces it.
+            protected = set(queue_protected)
             history = app.get("job_history")
             if history is not None:
                 try:
@@ -379,7 +407,7 @@ async def firmware_budget_enforcer(app: web.Application) -> None:
                     deleted, gb,
                 )
         except Exception:
-            logger.exception("Error in firmware_budget_enforcer loop")
+            logger.exception("Error in firmware_retention_enforcer loop")
 
 
 async def job_history_retention(app: web.Application) -> None:
@@ -400,12 +428,17 @@ async def job_history_retention(app: web.Application) -> None:
         first = False
         try:
             from settings import get_settings  # noqa: PLC0415
+            from firmware_storage import delete_firmware  # noqa: PLC0415
             days = int(getattr(get_settings(), "job_history_retention_days", 0) or 0)
-            deleted = history.evict_older_than(days)
-            if deleted:
+            evicted_ids = history.evict_older_than(days)
+            if evicted_ids:
+                # Bug #198: free the firmware `.bin` in the same tick the
+                # row goes — pre-fix, the binary lingered until the next
+                # add-on restart's reconcile_orphans sweep.
+                bin_freed = sum(1 for jid in evicted_ids if delete_firmware(jid))
                 logger.info(
-                    "Job-history retention: evicted %d row(s) older than %d day(s)",
-                    deleted, days,
+                    "Job-history retention: evicted %d row(s) older than %d day(s) (freed %d firmware `.bin`)",
+                    len(evicted_ids), days, bin_freed,
                 )
         except Exception:
             logger.exception("Error in job_history_retention loop")
@@ -1465,6 +1498,30 @@ def create_app() -> web.Application:
     from diagnostics import DiagnosticsBroker  # noqa: PLC0415
     app["diagnostics_broker"] = DiagnosticsBroker()
 
+    # TG.1: persistent worker-tag store. Keyed by worker identity (hostname,
+    # falling back to client_id). First registration seeds from the worker's
+    # WORKER_TAGS env; later registrations are server-side-wins so a UI tag
+    # edit isn't clobbered by a worker restart.
+    from worker_tags import WorkerTagStore  # noqa: PLC0415
+    app["worker_tag_store"] = WorkerTagStore(path="/data/worker-tags.json")
+
+    # DQ.2: persistent per-worker disk-quota override store. Same identity
+    # scheme as worker_tag_store. None = inherit fleet default
+    # (AppSettings.default_worker_disk_quota_bytes). The server pushes the
+    # effective value to each worker on every heartbeat so a UI edit
+    # propagates within one heartbeat tick without a worker restart.
+    from worker_disk_quotas import WorkerDiskQuotaStore  # noqa: PLC0415
+    app["worker_disk_quota_store"] = WorkerDiskQuotaStore(
+        path="/data/worker-disk-quotas.json",
+    )
+
+    # TG.2: routing-rule store. JSON-backed list of "when device matches X,
+    # worker must match Y" rules. The eligibility evaluator uses this list
+    # at job-claim time; TG.4's REST endpoints (create/update/delete) and
+    # TG.8's UI editor mutate it.
+    from routing import RoutingRuleStore  # noqa: PLC0415
+    app["routing_rule_store"] = RoutingRuleStore(path="/data/routing-rules.json")
+
     # Register routes
     app.router.add_routes(api_module.routes)
     app.router.add_routes(ui_api_module.routes)
@@ -1615,11 +1672,19 @@ def create_app() -> web.Application:
         # JH.3: nightly job-history retention task. Reads the Settings
         # value live each tick so drawer edits take effect next run.
         app["job_history_retention_task"] = asyncio.create_task(job_history_retention(app))
-        # Bug #38: firmware disk-budget enforcer. Complements
-        # reconcile_orphans at startup — this one runs periodically
-        # while the server is up so download-only binaries saved days
-        # ago get evicted when they fall out of budget.
-        app["firmware_budget_task"] = asyncio.create_task(firmware_budget_enforcer(app))
+        # Bug #38 + #198: firmware retention + disk-budget enforcer.
+        # Complements reconcile_orphans at startup — this one runs
+        # periodically while the server is up so binaries get evicted
+        # by age (#198, default 2 days) and as a hard ceiling on
+        # ``firmware_cache_max_gb`` (#38).
+        app["firmware_retention_task"] = asyncio.create_task(firmware_retention_enforcer(app))
+
+        # TG.3: defensive 30-s routing-rule watchdog. Backstop against
+        # missed explicit triggers (registry mutations, rule CRUD,
+        # enqueue) — when those fire correctly this sees zero state
+        # changes and stays quiet.
+        from routing_eligibility import routing_watchdog  # noqa: PLC0415
+        app["routing_watchdog_task"] = asyncio.create_task(routing_watchdog(app))
 
         # #87: APScheduler replaces the DIY schedule_checker
         import scheduler as scheduler_module  # noqa: PLC0415
@@ -1695,7 +1760,7 @@ def create_app() -> web.Application:
                 proc.kill()
             logger.info("Local worker stopped")
 
-        for task_name in ("timeout_checker_task", "config_scanner_task", "pypi_version_refresher_task", "ha_entity_poller_task", "esphome_install_task", "job_history_retention_task", "firmware_budget_task"):
+        for task_name in ("timeout_checker_task", "config_scanner_task", "pypi_version_refresher_task", "ha_entity_poller_task", "esphome_install_task", "job_history_retention_task", "firmware_retention_task"):
             task = app.get(task_name)
             if task:
                 task.cancel()

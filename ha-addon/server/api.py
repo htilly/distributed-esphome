@@ -35,7 +35,7 @@ from protocol import (
     WorkerDiagnosticsUpload,
     WorkerLogAppend,
 )
-from scanner import create_bundle, get_esphome_version
+from scanner import create_bundle_async, get_esphome_version
 
 # Worker code bundled inside this container
 _CLIENT_CODE_DIR = Path("/app/client")
@@ -137,6 +137,36 @@ async def _register_worker_handler(request: web.Request) -> web.Response:
     max_parallel_jobs = clamp(msg.max_parallel_jobs, 0, 32)
     system_info_dict = msg.system_info.model_dump(exclude_none=True) if msg.system_info else None
 
+    # TG.1: resolve tags through the persistent store. Identity is the worker's
+    # hostname (the spec's primary key), falling back to its persistent client_id
+    # when two workers happen to share a hostname. The first registration for an
+    # identity seeds from the worker's WORKER_TAGS env; subsequent ones are
+    # server-side-wins unless the worker also set WORKER_TAGS_OVERWRITE=1.
+    identity = msg.hostname or msg.client_id or ""
+    tag_store = request.app.get("worker_tag_store")
+    if tag_store is not None:
+        resolved_tags: Optional[list[str]] = tag_store.load_or_seed(
+            identity, msg.tags, overwrite=msg.overwrite_tags,
+        )
+    else:
+        # Test rigs that don't construct a tag store still get the in-memory
+        # echo of whatever the worker sent — preserves prior test contracts
+        # for code paths that don't care about persistence.
+        resolved_tags = list(msg.tags) if msg.tags is not None else None
+
+    # DQ.4: resolve the per-worker disk-quota override the same way as tags.
+    # First registration seeds from RegisterRequest.disk_quota_bytes (the value
+    # baked into ``-e WORKER_DISK_QUOTA_GB=N`` on the docker run command).
+    # Later registrations are always server-side-wins (no overwrite flag —
+    # there's no scripted-multi-worker use case here yet).
+    quota_store = request.app.get("worker_disk_quota_store")
+    if quota_store is not None:
+        resolved_quota: Optional[int] = quota_store.load_or_seed(
+            identity, msg.disk_quota_bytes,
+        )
+    else:
+        resolved_quota = msg.disk_quota_bytes
+
     registry = request.app["registry"]
     client_id = registry.register(
         msg.hostname,
@@ -146,7 +176,14 @@ async def _register_worker_handler(request: web.Request) -> web.Response:
         max_parallel_jobs,
         system_info_dict,
         image_version=msg.image_version,
+        tags=resolved_tags,
+        disk_quota_bytes=resolved_quota,
     )
+    # TG.3: a new worker (or one re-registering with different tags)
+    # may unblock or newly-block PENDING jobs. Fire-and-forget — the
+    # registration response shouldn't wait on the sweep.
+    from routing_eligibility import fire_and_forget  # noqa: PLC0415
+    fire_and_forget(request.app)
     return web.json_response(RegisterResponse(client_id=client_id).model_dump(exclude_none=True))
 
 
@@ -185,6 +222,16 @@ async def _heartbeat_handler(request: web.Request) -> web.Response:
     if worker and worker.pending_clean:
         resp.clean_build_cache = True
         worker.pending_clean = False
+
+    # DQ.4: push the effective disk quota on every heartbeat so a UI edit
+    # propagates within one tick (≤10s by default) without restarting the
+    # worker. Override (Worker.disk_quota_bytes) wins over the fleet default
+    # (AppSettings.default_worker_disk_quota_bytes); we always send a value
+    # so the worker's local cell stays in sync — never None on the wire.
+    if worker is not None:
+        from settings import get_settings as _gs  # noqa: PLC0415
+        default_quota = _gs().default_worker_disk_quota_bytes
+        resp.set_disk_quota_bytes = worker.effective_disk_quota_bytes(default_quota)
 
     # WL.2: tell the worker to start (or stop) streaming logs based on
     # whether any UI is currently watching. Explicit True/False — never
@@ -235,6 +282,9 @@ async def _deregister_handler(request: web.Request) -> web.Response:
     hostname = worker.hostname if worker else "?"
     if registry.remove(msg.client_id):
         logger.info("Worker %s [%s] deregistered (clean shutdown)", hostname, msg.client_id)
+        # TG.3: a worker leaving the pool may push PENDING jobs to BLOCKED.
+        from routing_eligibility import fire_and_forget  # noqa: PLC0415
+        fire_and_forget(request.app)
         return web.json_response(OkResponse().model_dump())
     return _protocol_error("unknown_client_id", status=404)
 
@@ -296,6 +346,12 @@ async def get_next_job(request: web.Request) -> web.Response:
     worker = registry.get(client_id)
     if worker and worker.disabled:
         return web.Response(status=204)
+    # #219: same gate for the self-imposed disk-pressure pause. The
+    # registry stamps ``health_blocked_reason`` from heartbeat; once
+    # the worker's disk drops back below the exit threshold this clears
+    # automatically and the worker resumes claiming on the next poll.
+    if worker and worker.health_blocked_reason:
+        return web.Response(status=204)
 
     worker_id_str = request.headers.get(HEADER_X_WORKER_ID, "1")
     try:
@@ -316,10 +372,44 @@ async def get_next_job(request: web.Request) -> web.Response:
     # persisted on the Job so the UI can explain the scheduling
     # decision without requiring an operator to cross-reference
     # the scheduler log.
+    # Bug #95: build a per-worker routing-rule eligibility predicate
+    # so PENDING jobs can be filtered by *this* worker's tags. Without
+    # it, claim_next only filters out BLOCKED jobs — meaning any
+    # online worker could grab a PENDING job even when only a subset
+    # of the fleet satisfies the required rule.
+    from routing_eligibility import build_claim_eligibility  # noqa: PLC0415
+    worker_tags_list = list(worker.tags or []) if worker else []
+    is_eligible_for = build_claim_eligibility(request.app, worker_tags_list)
+
+    # Bug #95-followup: the scheduler must also know about routing
+    # eligibility when deciding whether to defer to a "faster" worker.
+    # The PENDING jobs *we* are eligible for, ignoring pinning, drive
+    # the deferral check below — if no other worker is eligible for
+    # any of them, deferring would just strand the job (the original
+    # symptom: ratgdo job stayed PENDING because OPTIPLEX-7 deferred
+    # to higher-score macos workers that the windows-only rule
+    # disqualified).
+    my_eligible_pending = [
+        j for j in queue.get_all()
+        if j.state == JobState.PENDING
+        and not j.is_followup
+        and (not j.pinned_client_id or j.pinned_client_id == client_id)
+        and is_eligible_for(j)
+    ]
+
     should_defer = False
     # Count other candidate workers so we can pick the most informative
     # reason when we don't defer.
     other_candidate_count = 0
+    # Bug #99: count *eligible* other candidates — workers that are
+    # eligible-by-tag for at least one of the same PENDING jobs we are.
+    # Bug #210: this count must be busy-independent so we don't
+    # misattribute "all other workers were fully booked" as
+    # ``only_eligible_worker``. ``eligible_other_count_any`` tracks
+    # tag-eligibility regardless of free slots; ``eligible_other_free_count``
+    # adds the busy filter and drives the deferral logic below.
+    eligible_other_count_any = 0
+    eligible_other_free_count = 0
     defer_beats_me_on_jobs = False
     defer_beats_me_on_perf = False
     if worker:
@@ -341,6 +431,11 @@ async def get_next_job(request: web.Request) -> web.Response:
                 continue
             if other.disabled or not registry.is_online(other.client_id, cfg_threshold):
                 continue
+            # #219: a disk-blocked worker won't claim, so deferring to it
+            # would just strand the job. Skip it from the candidate pool
+            # the same way an offline/disabled worker is skipped.
+            if other.health_blocked_reason:
+                continue
             other_candidate_count += 1
             other_active = active_jobs_by_worker.get(other.client_id, 0)
             other_info = other.system_info or {}
@@ -348,8 +443,26 @@ async def get_next_job(request: web.Request) -> web.Response:
             other_cpu = other_info.get("cpu_usage")
             other_effective = other_perf * (1 - (other_cpu or 0) / 100)
             other_free = other_active < other.max_parallel_jobs
+            # Bug #98 / #99 / #210: tag-eligibility is computed BEFORE
+            # the busy-skip so the reason hint can distinguish "rules
+            # narrowed the field" from "others are eligible but busy".
+            # Bug #98 (deferral loop) still gates on free-AND-eligible.
+            if my_eligible_pending:
+                other_check = build_claim_eligibility(request.app, list(other.tags or []))
+                is_other_eligible = any(
+                    other_check(j)
+                    and (not j.pinned_client_id or j.pinned_client_id == other.client_id)
+                    for j in my_eligible_pending
+                )
+            else:
+                is_other_eligible = True
+            if is_other_eligible:
+                eligible_other_count_any += 1
             if not other_free:
-                continue  # fully busy, ignore
+                continue  # fully busy, ignore for deferral logic below
+            if not is_other_eligible:
+                continue  # eligible-but-ineligible-for-our-jobs — skip deferral
+            eligible_other_free_count += 1
             # Rule 1: another worker has fewer jobs — let them catch up
             if other_active < my_active:
                 should_defer = True
@@ -370,6 +483,14 @@ async def get_next_job(request: web.Request) -> web.Response:
     # job (returns None if nothing matches).
     if other_candidate_count == 0:
         selection_reason_hint = "only_online_worker"
+    elif eligible_other_count_any == 0 and my_eligible_pending:
+        # Bug #99: other workers are online, but the routing rules
+        # disqualified all of them for the jobs in our queue. The
+        # reason isn't "first to poll" — it's "rule narrowed to me".
+        # Bug #210: count is busy-independent so a fleet where every
+        # other worker is eligible-but-fully-booked falls through to
+        # ``first_available`` rather than misreporting as ``only_eligible``.
+        selection_reason_hint = "only_eligible_worker"
     elif defer_beats_me_on_jobs:
         selection_reason_hint = "fewer_jobs_than_others"
     elif defer_beats_me_on_perf:
@@ -379,7 +500,8 @@ async def get_next_job(request: web.Request) -> web.Response:
 
     job = await queue.claim_next(client_id, worker_id, hostname=hostname,
                                   faster_idle_worker_exists=should_defer,
-                                  selection_reason_hint=selection_reason_hint)
+                                  selection_reason_hint=selection_reason_hint,
+                                  is_eligible=is_eligible_for)
     if job is None:
         return web.Response(status=204)
 
@@ -388,11 +510,12 @@ async def get_next_job(request: web.Request) -> web.Response:
     # ESPHome's ConfigBundleCreator. Runs off the event loop because
     # bundling re-parses YAML and runs the full validator — same
     # rationale as reseed_device_poller_from_config in main.py.
+    # Bug #111: scanner.create_bundle_async serialises concurrent
+    # bundle subprocesses around an asyncio.Lock so ESPHome's
+    # git.clone_or_update never sees two writers in the same
+    # `.esphome/{packages,external_components}/<sha8>/` directory.
     try:
-        loop = asyncio.get_running_loop()
-        bundle_bytes = await loop.run_in_executor(
-            None, create_bundle, cfg.config_dir, job.target,
-        )
+        bundle_bytes = await create_bundle_async(cfg.config_dir, job.target)
         bundle_b64 = base64.b64encode(bundle_bytes).decode("ascii")
     except Exception as exc:
         # BD.1: bundle creation wraps the full ESPHome validator; most
@@ -472,7 +595,6 @@ async def submit_job_result(request: web.Request) -> web.Response:
             try:
                 # Don't block the response on the device-info round-trip;
                 # fire-and-forget on the event loop.
-                import asyncio  # noqa: PLC0415
                 asyncio.create_task(device_poller.refresh_target(job.target))
             except Exception:
                 logger.exception("Failed to schedule post-OTA device refresh for %s", job.target)

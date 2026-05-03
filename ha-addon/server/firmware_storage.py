@@ -9,9 +9,13 @@ variants — on ESP32 a compile produces both ``firmware.factory.bin``
 
 Lifecycle is coupled to the queue entry: when a job is removed from the
 queue (user Clear, bulk clear, per-target coalescing cleanup, startup
-orphan sweep), every variant binary for that job id is deleted. No
-time-based cleanup — consistent with bug #18's "users clear explicitly"
-stance.
+orphan sweep), every variant binary for that job id is deleted.
+
+Bug #198 added time-based eviction: any `.bin` whose mtime is older
+than ``firmware_retention_days`` (default 2) is also pruned by the
+periodic ``firmware_retention_enforcer`` task in main.py, even if
+the corresponding history row still exists. Live-queue jobs are
+protected from both retention and budget passes.
 
 Legacy path ``/data/firmware/{job_id}.bin`` (no variant segment) from
 pre-#69 builds is kept **read-only**: ``list_variants`` reports it as
@@ -23,6 +27,7 @@ the ``{variant}`` path.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -216,6 +221,73 @@ def reconcile_orphans(
             logger.debug("Couldn't remove orphan firmware %s", entry, exc_info=True)
     if removed:
         logger.info("Reconciled %d orphan firmware file(s) in %s", removed, r)
+    return removed
+
+
+def enforce_retention(
+    max_age_seconds: int,
+    protected_job_ids: Iterable[str] = (),
+    root: Optional[Path] = None,
+) -> int:
+    """Bug #198: delete firmware `.bin` whose mtime is older than
+    *max_age_seconds*.
+
+    Time-based companion to :func:`enforce_budget`. The budget pass
+    only fires when on-disk usage crosses the ceiling — which at
+    typical fleet activity rarely happens, so binaries accumulate
+    until something forces eviction (the next add-on restart's
+    ``reconcile_orphans`` after ``job_history`` retention prunes the
+    DB row). This pass evicts proactively on age regardless of disk
+    usage so the firmware dir stays bounded to the recent past.
+
+    Files belonging to *protected_job_ids* are never evicted (live
+    queue jobs whose binary we still owe the worker / UI). History-
+    protected binaries are *not* exempt from this pass — that's the
+    point: a successful compile from last week doesn't pin a binary
+    on disk for a year just because the history row still exists.
+    Returns the number of files deleted. ``max_age_seconds <= 0``
+    is treated as "no retention" and is a no-op.
+    """
+    if max_age_seconds <= 0:
+        return 0
+    r = _resolve_root(root)
+    try:
+        if not r.is_dir():
+            return 0
+    except Exception:
+        return 0
+    protected = set(protected_job_ids)
+    cutoff = time.time() - max_age_seconds
+    removed = 0
+    for entry in r.iterdir():
+        if not entry.is_file() or entry.suffix != ".bin":
+            continue
+        try:
+            stat = entry.stat()
+        except OSError:
+            continue
+        if stat.st_mtime >= cutoff:
+            continue
+        base = entry.name[:-len(".bin")]
+        job_id = base.split(".", 1)[0]
+        if job_id in protected:
+            continue
+        try:
+            entry.unlink()
+            removed += 1
+            logger.info(
+                "Firmware retention eviction: removed %s (mtime %.0fs old, job=%s)",
+                entry.name, time.time() - stat.st_mtime, job_id,
+            )
+        except Exception:
+            logger.debug(
+                "Firmware retention eviction failed for %s", entry, exc_info=True,
+            )
+    if removed:
+        logger.info(
+            "Firmware retention enforced: evicted %d file(s) older than %ds",
+            removed, max_age_seconds,
+        )
     return removed
 
 

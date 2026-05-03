@@ -1,5 +1,5 @@
 name: "ESPHome Fleet"
-version: "1.6.2"
+version: "1.7.0"
 slug: "esphome_dist_server"
 description: "A modern Home Assistant UI for ESPHome — git-backed config history with rollback, live compile queue, per-device version pinning, scheduled OTA, optional distributed compilation. Works whether you have 3 or 300 devices."
 url: "https://github.com/weirded/distributed-esphome"
@@ -58,6 +58,14 @@ ports_description:
 # mDNS device discovery requires host networking
 host_network: true
 
+# #206: NET_RAW lets the per-device Ping diagnostic open raw ICMP
+# sockets when the host's ``net.ipv4.ping_group_range`` is empty
+# (HAOS default ``1 0``). The ping helper tries unprivileged datagram
+# ICMP first and falls back to the raw-socket path; without the
+# capability the modal failed immediately on every HAOS install.
+privileged:
+  - NET_RAW
+
 # Supervisor API access — needed to detect ESPHome add-on version
 hassio_api: true
 # HA Core REST API access — needed to read entity states (device connectivity)
@@ -89,8 +97,14 @@ discovery:
 # GitHub #45: exclude the local worker's ESPHome version cache + build
 # artifacts from HA backups. These are large (~50-200MB per target) and
 # fully reproducible — they'll be rebuilt on first compile after restore.
+# Bug #199: also exclude /data/firmware/ — compiled .bin archives kept
+# for the History tab's Download button. ~100% of the partial-addon
+# backup payload today (237 MB on hass-4 for ~480 retained jobs); they
+# regenerate from YAML on Compile / Rerun, so a restore never blocks
+# on them. Pairs with #198's 2-day on-disk retention.
 backup_exclude:
   - esphome-versions
+  - firmware
 
 map:
   # HI.9: need write access to /config/custom_components/esphome_fleet/

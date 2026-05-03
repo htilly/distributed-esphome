@@ -40,7 +40,10 @@ export function fmtDuration(secs: number | null | undefined): string {
  */
 export function fmtEpochRelative(epoch: number | null | undefined): string {
   if (epoch == null) return '—';
-  const diff = Math.max(0, Math.floor(Date.now() / 1000) - epoch);
+  // Bug #1: floor the diff itself, not just `Date.now()/1000`. Server epochs
+  // come from `os.stat().st_mtime` which is a float, so without flooring the
+  // sub-60s bucket renders `4.327s ago` instead of `4s ago`.
+  const diff = Math.max(0, Math.floor(Date.now() / 1000 - epoch));
   if (diff === 0) return 'just now';
   if (diff < 60) return `${diff}s ago`;
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
@@ -69,11 +72,51 @@ export function setTimeFormatPref(pref: TimeFormatPref): void {
   _timeFormatPref = pref;
 }
 
+// Bug #5: date format preference. ``'auto'`` follows the browser's
+// resolved locale; the named formats force a specific shape regardless.
+// Applied alongside ``hour12`` in ``_applyHour12`` so a single
+// fmtDateTime call respects both prefs.
+export type DateFormatPref = 'auto' | 'iso' | 'us' | 'eu' | 'long';
+
+let _dateFormatPref: DateFormatPref = 'auto';
+
+export function setDateFormatPref(pref: DateFormatPref): void {
+  _dateFormatPref = pref;
+}
+
 function _applyHour12(opts: Intl.DateTimeFormatOptions): Intl.DateTimeFormatOptions {
   if (_timeFormatPref === '12h') return { ...opts, hour12: true };
   if (_timeFormatPref === '24h') return { ...opts, hour12: false };
   // 'auto' — omit hour12 so the browser's resolved locale decides.
   return opts;
+}
+
+/**
+ * Bug #5: render the date-portion of a timestamp using the user's
+ * ``date_format`` preference. Returns the locale-formatted date string
+ * for the configured shape; ``'auto'`` defers to ``date.toLocaleDateString()``
+ * with no overrides so the browser's locale wins. Used by ``fmtDateTime``
+ * to produce a "date + time" string that respects both prefs.
+ */
+function _formatDate(date: Date): string {
+  switch (_dateFormatPref) {
+    case 'iso': {
+      // YYYY-MM-DD in the user's local timezone.
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const d = String(date.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+    case 'us':
+      return date.toLocaleDateString('en-US');
+    case 'eu':
+      return date.toLocaleDateString('en-GB');
+    case 'long':
+      return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+    case 'auto':
+    default:
+      return date.toLocaleDateString();
+  }
 }
 
 /**
@@ -93,16 +136,21 @@ export function fmtTimeOfDay(date: Date, opts?: Intl.DateTimeFormatOptions): str
 }
 
 /**
- * Full-timestamp formatter that respects the user's preference. Use in
- * place of ``Date.toLocaleString()`` for row tooltips and absolute
- * timestamps.
+ * Full-timestamp formatter that respects the user's time-format AND
+ * date-format preferences. Use in place of ``Date.toLocaleString()`` for
+ * row tooltips and absolute timestamps. When the caller passes explicit
+ * ``opts`` (e.g. a custom shape for a specific surface), only the
+ * hour12 override is applied — the caller is opting out of the
+ * date-format pref by being prescriptive.
  */
 export function fmtDateTime(date: Date, opts?: Intl.DateTimeFormatOptions): string {
   if (opts) {
     return date.toLocaleString([], _applyHour12(opts));
   }
-  // No opts = locale-default date/time; still apply hour12 override.
-  return date.toLocaleString([], _applyHour12({}));
+  // Default surface: date + time, both following the user's prefs.
+  // ``_formatDate`` handles the date portion (and date-format pref);
+  // fmtTimeOfDay covers the time portion (and time-format pref).
+  return `${_formatDate(date)}, ${fmtTimeOfDay(date)}`;
 }
 
 /**

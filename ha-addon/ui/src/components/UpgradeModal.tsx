@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import useSWR from 'swr';
 import {
   Dialog,
   DialogContent,
@@ -9,7 +10,10 @@ import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Select } from './ui/select';
-import type { Worker } from '../types';
+import { TagChipInput } from './ui/tag-chip-input';
+import { getRoutingRules } from '../api/client';
+import { evaluateClause } from '../utils/routing';
+import type { RoutingClause, RoutingRule, Worker, RoutingClauseOp } from '../types';
 
 const BROWSER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
@@ -107,12 +111,38 @@ interface Props {
   /** If true, only show the schedule UI — hide mode radios and worker/version pickers.
    *  Used for bulk "Schedule Selected" where version/worker are per-device concerns. */
   scheduleOnly?: boolean;
+  /** Bug #109: when the user reruns an existing queue job, App.tsx
+   *  passes the original job's parameters here so the modal opens with
+   *  the same worker / version / action / tag-filter pre-selected. The
+   *  user can tweak any field before submitting. All fields optional;
+   *  absent values fall back to the same defaults a fresh upgrade uses. */
+  seed?: {
+    pinnedClientId?: string | null;
+    workerTagFilter?: { op: RoutingClauseOp; tags: string[] } | null;
+    esphomeVersion?: string | null;
+    action?: 'upgrade-now' | 'download-now';
+  };
+  /** Bug #110: tag-string lists for each affected target (one entry per
+   *  filename in App.tsx's `upgradeModalTarget.targets`). Empty array
+   *  is treated as "no per-target tags known" — the conflict check
+   *  short-circuits to "no conflict". App.tsx materialises this from
+   *  the matched `Target.tags` strings, parsed/trimmed/deduped. */
+  affectedTargetTags?: string[][];
   onUpgradeNow: (params: {
     pinnedClientId: string | null;
     esphomeVersion: string | null;
     updatePin?: string | null;
     /** FD.3: when true, enqueue a compile-and-download job instead of compile+OTA. */
     downloadOnly?: boolean;
+    /** Bug #97: per-job worker tag filter from the "Tag expression"
+     *  worker-selection radio. Mutually exclusive with
+     *  ``pinnedClientId`` at the UI level. */
+    workerTagFilter?: { op: RoutingClauseOp; tags: string[] } | null;
+    /** Bug #110: true when the user confirmed the routing-rule
+     *  conflict warning. The server-side eligibility check ignores
+     *  global / per-device routing rules for this job; the user's
+     *  pin / tag-filter still applies. */
+    bypassRoutingRules?: boolean;
   }) => void;
   /**
    * Save a recurring cron schedule. `version` is the user's pin choice —
@@ -139,6 +169,8 @@ export function UpgradeModal({
   currentOnce,
   defaultMode = 'now',
   scheduleOnly = false,
+  seed,
+  affectedTargetTags = [],
   onUpgradeNow,
   onSaveSchedule,
   onSaveOnce,
@@ -147,17 +179,52 @@ export function UpgradeModal({
 }: Props) {
   void _target;
 
+  // Bug #110: fetch the active global routing rules so we can warn
+  // when the user's worker / tag-expression choice conflicts with
+  // them. SWR scoped to this modal so a fresh rule list is loaded
+  // every time the modal opens (rules change rarely; cheap fetch).
+  const { data: routingRules } = useSWR<RoutingRule[]>('routing-rules', getRoutingRules, {
+    revalidateOnFocus: false,
+  });
+
   // --- Shared state: worker + version ---
   const eligibleWorkers = workers
     .filter(w => w.online && !w.disabled && (w.max_parallel_jobs ?? 0) > 0)
     .slice()
     .sort((a, b) => a.hostname.localeCompare(b.hostname, undefined, { sensitivity: 'base' }));
 
-  const [selectedWorker, setSelectedWorker] = useState<string>('');
+  // Bug #97: worker-selection radio with three modes:
+  //   any         → no filter; routing rules + claim_next decide
+  //   specific    → pin to one worker_id (back-compat with the old
+  //                 single dropdown)
+  //   tag         → ad-hoc per-job worker_tag_filter (op + tags)
+  type WorkerMode = 'any' | 'specific' | 'tag';
+  // Bug #109: derive the initial worker mode from the rerun seed when
+  // present — pinned_client_id wins, then worker_tag_filter, else any.
+  const initialWorkerMode: WorkerMode = (() => {
+    if (seed?.pinnedClientId) return 'specific';
+    if (seed?.workerTagFilter && seed.workerTagFilter.tags.length > 0) return 'tag';
+    return 'any';
+  })();
+  const [selectedWorker, setSelectedWorker] = useState<string>(seed?.pinnedClientId ?? '');
+  const [workerMode, setWorkerMode] = useState<WorkerMode>(initialWorkerMode);
+  const [tagFilterOp, setTagFilterOp] = useState<RoutingClauseOp>(seed?.workerTagFilter?.op ?? 'all_of');
+  const [tagFilterTags, setTagFilterTags] = useState<string[]>(seed?.workerTagFilter?.tags ?? []);
+  // Worker-tag autocomplete pool — same union the
+  // RoutingRuleBuilder's worker side uses.
+  const workerTagPool = (() => {
+    const pool = new Set<string>();
+    for (const w of workers) {
+      if (w.tags) for (const t of w.tags) pool.add(t);
+    }
+    return Array.from(pool).sort();
+  })();
   // #31: selectedVersion = '' means "Latest" (no pin / use current default at
   // run time). If the device is currently pinned, default to that pin. Otherwise
   // default to "Latest" so the schedule auto-updates with new ESPHome releases.
-  const [selectedVersion, setSelectedVersion] = useState<string>(pinnedVersion ?? '');
+  // Bug #109: when reruning a previous job, seed the version with the one
+  // the original job ran against so the user sees what they're reusing.
+  const [selectedVersion, setSelectedVersion] = useState<string>(seed?.esphomeVersion ?? pinnedVersion ?? '');
 
   const versionList: string[] = [];
   if (defaultEsphomeVersion) versionList.push(defaultEsphomeVersion);
@@ -175,6 +242,18 @@ export function UpgradeModal({
     return true;
   });
 
+  // #215: collapse the version picker into a two-radio surface ("Current"
+  // vs "Other"). The search box + scrollable list + show-betas only
+  // unfolds when the user picks "Other", which removes ~80 vertical
+  // pixels of clutter from the common case where the default version
+  // is fine. ``versionMode === 'other'`` is also implied when a non-
+  // default version was pre-seeded (rerun seed, existing pin) so the
+  // modal opens to the picker the user previously interacted with.
+  type VersionMode = 'current' | 'other';
+  const initialVersionMode: VersionMode =
+    selectedVersion && selectedVersion !== defaultEsphomeVersion ? 'other' : 'current';
+  const [versionMode, setVersionMode] = useState<VersionMode>(initialVersionMode);
+
   // UX.8 + #79: One 4-option action radio. `Schedule Upgrade` was
   // earlier a single radio with a nested Recurring/Once sub-toggle —
   // that sub-toggle is now promoted into two first-class radios so
@@ -187,6 +266,9 @@ export function UpgradeModal({
   const initialAction: Action = (() => {
     if (scheduleOnly) return currentOnce ? 'schedule-once' : 'schedule-recurring';
     if (defaultMode === 'schedule') return currentOnce ? 'schedule-once' : 'schedule-recurring';
+    // Bug #109: seed.action lets a rerun preserve "Download Now" vs the
+    // default "Upgrade Now" so the same job intent comes back.
+    if (seed?.action === 'download-now') return 'download-now';
     return 'upgrade-now';
   })();
   const [action, setAction] = useState<Action>(initialAction);
@@ -238,15 +320,106 @@ export function UpgradeModal({
   // For schedule saves: '' ("Latest") → null (unpin), otherwise the string.
   const scheduleVersion: string | null = selectedVersion || null;
 
+  // --- Bug #110: routing-rule conflict detection ---
+  // Mirror the server-side conditional-rule semantics from
+  // ``routing.evaluate_rule``: a rule "fires" for a (device, worker)
+  // pair when its ``device_match`` clauses all hold for the device's
+  // tags; once it fires, the worker must satisfy the rule's
+  // ``worker_match``. We surface a warning when the user's chosen
+  // worker (``specific``) or tag-expression (``tag``) would *not*
+  // satisfy at least one rule that fires for at least one affected
+  // target. Confirm under the warning sends ``bypass_routing_rules``
+  // through to the server so the job is enqueued anyway.
+  function clauseSatisfiesAllOf(clause: RoutingClause, candidateOp: RoutingClauseOp, candidateTags: string[]): boolean {
+    // Returns true when every worker satisfying the candidate clause
+    // also satisfies the rule clause. Used for ``tag`` mode where the
+    // user's clause defines a *set* of acceptable workers.
+    //
+    // Conservative rule: we only accept "satisfies" for the trivial
+    // cases — `all_of` candidate that includes the rule's required
+    // tags. For everything else we drop into the "is there any online
+    // worker that satisfies both" fallback below.
+    if (candidateOp === 'all_of' && clause.op === 'all_of') {
+      return clause.tags.every(t => candidateTags.includes(t));
+    }
+    return false;
+  }
+  function tagFilterCanSatisfyRuleClause(
+    clause: RoutingClause,
+    candidateOp: RoutingClauseOp,
+    candidateTags: string[],
+  ): boolean {
+    if (clauseSatisfiesAllOf(clause, candidateOp, candidateTags)) return true;
+    // Fallback: search the live worker pool for one that satisfies
+    // both the user's filter AND the rule's clause. If at least one
+    // such worker exists, the chosen tag-expression is compatible
+    // with this rule clause — no conflict.
+    const candidateClause: RoutingClause = { op: candidateOp, tags: candidateTags };
+    return eligibleWorkers.some(w => {
+      const wt = new Set(w.tags ?? []);
+      return evaluateClause(candidateClause, wt) && evaluateClause(clause, wt);
+    });
+  }
+  const conflictingRules: { rule: RoutingRule; targetIndex: number }[] = (() => {
+    if (mode !== 'now') return [];
+    if (!routingRules || routingRules.length === 0) return [];
+    if (workerMode === 'any') return [];
+    const out: { rule: RoutingRule; targetIndex: number }[] = [];
+    if (workerMode === 'specific') {
+      const w = workers.find(x => x.client_id === selectedWorker);
+      if (!w) return [];
+      const wt = new Set(w.tags ?? []);
+      affectedTargetTags.forEach((dt, idx) => {
+        const dtSet = new Set(dt);
+        for (const rule of routingRules) {
+          const fires = rule.device_match.every(c => evaluateClause(c, dtSet));
+          if (!fires) continue;
+          const ok = rule.worker_match.every(c => evaluateClause(c, wt));
+          if (!ok) out.push({ rule, targetIndex: idx });
+        }
+      });
+    } else if (workerMode === 'tag' && tagFilterTags.length > 0) {
+      affectedTargetTags.forEach((dt, idx) => {
+        const dtSet = new Set(dt);
+        for (const rule of routingRules) {
+          const fires = rule.device_match.every(c => evaluateClause(c, dtSet));
+          if (!fires) continue;
+          // Conflict when the user's tag filter cannot satisfy this
+          // rule's worker_match — i.e. no candidate worker the filter
+          // accepts also satisfies the rule.
+          const canSatisfy = rule.worker_match.every(c => tagFilterCanSatisfyRuleClause(c, tagFilterOp, tagFilterTags));
+          if (!canSatisfy) out.push({ rule, targetIndex: idx });
+        }
+      });
+    }
+    return out;
+  })();
+  const hasConflict = conflictingRules.length > 0;
+
   function handleConfirm() {
     if (mode === 'now') {
+      // Bug #97: pinnedClientId vs workerTagFilter is decided by the
+      // worker-mode radio. "any" sends neither; "specific" sends only
+      // the pin; "tag" sends only the filter. The server accepts both
+      // independently — at the UI level we keep them mutually exclusive
+      // so the user has one source of truth.
+      const pinned = workerMode === 'specific' ? (selectedWorker || null) : null;
+      const filter = workerMode === 'tag' && tagFilterTags.length > 0
+        ? { op: tagFilterOp, tags: tagFilterTags }
+        : null;
       onUpgradeNow({
-        pinnedClientId: selectedWorker || null,
+        pinnedClientId: pinned,
         esphomeVersion: selectedVersion && selectedVersion !== defaultEsphomeVersion ? selectedVersion : null,
         // FD.3: don't update the pin when we're only producing a
         // binary to download — the device state hasn't changed.
         updatePin: nowAction === 'ota' && shouldUpdatePin ? selectedVersion : null,
         downloadOnly: nowAction === 'download',
+        workerTagFilter: filter,
+        // Bug #110: when the user clicks confirm under a visible
+        // routing-rule conflict warning, treat the click as the "yes,
+        // override" answer and tell the server to bypass rules for
+        // this job. With no conflict, the flag stays absent.
+        bypassRoutingRules: hasConflict || undefined,
       });
     } else {
       if (scheduleType === 'once') {
@@ -272,61 +445,203 @@ export function UpgradeModal({
         </DialogHeader>
         <div className="p-[18px] flex flex-col gap-4">
 
-          {/* Shared: Worker + Version (hidden in scheduleOnly mode) */}
+          {/* #215: Action → Worker → Version order. Action goes first
+              because it's the verb that drives every other decision
+              (Upgrade vs Download vs Schedule), Worker narrows who
+              runs it, Version is the fine-grain knob most users leave
+              at the default. */}
           {!scheduleOnly && (
             <>
-              <div>
-                <Label htmlFor="upgrade-worker-select">Worker</Label>
-                <Select
-                  id="upgrade-worker-select"
-                  value={selectedWorker}
-                  onChange={e => setSelectedWorker(e.target.value)}
-                  title="Fleet will pick the fastest available worker at compile time."
-                >
-                  {/* UX.7: dropped the <any> coder-syntax label. */}
-                  <option value="">Any available worker (auto)</option>
-                  {eligibleWorkers.map(w => (
-                    <option key={w.client_id} value={w.client_id}>{w.hostname}</option>
-                  ))}
-                </Select>
+              {/* UX.8 + #79: single Action radio (4 options). Schedule is
+                  split into recurring vs one-time so there's no nested
+                  sub-toggle inside the schedule form. #218: each row
+                  uses `flex-wrap` so the descriptive `<span>` wraps to a
+                  second line if it overflows the modal — pre-fix we
+                  used `whitespace-nowrap` and the action descriptions
+                  pushed past 600 px, triggering a horizontal scrollbar.
+                  The radio + label itself is short enough to never wrap,
+                  preserving #78's original "Schedule Recurring stays on
+                  one line" intent. */}
+              <div className="flex flex-col gap-1.5">
+                <Label>Action</Label>
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer flex-wrap">
+                  <input
+                    type="radio"
+                    name="upgrade-action"
+                    checked={action === 'upgrade-now'}
+                    onChange={() => setAction('upgrade-now')}
+                  />
+                  Upgrade Now
+                  <span className="text-[11px] text-[var(--text-muted)]">— compile + OTA flash</span>
+                </label>
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer flex-wrap">
+                  <input
+                    type="radio"
+                    name="upgrade-action"
+                    checked={action === 'download-now'}
+                    onChange={() => setAction('download-now')}
+                  />
+                  Download Now
+                  <span className="text-[11px] text-[var(--text-muted)]">— compile only, no OTA; grab the .bin from the Queue tab</span>
+                </label>
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer flex-wrap">
+                  <input
+                    type="radio"
+                    name="upgrade-action"
+                    checked={action === 'schedule-recurring'}
+                    onChange={() => setAction('schedule-recurring')}
+                  />
+                  Schedule Recurring
+                  <span className="text-[11px] text-[var(--text-muted)]">— run the OTA upgrade on a cron</span>
+                </label>
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer flex-wrap">
+                  <input
+                    type="radio"
+                    name="upgrade-action"
+                    checked={action === 'schedule-once'}
+                    onChange={() => setAction('schedule-once')}
+                  />
+                  Schedule Once
+                  <span className="text-[11px] text-[var(--text-muted)]">— run the OTA upgrade at a specific timestamp</span>
+                </label>
               </div>
 
-              <div>
-                <Label>ESPHome version</Label>
-                <input
-                  type="text"
-                  value={versionSearch}
-                  onChange={e => setVersionSearch(e.target.value)}
-                  placeholder="Search versions..."
-                  className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface2)] px-2.5 py-1 text-[12px] text-[var(--text)] outline-none placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] mb-1"
-                />
-                {/* #73: scrollable list matching the header dropdown style */}
-                <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] overflow-y-auto" style={{ maxHeight: 160 }}>
-                  <button
-                    type="button"
-                    className={`w-full text-left px-2.5 py-1.5 text-[12px] cursor-pointer hover:bg-[var(--surface2)] ${selectedVersion === '' ? 'text-[var(--accent)] font-semibold' : 'text-[var(--text)]'}`}
-                    onClick={() => setSelectedVersion('')}
-                  >
-                    Current{defaultEsphomeVersion ? ` (${defaultEsphomeVersion})` : ''}
-                  </button>
-                  {filteredVersions.map(v => (
-                    <button
-                      key={v}
-                      type="button"
-                      className={`w-full text-left px-2.5 py-1.5 text-[12px] cursor-pointer hover:bg-[var(--surface2)] ${selectedVersion === v ? 'text-[var(--accent)] font-semibold' : 'text-[var(--text)]'}`}
-                      onClick={() => setSelectedVersion(v)}
-                    >
-                      {v}
-                    </button>
-                  ))}
-                  {filteredVersions.length === 0 && (
-                    <div className="px-2.5 py-1.5 text-[12px] text-[var(--text-muted)]">No matches</div>
-                  )}
-                </div>
-                <label className="flex items-center gap-1.5 mt-1 text-[11px] text-[var(--text-muted)] cursor-pointer">
-                  <input type="checkbox" checked={showBetas} onChange={e => setShowBetas(e.target.checked)} />
-                  Show betas
+              {/* Bug #97: worker-selection radio. "Any" lets routing
+                  rules + the scheduler decide; "Specific" pins to one
+                  worker (legacy behaviour); "Tag expression" adds a
+                  per-job worker_tag_filter clause that participates in
+                  claim_next eligibility. The three are mutually
+                  exclusive at the UI level so the user has one source
+                  of truth. */}
+              <div className="flex flex-col gap-1.5 pt-2 border-t border-[var(--border)]">
+                <Label>Worker</Label>
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer flex-wrap">
+                  <input
+                    type="radio"
+                    name="upgrade-worker-mode"
+                    checked={workerMode === 'any'}
+                    onChange={() => setWorkerMode('any')}
+                  />
+                  Any available worker
+                  <span className="text-[11px] text-[var(--text-muted)]">— scheduler picks at compile time</span>
                 </label>
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer flex-wrap">
+                  <input
+                    type="radio"
+                    name="upgrade-worker-mode"
+                    checked={workerMode === 'specific'}
+                    onChange={() => setWorkerMode('specific')}
+                  />
+                  Specific worker
+                </label>
+                {workerMode === 'specific' && (
+                  <Select
+                    id="upgrade-worker-select"
+                    value={selectedWorker}
+                    onChange={e => setSelectedWorker(e.target.value)}
+                    className="ml-5"
+                  >
+                    <option value="">— select a worker —</option>
+                    {eligibleWorkers.map(w => (
+                      <option key={w.client_id} value={w.client_id}>{w.hostname}</option>
+                    ))}
+                  </Select>
+                )}
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer flex-wrap">
+                  <input
+                    type="radio"
+                    name="upgrade-worker-mode"
+                    checked={workerMode === 'tag'}
+                    onChange={() => setWorkerMode('tag')}
+                  />
+                  Tag expression
+                  <span className="text-[11px] text-[var(--text-muted)]">— same shape as a routing-rule clause</span>
+                </label>
+                {workerMode === 'tag' && (
+                  <div className="ml-5 flex items-start gap-2">
+                    <Select
+                      value={tagFilterOp}
+                      onChange={e => setTagFilterOp(e.target.value as RoutingClauseOp)}
+                      className="w-[100px]"
+                    >
+                      <option value="all_of">All of</option>
+                      <option value="any_of">Any of</option>
+                      <option value="none_of">None of</option>
+                    </Select>
+                    <div className="flex-1">
+                      <TagChipInput
+                        tags={tagFilterTags}
+                        onChange={setTagFilterTags}
+                        suggestions={workerTagPool}
+                        placeholder="worker tag (e.g. windows)…"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* #215: collapsed version picker. The radio surface keeps
+                  the common "stick with the current version" case to
+                  one short line; the search box + scrollable list +
+                  show-betas only unfold under "Other". */}
+              <div className="flex flex-col gap-1.5 pt-2 border-t border-[var(--border)]">
+                <Label>ESPHome version</Label>
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer flex-wrap">
+                  <input
+                    type="radio"
+                    name="upgrade-version-mode"
+                    checked={versionMode === 'current'}
+                    onChange={() => {
+                      setVersionMode('current');
+                      setSelectedVersion('');
+                    }}
+                  />
+                  Current{defaultEsphomeVersion ? ` (${defaultEsphomeVersion})` : ''}
+                  <span className="text-[11px] text-[var(--text-muted)]">— use the server-default version at compile time</span>
+                </label>
+                <label className="flex items-center gap-1.5 text-[13px] cursor-pointer flex-wrap">
+                  <input
+                    type="radio"
+                    name="upgrade-version-mode"
+                    checked={versionMode === 'other'}
+                    onChange={() => setVersionMode('other')}
+                  />
+                  Other
+                  {versionMode === 'other' && selectedVersion && (
+                    <span className="text-[11px] text-[var(--accent)]">— {selectedVersion}</span>
+                  )}
+                </label>
+                {versionMode === 'other' && (
+                  <div className="ml-5">
+                    <input
+                      type="text"
+                      value={versionSearch}
+                      onChange={e => setVersionSearch(e.target.value)}
+                      placeholder="Search versions..."
+                      className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface2)] px-2.5 py-1 text-[12px] text-[var(--text)] outline-none placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] mb-1"
+                    />
+                    {/* #73: scrollable list matching the header dropdown style */}
+                    <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] overflow-y-auto" style={{ maxHeight: 160 }}>
+                      {filteredVersions.map(v => (
+                        <button
+                          key={v}
+                          type="button"
+                          className={`w-full text-left px-2.5 py-1.5 text-[12px] cursor-pointer hover:bg-[var(--surface2)] ${selectedVersion === v ? 'text-[var(--accent)] font-semibold' : 'text-[var(--text)]'}`}
+                          onClick={() => setSelectedVersion(v)}
+                        >
+                          {v}
+                        </button>
+                      ))}
+                      {filteredVersions.length === 0 && (
+                        <div className="px-2.5 py-1.5 text-[12px] text-[var(--text-muted)]">No matches</div>
+                      )}
+                    </div>
+                    <label className="flex items-center gap-1.5 mt-1 text-[11px] text-[var(--text-muted)] cursor-pointer">
+                      <input type="checkbox" checked={showBetas} onChange={e => setShowBetas(e.target.checked)} />
+                      Show betas
+                    </label>
+                  </div>
+                )}
               </div>
 
               {/* Pin warning */}
@@ -335,58 +650,29 @@ export function UpgradeModal({
                   <strong>Pin update.</strong> Currently pinned to <code className="bg-[var(--surface)] px-1 rounded">{pinnedVersion}</code>. Upgrading will update the pin to <code className="bg-[var(--surface)] px-1 rounded">{selectedVersion}</code>.
                 </div>
               )}
-            </>
-          )}
 
-          {/* UX.8 + #79: single Action radio (4 options). Schedule is split
-              into recurring vs one-time so there's no nested sub-toggle
-              inside the schedule form. `whitespace-nowrap` on the label
-              rows stops "Schedule Recurring" from wrapping onto two lines
-              (#78). */}
-          {!scheduleOnly && (
-            <div className="flex flex-col gap-1.5 pt-2 border-t border-[var(--border)]">
-              <Label>Action</Label>
-              <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
-                <input
-                  type="radio"
-                  name="upgrade-action"
-                  checked={action === 'upgrade-now'}
-                  onChange={() => setAction('upgrade-now')}
-                />
-                Upgrade Now
-                <span className="text-[11px] text-[var(--text-muted)]">— compile + OTA flash</span>
-              </label>
-              <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
-                <input
-                  type="radio"
-                  name="upgrade-action"
-                  checked={action === 'download-now'}
-                  onChange={() => setAction('download-now')}
-                />
-                Download Now
-                <span className="text-[11px] text-[var(--text-muted)]">— compile only, no OTA; grab the .bin from the Queue tab</span>
-              </label>
-              <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
-                <input
-                  type="radio"
-                  name="upgrade-action"
-                  checked={action === 'schedule-recurring'}
-                  onChange={() => setAction('schedule-recurring')}
-                />
-                Schedule Recurring
-                <span className="text-[11px] text-[var(--text-muted)]">— run the OTA upgrade on a cron</span>
-              </label>
-              <label className="flex items-center gap-1.5 text-[13px] cursor-pointer whitespace-nowrap">
-                <input
-                  type="radio"
-                  name="upgrade-action"
-                  checked={action === 'schedule-once'}
-                  onChange={() => setAction('schedule-once')}
-                />
-                Schedule Once
-                <span className="text-[11px] text-[var(--text-muted)]">— run the OTA upgrade at a specific timestamp</span>
-              </label>
-            </div>
+              {/* Bug #110: routing-rule conflict warning. Surfaces the
+                  rule names that fire for the affected device(s) but
+                  the chosen worker / tag-expression doesn't satisfy.
+                  Confirming "Upgrade" under this banner sends
+                  ``bypass_routing_rules: true`` so the server
+                  enqueues the job anyway. */}
+              {hasConflict && mode === 'now' && (
+                <div className="rounded-lg border border-[#fb923c] bg-[#3f1d1d] px-3 py-2 text-[12px] text-[#fb923c]">
+                  <strong>Routing-rule conflict.</strong>{' '}
+                  {workerMode === 'specific'
+                    ? 'The selected worker does not satisfy:'
+                    : 'No worker matching this tag expression satisfies:'}
+                  <ul className="mt-1 ml-4 list-disc">
+                    {Array.from(new Set(conflictingRules.map(c => c.rule.id))).map(id => {
+                      const r = conflictingRules.find(c => c.rule.id === id)!.rule;
+                      return <li key={id}><code className="bg-[var(--surface)] px-1 rounded">{r.name || id}</code></li>;
+                    })}
+                  </ul>
+                  <div className="mt-1.5">Confirming will override the rule for this run only — the rule itself is unchanged.</div>
+                </div>
+              )}
+            </>
           )}
 
           {/* Schedule options (only visible when a schedule-* action is active) */}
@@ -467,12 +753,21 @@ export function UpgradeModal({
             <Button variant="secondary" onClick={onClose}>Cancel</Button>
             <Button
               variant={mode === 'now' ? 'success' : 'default'}
-              disabled={mode === 'schedule' && scheduleType === 'once' && !onceDate}
+              disabled={
+                (mode === 'schedule' && scheduleType === 'once' && !onceDate)
+                // Bug #97: don't let the user submit a half-set
+                // worker-mode choice — "specific" needs a worker,
+                // "tag" needs at least one tag in the clause.
+                || (mode === 'now' && workerMode === 'specific' && !selectedWorker)
+                || (mode === 'now' && workerMode === 'tag' && tagFilterTags.length === 0)
+              }
               onClick={handleConfirm}
             >
-              {/* UX.8: confirm-button label mirrors the action verb. */}
-              {action === 'upgrade-now' && 'Upgrade'}
-              {action === 'download-now' && 'Compile & Download'}
+              {/* UX.8: confirm-button label mirrors the action verb.
+                  Bug #110: when a rule conflict is showing, append
+                  "& override rules" so the click is unambiguous. */}
+              {action === 'upgrade-now' && (hasConflict ? 'Upgrade & override rules' : 'Upgrade')}
+              {action === 'download-now' && (hasConflict ? 'Download & override rules' : 'Compile & Download')}
               {action === 'schedule-recurring' && 'Save Schedule'}
               {action === 'schedule-once' && 'Save Schedule'}
             </Button>

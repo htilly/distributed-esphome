@@ -1,5 +1,55 @@
 # Changelog
 
+## 1.7.0
+
+A major release built around **fleet tags + rule-based job routing**, with bounded worker disk, device-management polish, and a unified Upgrade modal on top.
+
+**Tags and routing rules.** Devices and workers can now carry user-managed tags. Click any tag chip in the Devices or Workers tab to edit; autocomplete pulls from the fleet's existing tag pool. A new tag-filter pill bar above each table narrows the visible set as you click successive tags.
+
+- **Routing rules…** in the Workers toolbar opens a builder with `all_of` / `any_of` / `none_of` clauses against device and worker tags. A rule constrains which workers may claim matching jobs, with a live preview of how many devices and online workers it covers.
+- A new **BLOCKED** queue state surfaces when a rule eliminates every eligible worker; click the badge to jump straight into the offending rule.
+- Workers can be tagged at startup; the Connect Worker dialog has a Tags field that bakes the value into the generated docker snippet.
+- `esphome_fleet.compile` and `esphome_fleet.validate` HA services accept a `tags` list (with optional `any_of` / `all_of` / `none_of` matcher) so an automation can target a tag-defined subset of the fleet without naming each device.
+
+**Unified Upgrade modal.** Per-row Upgrade, the bulk-upgrade items, and per-row Rerun all open the same modal — pick action, worker, and ESPHome version up-front, then confirm.
+
+- **Three actions:** Upgrade Now, Download Now, or Schedule for later.
+- **Three worker modes:** Any worker, a Specific worker, or a **Tag expression** that constrains a one-off compile (e.g. "any worker tagged `windows`") without authoring a full routing rule.
+- When your selection conflicts with an active routing rule, the modal lists the offending rules and offers an **Upgrade & override** path.
+
+**Bounded worker disk.** Build workers used to grow their cache without an upper bound. 1.7.0 replaces the loose `MAX_ESPHOME_VERSIONS=3` count cap with a single byte budget across the whole tree (default **10 GiB**), configurable per-worker or fleet-wide in **Settings → Disk management**. The Workers tab shows `Quota: 2.1 / 10 GiB` per worker and a worker that fills its disk pauses itself with a **disk full** badge instead of repeatedly failing jobs with `No space left on device`.
+
+**Device-management polish.**
+
+- **Archived devices live in the same table** at 50 % opacity below active ones — toggle **Show archived devices** in the column picker. The separate Archived page is gone, and **Archive** moves into the row menu (no confirm modal, just a toast with the restore path).
+- **Ping device…** fires 10 ICMP packets at the device's OTA address and reports reachability + RTT. Works on every install path, including HAOS where unprivileged ICMP is disabled.
+- **Install to address…** sends the OTA bundle to a hand-typed address — useful when mDNS resolves the wrong IP after a router reboot or a device shows up on a recovery network.
+- **View rendered config** opens a read-only, syntax-highlighted view of the fully-resolved YAML (`!secret` substituted, `packages:` flattened, `external_components:` realized). Header carries a "contains plaintext secrets — copy with care" notice.
+
+**Workers self-heal corrupted toolchains.** When a build fails because the cached PlatformIO toolchain is in a bad state, the worker now wipes the affected directories and retries the same job in-process. The first hit pays a 5–10 min re-download tax; previously an operator had to ssh in and clean up by hand.
+
+**Other fleet-management wins.**
+
+- New **Upgrade Changed** bulk action targets every device whose YAML has drifted since its last successful compile (distinct from **Upgrade Outdated**, which targets firmware-version mismatch).
+- New **Commit all uncommitted** entry commits every dirty YAML in one shot, with an optional shared commit message and a live count.
+- Bulk **Archive Selected** / **Unarchive Selected** in the Devices action menu, plus per-row **Rerun** that opens the Upgrade modal pre-seeded with the original job's parameters.
+- New `firmware_retention_days` Settings field (default 2) evicts old compile binaries; combined with excluding `firmware/` from add-on backups, a typical partial-addon snapshot drops from ~237 MB to ~2 MB.
+- The Queue's worker-selection cell now stacks **what the user asked for** above **why this worker won** (Pinned / Only eligible / Least busy / Fastest / First to poll), so the routing story is readable from one cell.
+- New optional Devices-tab columns: **Platform** (chip family + PlatformIO board) and **BLE proxy** (off / passive / active). Both default off.
+- The address-source label under each IP carries a plain-language tooltip ("Detected via ARP scan…", "From wifi.use_address in the device YAML…").
+
+**Bug fixes.**
+
+- The **Last compiled** column is now populated for every device running ESPHome firmware, even when the server has no compile history — falls back to the device-reported build time (marked `~`).
+- Devices that compose their `esphome:` block via `packages:` / `<<: !include` keep their friendly-name and area when archived (used to render the bare filename).
+- Archived devices show **Archived** in the Status column instead of "Checking…" forever, and tag editing is disabled on them on every surface.
+- The Reconfigure form's submit button reads **Save changes** instead of HA's stock "Submit".
+- Tag chip palette redesigned for distinctness — a row of 4 tags now reads as 4 visibly different colors instead of "two reds, two greens".
+- Cleaning a worker's cache no longer wipes ESPHome venvs or PlatformIO toolchains; it clears only the volatile build outputs, so the next compile doesn't pay the toolchain re-download tax.
+- Concurrent compiles no longer race on a shared git checkout — a batch sharing the same `external_components` repo used to fail with multiple phantom errors.
+
+**Under the hood.** Hardened the file-mutation paths so every UI edit leaves your config's git history clean, and CI now builds against multiple ESPHome versions to catch upstream breakage earlier.
+
 ## 1.6.2
 
 A hardening release on top of 1.6.1.

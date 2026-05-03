@@ -57,12 +57,14 @@ class _UiApp:
         queue: JobQueue,
         registry: WorkerRegistry,
         config_dir: Path,
+        app: web.Application | None = None,
     ) -> None:
         self.client = client
         self.cfg = cfg
         self.queue = queue
         self.registry = registry
         self.config_dir = config_dir
+        self.app = app
 
     async def close(self) -> None:
         await self.client.close()
@@ -106,6 +108,13 @@ async def _make_ui_app(tmp_path: Path) -> _UiApp:
     app["queue"] = queue
     app["registry"] = registry
     app["log_subscribers"] = {}
+    # DQ.5: every UI test rig gets a real WorkerDiskQuotaStore so the
+    # disk-quota endpoint exercises the full persistence path rather than
+    # the graceful-degrade fallback.
+    from worker_disk_quotas import WorkerDiskQuotaStore  # noqa: PLC0415
+    app["worker_disk_quota_store"] = WorkerDiskQuotaStore(
+        path=tmp_path / "worker-disk-quotas.json",
+    )
     app["_rt"] = {
         "ha_entity_status": {},
         "ha_mac_set": set(),
@@ -123,7 +132,7 @@ async def _make_ui_app(tmp_path: Path) -> _UiApp:
 
     client = TestClient(TestServer(app))
     await client.start_server()
-    return _UiApp(client, cfg, queue, registry, config_dir)
+    return _UiApp(client, cfg, queue, registry, config_dir, app=app)
 
 
 def _write_config(config_dir: Path, filename: str, name: str) -> Path:
@@ -175,6 +184,40 @@ async def test_targets_lists_yaml_files(tmp_path):
         assert "bedroom.yaml" in filenames
     finally:
         await ta.close()
+
+
+def test_parse_device_compile_epoch_handles_modern_aioesphomeapi_format():
+    """Bug #102: the dev.18 fallback parser was hard-coded for the older
+    ``"Mar 29 2026, 17:00:00"`` shape, but ``aioesphomeapi`` actually
+    reports the build time as ``"2026-04-23 06:13:56 -0700"`` — so the
+    parser silently returned None for every device and the Devices-tab
+    "Last compiled" column never showed the device-firmware fallback.
+    Round-trip through epoch + UTC ensures the offset is honoured."""
+    from datetime import datetime, timezone, timedelta
+    from ui_api import _parse_device_compile_epoch
+
+    epoch = _parse_device_compile_epoch("2026-04-23 06:13:56 -0700")
+    assert epoch is not None
+    expected = datetime(2026, 4, 23, 6, 13, 56,
+                        tzinfo=timezone(timedelta(hours=-7)))
+    assert epoch == int(expected.timestamp())
+
+
+def test_parse_device_compile_epoch_back_compat_old_format():
+    """The older ``"%b %d %Y, %H:%M:%S"`` form must still parse so that
+    devices running pre-aioesphomeapi-update firmware don't lose their
+    fallback when the new format support lands."""
+    from ui_api import _parse_device_compile_epoch
+    assert _parse_device_compile_epoch("Mar 29 2026, 17:00:00") is not None
+
+
+def test_parse_device_compile_epoch_returns_none_for_unknown_shapes():
+    """Empty / None / unrecognised → None; never raises."""
+    from ui_api import _parse_device_compile_epoch
+    assert _parse_device_compile_epoch(None) is None
+    assert _parse_device_compile_epoch("") is None
+    assert _parse_device_compile_epoch("not a timestamp") is None
+    assert _parse_device_compile_epoch("2026-04-23T06:13:56Z") is None
 
 
 async def test_targets_excludes_secrets_yaml(tmp_path):
@@ -439,6 +482,116 @@ async def test_archive_permanent_delete(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# DM.1: /ui/api/targets merges archived rows + archive flag on every row
+# ---------------------------------------------------------------------------
+
+async def test_targets_marks_active_rows_archived_false(tmp_path, _enable_socket):
+    """DM.1: every active row carries archived=False so the UI can
+    render rows uniformly (opacity-50 / reduced action menu drives off
+    this single flag)."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "alpha.yaml", "alpha")
+        resp = await ta.get("/ui/api/targets")
+        data = await resp.json()
+        active = [t for t in data if t["target"] == "alpha.yaml"]
+        assert len(active) == 1
+        assert active[0]["archived"] is False
+    finally:
+        await ta.close()
+
+
+async def test_targets_includes_archived_rows(tmp_path, _enable_socket):
+    """DM.1: archived YAMLs land in /ui/api/targets so the Devices tab
+    can render them inline (toggleable via the column picker). Each
+    archived row has archived=True plus archived_at/archived_size."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "alpha.yaml", "alpha")
+        _write_config(ta.config_dir, "beta.yaml", "beta")
+        # Archive beta
+        resp = await ta.delete("/ui/api/targets/beta.yaml")
+        assert resp.status == 200
+
+        resp = await ta.get("/ui/api/targets")
+        data = await resp.json()
+        rows_by_name = {t["target"]: t for t in data}
+
+        assert "alpha.yaml" in rows_by_name
+        assert rows_by_name["alpha.yaml"]["archived"] is False
+
+        assert "beta.yaml" in rows_by_name
+        beta = rows_by_name["beta.yaml"]
+        assert beta["archived"] is True
+        assert isinstance(beta["archived_at"], (int, float))
+        assert beta["archived_size"] > 0
+    finally:
+        await ta.close()
+
+
+async def test_targets_archived_rows_minimal_fields(tmp_path, _enable_socket):
+    """DM.1: archived rows must carry the structural fields the UI
+    expects (online/running_version null, no schedule, etc.) — the
+    poller / scheduler / queue do not see them, so live-state fields
+    are explicitly null."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "device1.yaml", "device1")
+        await ta.delete("/ui/api/targets/device1.yaml")
+
+        resp = await ta.get("/ui/api/targets")
+        data = await resp.json()
+        archived = [t for t in data if t["archived"]]
+        assert len(archived) == 1
+        row = archived[0]
+        assert row["target"] == "device1.yaml"
+        assert row["online"] is None
+        assert row["running_version"] is None
+        assert row["schedule"] is None
+        assert row["schedule_enabled"] is False
+        assert row["last_compile"] is None
+    finally:
+        await ta.close()
+
+
+async def test_archive_evicts_device_from_poller(tmp_path, _enable_socket):
+    """DM.1: archiving a target must evict the matching entry from the
+    device poller so the freshly-archived row freezes at last_seen=now
+    instead of staying ``online`` for the 4 h TTL window. Mirrors the
+    eviction the rename path already does. Origin: spec note in
+    WORKITEMS-1.7.0 DM.1."""
+    from datetime import datetime
+    from device_poller import Device, DevicePoller
+
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "device1.yaml", "device1")
+
+        poller = DevicePoller()
+        poller._devices["device1"] = Device(
+            name="device1",
+            ip_address="192.168.1.42",
+            online=True,
+            last_seen=datetime.now(),
+            compile_target="device1.yaml",
+        )
+        # The TestServer wraps the app in a frozen state by start; mutate
+        # via the underlying _state dict to avoid the deprecation noise
+        # while the test still hangs the poller off the same key the
+        # handler reads.
+        ta.client.server.app._state["device_poller"] = poller
+        assert "device1" in poller._devices
+
+        resp = await ta.delete("/ui/api/targets/device1.yaml")
+        assert resp.status == 200
+        assert "device1" not in poller._devices, (
+            "archive should evict the device from the poller"
+        )
+    finally:
+        await ta.close()
+
+
+# ---------------------------------------------------------------------------
 # compile
 # ---------------------------------------------------------------------------
 
@@ -503,6 +656,81 @@ async def test_compile_pinned_client_id(tmp_path):
         jobs = ta.queue.get_all()
         assert len(jobs) == 1
         assert jobs[0].pinned_client_id == "worker-42"
+    finally:
+        await ta.close()
+
+
+# ---------------------------------------------------------------------------
+# DM.3: per-job OTA address override
+# ---------------------------------------------------------------------------
+
+
+async def test_compile_address_override_stamps_job_ota_address(tmp_path, _enable_socket):
+    """DM.3: ``address`` body field overrides ``Job.ota_address``."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "a.yaml", "a")
+        resp = await ta.post(
+            "/ui/api/compile",
+            json={"targets": ["a.yaml"], "address": "192.168.42.7"},
+        )
+        assert resp.status == 200
+        jobs = ta.queue.get_all()
+        assert len(jobs) == 1
+        assert jobs[0].ota_address == "192.168.42.7"
+    finally:
+        await ta.close()
+
+
+async def test_compile_address_override_rejects_multi_target(tmp_path, _enable_socket):
+    """DM.3: address + multi-target is meaningless and 400's."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "a.yaml", "a")
+        _write_config(ta.config_dir, "b.yaml", "b")
+        resp = await ta.post(
+            "/ui/api/compile",
+            json={"targets": ["a.yaml", "b.yaml"], "address": "192.168.42.7"},
+        )
+        assert resp.status == 400
+        body = await resp.json()
+        assert "address override requires exactly one target" in body["error"]
+        assert ta.queue.get_all() == []
+    finally:
+        await ta.close()
+
+
+async def test_compile_address_too_long_returns_400(tmp_path, _enable_socket):
+    """DM.3: address bound at 253 chars (DNS hostname limit)."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "a.yaml", "a")
+        resp = await ta.post(
+            "/ui/api/compile",
+            json={"targets": ["a.yaml"], "address": "x" * 254},
+        )
+        assert resp.status == 400
+        body = await resp.json()
+        assert "address too long" in body["error"]
+    finally:
+        await ta.close()
+
+
+async def test_compile_address_empty_falls_through_to_auto_resolve(tmp_path, _enable_socket):
+    """DM.3: an empty/whitespace address is treated as "no override" — the
+    auto-resolved value (or none) is used as if the field was absent."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "a.yaml", "a")
+        resp = await ta.post(
+            "/ui/api/compile",
+            json={"targets": ["a.yaml"], "address": "   "},
+        )
+        assert resp.status == 200
+        jobs = ta.queue.get_all()
+        assert len(jobs) == 1
+        # No poller in test app + no override → ota_address is None.
+        assert jobs[0].ota_address is None
     finally:
         await ta.close()
 
@@ -804,6 +1032,125 @@ async def test_worker_clean_cache_sets_pending_flag(tmp_path):
         resp = await ta.post(f"/ui/api/workers/{client_id}/clean")
         assert resp.status == 200
         assert ta.registry.get(client_id).pending_clean is True
+    finally:
+        await ta.close()
+
+
+# ---------------------------------------------------------------------------
+# DQ.5 — POST /ui/api/workers/{id}/disk-quota + GET /ui/api/workers payload
+# ---------------------------------------------------------------------------
+
+
+async def test_worker_set_disk_quota_persists_override(tmp_path, _enable_socket):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        client_id = ta.registry.register("qworker", "linux/amd64", image_version="4")
+        resp = await ta.post(
+            f"/ui/api/workers/{client_id}/disk-quota",
+            json={"disk_quota_bytes": 5 * 1024 ** 3},
+        )
+        assert resp.status == 200
+        body = await resp.json()
+        assert body == {"ok": True, "disk_quota_bytes": 5 * 1024 ** 3}
+        assert ta.registry.get(client_id).disk_quota_bytes == 5 * 1024 ** 3
+        assert ta.app["worker_disk_quota_store"].get_quota("qworker") == 5 * 1024 ** 3
+    finally:
+        await ta.close()
+
+
+async def test_worker_set_disk_quota_null_clears_override(tmp_path, _enable_socket):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        client_id = ta.registry.register("qworker", "linux/amd64", image_version="4")
+        # Seed an override.
+        await ta.post(
+            f"/ui/api/workers/{client_id}/disk-quota",
+            json={"disk_quota_bytes": 5 * 1024 ** 3},
+        )
+        # Clear it.
+        resp = await ta.post(
+            f"/ui/api/workers/{client_id}/disk-quota",
+            json={"disk_quota_bytes": None},
+        )
+        assert resp.status == 200
+        assert ta.registry.get(client_id).disk_quota_bytes is None
+        assert ta.app["worker_disk_quota_store"].get_quota("qworker") is None
+    finally:
+        await ta.close()
+
+
+async def test_worker_set_disk_quota_rejects_below_floor(tmp_path, _enable_socket):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        client_id = ta.registry.register("qworker", "linux/amd64", image_version="4")
+        resp = await ta.post(
+            f"/ui/api/workers/{client_id}/disk-quota",
+            json={"disk_quota_bytes": 1024 ** 3 - 1},  # < 1 GiB
+        )
+        assert resp.status == 400
+    finally:
+        await ta.close()
+
+
+async def test_worker_set_disk_quota_rejects_above_ceiling(tmp_path, _enable_socket):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        client_id = ta.registry.register("qworker", "linux/amd64", image_version="4")
+        resp = await ta.post(
+            f"/ui/api/workers/{client_id}/disk-quota",
+            json={"disk_quota_bytes": (1024 + 1) * 1024 ** 3},  # > 1 TiB
+        )
+        assert resp.status == 400
+    finally:
+        await ta.close()
+
+
+async def test_worker_set_disk_quota_rejects_non_integer(tmp_path, _enable_socket):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        client_id = ta.registry.register("qworker", "linux/amd64", image_version="4")
+        resp = await ta.post(
+            f"/ui/api/workers/{client_id}/disk-quota",
+            json={"disk_quota_bytes": "5GiB"},
+        )
+        assert resp.status == 400
+    finally:
+        await ta.close()
+
+
+async def test_worker_set_disk_quota_unknown_worker(tmp_path, _enable_socket):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        resp = await ta.post(
+            "/ui/api/workers/unknown-id/disk-quota",
+            json={"disk_quota_bytes": 5 * 1024 ** 3},
+        )
+        assert resp.status == 404
+    finally:
+        await ta.close()
+
+
+async def test_get_workers_includes_disk_quota_fields(tmp_path, _enable_socket):
+    ta = await _make_ui_app(tmp_path)
+    try:
+        # Worker with no override → effective = fleet default (10 GiB).
+        ta.registry.register("worker-default", "linux/amd64", image_version="4")
+        # Worker with an override → effective = override.
+        client_id = ta.registry.register("worker-override", "linux/amd64", image_version="4")
+        ta.registry.set_disk_quota(client_id, 3 * 1024 ** 3)
+
+        resp = await ta.get("/ui/api/workers")
+        assert resp.status == 200
+        rows = await resp.json()
+        by_host = {r["hostname"]: r for r in rows}
+
+        assert by_host["worker-default"]["disk_quota_override_bytes"] is None
+        assert by_host["worker-default"]["disk_quota_bytes"] == 10 * 1024 ** 3
+        assert by_host["worker-default"]["default_worker_disk_quota_bytes"] == 10 * 1024 ** 3
+
+        assert by_host["worker-override"]["disk_quota_override_bytes"] == 3 * 1024 ** 3
+        assert by_host["worker-override"]["disk_quota_bytes"] == 3 * 1024 ** 3
+        assert by_host["worker-override"]["default_worker_disk_quota_bytes"] == 10 * 1024 ** 3
     finally:
         await ta.close()
 
@@ -1123,6 +1470,7 @@ async def test_get_settings_returns_defaults_on_fresh_boot(tmp_path, _settings_i
             "git_author_email": "ha@distributed-esphome.local",
             "job_history_retention_days": 365,
             "firmware_cache_max_gb": 2.0,
+            "firmware_retention_days": 2,
             "job_log_retention_days": 30,
             "job_timeout": 600,
             "ota_timeout": 120,
@@ -1130,6 +1478,8 @@ async def test_get_settings_returns_defaults_on_fresh_boot(tmp_path, _settings_i
             "device_poll_interval": 60,
             "require_ha_auth": False,
             "time_format": "auto",
+            "date_format": "auto",
+            "default_worker_disk_quota_bytes": 10 * 1024 ** 3,
         }
     finally:
         await ta.close()
@@ -1598,5 +1948,154 @@ async def test_set_esphome_version_rejects_missing_version(tmp_path):
         assert resp.status == 400
         resp = await ta.post("/ui/api/esphome-version", json={"version": ""})
         assert resp.status == 400
+    finally:
+        await ta.close()
+
+
+# ---------------------------------------------------------------------------
+# DM.2: ICMP ping diagnostic
+# ---------------------------------------------------------------------------
+
+
+async def test_ping_returns_503_when_no_device_poller(tmp_path, _enable_socket):
+    """Without a device_poller hung off the app, ping has no way to find devices."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        resp = await ta.post("/ui/api/targets/device1.yaml/ping")
+        assert resp.status == 503
+    finally:
+        await ta.close()
+
+
+async def test_ping_returns_404_for_unknown_target(tmp_path, _enable_socket):
+    """A YAML the poller has never seen returns ``unknown_target``."""
+    from datetime import datetime
+    from device_poller import DevicePoller
+
+    ta = await _make_ui_app(tmp_path)
+    try:
+        poller = DevicePoller()
+        ta.client.server.app._state["device_poller"] = poller
+        resp = await ta.post("/ui/api/targets/missing.yaml/ping")
+        assert resp.status == 404
+        body = await resp.json()
+        assert body["error"] == "unknown_target"
+        assert body["target"] == "missing.yaml"
+        # Silence the unused-import warning for the date stub used elsewhere.
+        _ = datetime.now()
+    finally:
+        await ta.close()
+
+
+async def test_ping_returns_404_when_no_resolved_address(tmp_path, _enable_socket):
+    """Device exists but resolve_ota_address returned None."""
+    from datetime import datetime
+    from device_poller import Device, DevicePoller
+
+    ta = await _make_ui_app(tmp_path)
+    try:
+        poller = DevicePoller()
+        # ip_address=None and no override → resolve_ota_address returns None.
+        poller._devices["device1"] = Device(
+            name="device1",
+            ip_address=None,
+            online=False,
+            last_seen=datetime.now(),
+            compile_target="device1.yaml",
+        )
+        ta.client.server.app._state["device_poller"] = poller
+
+        resp = await ta.post("/ui/api/targets/device1.yaml/ping")
+        assert resp.status == 404
+        body = await resp.json()
+        assert body["error"] == "no_resolved_address"
+        assert body["target"] == "device1.yaml"
+        assert body["device_name"] == "device1"
+    finally:
+        await ta.close()
+
+
+async def test_ping_success_returns_stats(tmp_path, monkeypatch, _enable_socket):
+    """Happy path: poller has the device, async_ping returns alive host."""
+    from datetime import datetime
+    from device_poller import Device, DevicePoller
+
+    ta = await _make_ui_app(tmp_path)
+    try:
+        poller = DevicePoller()
+        poller._devices["device1"] = Device(
+            name="device1",
+            ip_address="192.168.1.42",
+            online=True,
+            last_seen=datetime.now(),
+            compile_target="device1.yaml",
+        )
+        ta.client.server.app._state["device_poller"] = poller
+
+        # Stub icmplib.async_ping with a fake Host object whose attrs match
+        # the real shape so the handler's coercions stay honest.
+        class _FakeHost:
+            is_alive = True
+            packets_sent = 10
+            packets_received = 9
+            packet_loss = 0.1
+            min_rtt = 1.2
+            avg_rtt = 2.5
+            max_rtt = 10.0
+            jitter = 0.8
+
+        async def _fake_ping(*args, **kwargs):
+            return _FakeHost()
+
+        import icmplib
+        monkeypatch.setattr(icmplib, "async_ping", _fake_ping)
+
+        resp = await ta.post("/ui/api/targets/device1.yaml/ping")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["target"] == "device1.yaml"
+        assert body["address"] == "192.168.1.42"
+        assert body["is_alive"] is True
+        assert body["packets_sent"] == 10
+        assert body["packets_received"] == 9
+        assert body["packet_loss"] == 0.1
+        assert body["min_rtt"] == 1.2
+        assert body["avg_rtt"] == 2.5
+        assert body["max_rtt"] == 10.0
+        assert body["jitter"] == 0.8
+        assert isinstance(body["ran_at"], (int, float))
+    finally:
+        await ta.close()
+
+
+async def test_ping_returns_500_when_icmplib_raises(tmp_path, monkeypatch, _enable_socket):
+    """Network/permission failure in icmplib surfaces as 500 ``ping_failed``."""
+    from datetime import datetime
+    from device_poller import Device, DevicePoller
+
+    ta = await _make_ui_app(tmp_path)
+    try:
+        poller = DevicePoller()
+        poller._devices["device1"] = Device(
+            name="device1",
+            ip_address="192.168.1.42",
+            online=True,
+            last_seen=datetime.now(),
+            compile_target="device1.yaml",
+        )
+        ta.client.server.app._state["device_poller"] = poller
+
+        async def _boom(*args, **kwargs):
+            raise OSError("permission denied (no CAP_NET_RAW)")
+
+        import icmplib
+        monkeypatch.setattr(icmplib, "async_ping", _boom)
+
+        resp = await ta.post("/ui/api/targets/device1.yaml/ping")
+        assert resp.status == 500
+        body = await resp.json()
+        assert body["error"] == "ping_failed"
+        assert "permission denied" in body["detail"]
+        assert body["address"] == "192.168.1.42"
     finally:
         await ta.close()

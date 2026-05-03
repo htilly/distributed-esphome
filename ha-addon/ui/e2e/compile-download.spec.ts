@@ -85,22 +85,20 @@ test('Schedules-tab Edit pre-selects Schedule Recurring (UX.8 + #79)', async ({ 
   await expect(dialog.getByRole('radio', { name: /Download Now/ })).not.toBeChecked();
 });
 
-test('Queue tab renders Download dropdown only on eligible rows', async ({ page }) => {
+test('Queue tab renders Download items only on eligible rows', async ({ page }) => {
   await page.getByRole('button', { name: /Queue/ }).click();
   await expect(page.getByText('bedroom-light')).toBeVisible({ timeout: 5000 });
 
   // job-008 (office.yaml) is the only download-only+has_firmware fixture.
-  const downloadRow = page.locator('#tab-queue tbody tr').filter({ hasText: 'office' });
-  // #69: replaced the single `<a>Download</a>` with a shadcn DropdownMenu
-  // trigger button (aria-label "Download firmware") that opens a menu of
-  // variant × compression options.
-  const dlTrigger = downloadRow.getByRole('button', { name: 'Download firmware' });
-  await expect(dlTrigger).toBeVisible();
-  await dlTrigger.click();
+  // #209: Download moved from a per-row inline dropdown into the per-row
+  // hamburger menu, where the .bin / .bin.gz × variant items render as
+  // flat menuitems under a "Download firmware" group label. Open the
+  // hamburger first, then look for the variant-scoped <a download>
+  // entries. Selector keys on the row's data-job attribute so multi-row
+  // matches on "office" don't collide.
+  const downloadRow = page.locator('#tab-queue tbody tr[data-job="job-008"]');
+  await downloadRow.getByRole('button', { name: 'More actions' }).click();
 
-  // Each menu item is an <a download> with a variant-scoped href.
-  // Legacy fixture (job-008) was pre-#69 so it surfaces as the single
-  // "firmware" variant, yielding two menu items: raw + gzipped.
   const rawItem = page.getByRole('menuitem', { name: /Firmware.*\.bin\)$/ });
   const gzItem = page.getByRole('menuitem', { name: /Firmware.*\.bin\.gz\)$/ });
   await expect(rawItem).toBeVisible();
@@ -112,22 +110,24 @@ test('Queue tab renders Download dropdown only on eligible rows', async ({ page 
     'href', /\/ui\/api\/jobs\/job-008\/firmware\?variant=firmware&gz=1$/,
   );
 
-  // Close the menu before asserting on the OTA row (Escape drops the
-  // portal; leaving it open can occlude sibling rows).
+  // Close the menu before asserting on the OTA row.
   await page.keyboard.press('Escape');
 
-  // Any other success row (e.g. bedroom-light job-001 OTA success) must NOT have a download button.
-  const otaRow = page.locator('#tab-queue tbody tr').filter({ hasText: 'bedroom-light' });
-  await expect(otaRow.getByRole('button', { name: 'Download firmware' })).toHaveCount(0);
+  // Any other success row (e.g. bedroom-light job-001 OTA success) opens
+  // a hamburger that does NOT include the Download firmware group.
+  const otaRow = page.locator('#tab-queue tbody tr[data-job="job-001"]');
+  await otaRow.getByRole('button', { name: 'More actions' }).click();
+  await expect(page.getByRole('menuitem', { name: /Firmware.*\.bin\)$/ })).toHaveCount(0);
+  await page.keyboard.press('Escape');
 });
 
-test('Queue Download dropdown survives a SWR poll tick (#71)', async ({ page }) => {
+test('Queue row hamburger survives a SWR poll tick (#209)', async ({ page }) => {
   // Regression guard for #71 / #2-class bug: SWR polls the queue at 1 Hz,
   // which re-instantiates TanStack Table cells. Any DropdownMenu state
   // kept inside the cell would tear down mid-click and the menu would
-  // vanish. The fix lifts `open` state to the QueueTab parent (see
-  // CLAUDE.md Design Judgment → "Lift DropdownMenu open state out of
-  // any row cell").
+  // vanish. #209 moved Download into the per-row hamburger and the same
+  // open-state-lifting pattern applies. See CLAUDE.md Design Judgment →
+  // "Lift DropdownMenu open state out of any row cell".
   //
   // CR.6 / E2E-1: wait on an observable condition instead of a fixed
   // sleep. The mockApi fixture handles /ui/api/queue with `route.fulfill`,
@@ -141,8 +141,8 @@ test('Queue Download dropdown survives a SWR poll tick (#71)', async ({ page }) 
   await page.getByRole('button', { name: /Queue/ }).click();
   await expect(page.locator('#tab-queue tbody tr').first()).toBeVisible({ timeout: 5000 });
 
-  const row = page.locator('#tab-queue tbody tr').filter({ hasText: 'office' });
-  await row.getByRole('button', { name: 'Download firmware' }).click();
+  const row = page.locator('#tab-queue tbody tr[data-job="job-008"]');
+  await row.getByRole('button', { name: 'More actions' }).click();
 
   const menuItem = page.getByRole('menuitem').first();
   await expect(menuItem).toBeVisible();

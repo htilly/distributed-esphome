@@ -166,6 +166,11 @@ export interface FileHistoryEntry {
   message: string;
   lines_added: number;
   lines_removed: number;
+  // #211: when a successful compile at this commit still has its
+  // firmware binary on disk, the server attaches the job id + the
+  // available variants so the History panel can render a Download chip.
+  firmware_job_id?: string;
+  firmware_variants?: string[];
 }
 
 export interface FileStatus {
@@ -266,7 +271,14 @@ export interface AppSettings {
   git_author_email: string;
   job_history_retention_days: number;
   firmware_cache_max_gb: number;
+  // Bug #198: time-based eviction for /data/firmware (in days).
+  // 0 = unlimited; default 2.
+  firmware_retention_days: number;
   job_log_retention_days: number;
+  // DQ.1 — fleet-wide default cap on the worker's /esphome-versions/ tree
+  // (bytes). Per-worker overrides live on the Worker row's "Set disk
+  // quota…" dialog and are POSTed to /ui/api/workers/{id}/disk-quota.
+  default_worker_disk_quota_bytes: number;
   // SP.8 — moved from Supervisor options.json in 1.6.
   server_token: string;
   job_timeout: number;
@@ -277,6 +289,10 @@ export interface AppSettings {
   // #82 — time-of-day presentation. 'auto' defers to the browser's
   // resolved locale; '12h'/'24h' force the format globally.
   time_format: 'auto' | '12h' | '24h';
+  // Bug #5 — date presentation. 'auto' defers to the browser's locale;
+  // 'iso' = YYYY-MM-DD, 'us' = M/D/YYYY, 'eu' = DD/MM/YYYY,
+  // 'long' = "Apr 27, 2026". Wired to App.tsx → setDateFormatPref.
+  date_format: 'auto' | 'iso' | 'us' | 'eu' | 'long';
 }
 
 export async function getSettings(): Promise<AppSettings> {
@@ -352,11 +368,31 @@ export async function compile(
   pinnedClientId?: string,
   esphomeVersion?: string,
   downloadOnly?: boolean,
+  // Bug #97: per-job worker_tag_filter from the Upgrade modal's "Tag
+  // expression" worker-selection radio. Mutually exclusive with
+  // ``pinnedClientId`` at the UI level (the radio toggles between the
+  // two modes); the server accepts both fields independently.
+  workerTagFilter?: { op: 'all_of' | 'any_of' | 'none_of'; tags: string[] },
+  // Bug #110: when the user explicitly chose a worker / tag expression
+  // that conflicts with an active routing rule and confirmed the
+  // warning, this flag tells the server to ignore routing rules for
+  // *this* job. The user's tag-filter / pin still applies — those are
+  // their explicit constraint, not the rule's.
+  bypassRoutingRules?: boolean,
+  // DM.3: per-job OTA address override. Goes through the same
+  // ``Job.ota_address`` field the rename auto-recompile already uses.
+  // Single-target only — server returns 400 on multi-target + address.
+  address?: string,
 ): Promise<CompileResponse> {
   const body: Record<string, unknown> = { targets };
   if (pinnedClientId) body.pinned_client_id = pinnedClientId;
   if (esphomeVersion) body.esphome_version = esphomeVersion;
   if (downloadOnly) body.download_only = true;
+  if (workerTagFilter && workerTagFilter.tags.length > 0) {
+    body.worker_tag_filter = workerTagFilter;
+  }
+  if (bypassRoutingRules) body.bypass_routing_rules = true;
+  if (address && address.trim()) body.address = address.trim();
   return parseResponse<CompileResponse>(
     await apiFetch('./ui/api/compile', {
       method: 'POST',
@@ -471,6 +507,19 @@ export async function setWorkerParallelJobs(id: string, maxParallelJobs: number)
   }), 'setting worker parallel-jobs');
 }
 
+// DQ.5: per-worker disk-quota override. ``null`` clears the override
+// so the worker inherits ``default_worker_disk_quota_bytes``.
+export async function setWorkerDiskQuota(
+  id: string,
+  diskQuotaBytes: number | null,
+): Promise<void> {
+  await expectOk(await apiFetch(`./ui/api/workers/${id}/disk-quota`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ disk_quota_bytes: diskQuotaBytes }),
+  }), 'setting worker disk-quota');
+}
+
 export async function cleanWorkerCache(id: string): Promise<void> {
   await expectOk(
     await apiFetch(`./ui/api/workers/${id}/clean`, { method: 'POST' }),
@@ -563,6 +612,36 @@ export async function getApiKey(filename: string): Promise<string> {
  * Bug #25: previously this enqueued a validate-only job on the queue and
  * any worker could pick it up; now it runs directly on the server.
  */
+/**
+ * RC.1 — fetch the YAML *as ESPHome will compile it* for *target*.
+ *
+ * Returns the rendered YAML on success or the captured stdout (which
+ * holds the parser/validator's error message) on failure. The
+ * ``cached`` field is informational: the cache key is `(filename, file
+ * mtime, secrets.yaml mtime)` so any save/commit on either file busts
+ * the entry automatically.
+ *
+ * IMPORTANT: the response carries plaintext ``!secret`` values. Don't
+ * persist it client-side beyond the modal's lifetime.
+ */
+export async function getRenderedConfig(target: string): Promise<{ success: boolean; output: string; cached: boolean }> {
+  const r = await apiFetch(`./ui/api/targets/${encodeURIComponent(target)}/rendered-config`);
+  let data: { success?: boolean; output?: string; cached?: boolean; error?: string };
+  try {
+    data = await r.json() as typeof data;
+  } catch {
+    if (!r.ok) throw new Error(`rendering failed (HTTP ${r.status})`);
+    throw new Error('rendered-config response was not valid JSON');
+  }
+  if (!r.ok && r.status !== 200) {
+    // 503 (ESPHome installing) carries a useful body; surface it
+    // through the same shape so the modal can render the message.
+    if (data.output) return { success: false, output: data.output, cached: false };
+    throw new Error(data.error || `rendering failed (HTTP ${r.status})`);
+  }
+  return { success: !!data.success, output: data.output || '', cached: !!data.cached };
+}
+
 export async function validateConfig(target: string): Promise<{ success: boolean; output: string }> {
   // Bespoke handling: validate may return non-OK status with a useful `output`
   // body (e.g. "config has 3 errors..."). We fall through to .output on error.
@@ -674,6 +753,34 @@ export async function restartDevice(filename: string): Promise<void> {
   );
 }
 
+// DM.2: ICMP ping result returned by /ui/api/targets/{filename}/ping.
+// Worst-case ~3.8 s wall time on an unreachable host; resolve_ota_address
+// resolution is the same one the OTA path uses so we hit what an upload
+// would target.
+export interface PingResult {
+  target: string;
+  address: string;
+  ran_at: number;
+  is_alive: boolean;
+  packets_sent: number;
+  packets_received: number;
+  packet_loss: number;
+  min_rtt: number;
+  avg_rtt: number;
+  max_rtt: number;
+  jitter: number;
+}
+
+export async function pingDevice(filename: string): Promise<PingResult> {
+  return parseResponse<PingResult>(
+    await apiFetch(
+      `./ui/api/targets/${encodeURIComponent(filename)}/ping`,
+      { method: 'POST' },
+    ),
+    'pinging device',
+  );
+}
+
 export async function renameTarget(
   filename: string,
   newName: string,
@@ -707,6 +814,66 @@ export async function updateTargetMeta(
       body: JSON.stringify(meta),
     },
   ), 'updating target metadata');
+}
+
+/**
+ * TG.4: authoritative worker-tag edit. Server normalises (trim / drop
+ * empties / dedupe) and persists to ``/data/worker-tags.json``.
+ */
+export async function setWorkerTags(
+  clientId: string,
+  tags: string[],
+): Promise<void> {
+  await expectOk(await apiFetch(
+    `./ui/api/workers/${encodeURIComponent(clientId)}/tags`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tags }),
+    },
+  ), 'setting worker tags');
+}
+
+// ---------------------------------------------------------------------------
+// TG.4 / TG.8 — routing rule CRUD
+// ---------------------------------------------------------------------------
+
+import type { RoutingRule } from '../types';
+
+export async function getRoutingRules(): Promise<RoutingRule[]> {
+  const data = await parseResponse<{ rules: RoutingRule[] }>(
+    await apiFetch('./ui/api/routing-rules'),
+    'fetching routing rules',
+  );
+  return data.rules ?? [];
+}
+
+export async function createRoutingRule(rule: Omit<RoutingRule, 'id'> & { id?: string }): Promise<RoutingRule> {
+  return parseResponse<RoutingRule>(
+    await apiFetch('./ui/api/routing-rules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(rule),
+    }),
+    'creating routing rule',
+  );
+}
+
+export async function updateRoutingRule(id: string, rule: RoutingRule): Promise<RoutingRule> {
+  return parseResponse<RoutingRule>(
+    await apiFetch(`./ui/api/routing-rules/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(rule),
+    }),
+    'updating routing rule',
+  );
+}
+
+export async function deleteRoutingRule(id: string): Promise<void> {
+  await expectOk(await apiFetch(`./ui/api/routing-rules/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  }), 'deleting routing rule');
 }
 
 export async function setTargetSchedule(

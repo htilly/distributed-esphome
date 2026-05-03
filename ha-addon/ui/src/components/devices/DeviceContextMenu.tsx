@@ -9,8 +9,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
 } from '../ui/dropdown-menu';
-import { getApiKey, restartDevice } from '../../api/client';
-import { stripYaml } from '../../utils';
+import { DeviceMenuSection } from './DeviceMenuSection';
 import { useVersioningEnabled } from '../../hooks/useVersioning';
 import type { Target } from '../../types';
 
@@ -43,6 +42,17 @@ interface Props {
   onRename: (target: string) => void;
   onDuplicate: (target: Target) => void;
   onDelete: (target: string) => void;
+  /** Bug #3: Archive directly from the hamburger menu — no confirmation
+   *  dialog, since archived devices can be restored from Settings →
+   *  Archived devices. */
+  onArchive: (target: string) => void;
+  /** DM.1: restore an archived row back to the active config dir.
+   *  Only invoked from rows where ``target.archived === true``. */
+  onUnarchive: (target: string) => void;
+  /** DM.1: permanently delete an archived YAML. Two-step ``Dialog``
+   *  confirmation is owned by DevicesTab, so this just opens that
+   *  dialog (no immediate destructive call). */
+  onPermanentDelete: (target: string) => void;
   onLogs: (target: string) => void;
   onPin: (target: string) => void;
   onUnpin: (target: string) => void;
@@ -53,6 +63,13 @@ interface Props {
   /** Bug #16: open the manual-commit dialog for this target. Only
    * offered when the target has uncommitted changes. */
   onCommitChanges: (target: string) => void;
+  /** RC.1: open the read-only modal showing the YAML *as ESPHome will
+   *  compile it* (substitutions / packages / !secret resolved). */
+  onViewRenderedConfig: (target: string) => void;
+  /** DM.2: open the ICMP ping diagnostic modal. */
+  onPing: (target: string) => void;
+  /** DM.3: open the "Install to Specific Address" modal. */
+  onInstallToAddress: (target: string) => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
@@ -63,12 +80,18 @@ function DeviceContextMenuImpl({
   onRename,
   onDuplicate,
   onDelete,
+  onArchive,
+  onUnarchive,
+  onPermanentDelete,
   onLogs,
   onPin,
   onUnpin,
   onOpenHistory,
   onOpenCompileHistory,
   onCommitChanges,
+  onViewRenderedConfig,
+  onPing,
+  onInstallToAddress,
   open,
   onOpenChange,
 }: Props) {
@@ -80,23 +103,41 @@ function DeviceContextMenuImpl({
   // API Key).
   const versioningEnabled = useVersioningEnabled();
 
-  async function handleCopyApiKey() {
-    try {
-      const key = await getApiKey(t.target);
-      await navigator.clipboard.writeText(key);
-      onToast('API key copied!', 'success');
-    } catch {
-      onToast('No API key found', 'info');
-    }
-  }
-
-  async function handleRestart() {
-    try {
-      await restartDevice(t.target);
-      onToast(`Restarting ${stripYaml(t.target)}...`, 'success');
-    } catch (err) {
-      onToast('Restart failed: ' + (err as Error).message, 'error');
-    }
+  // DM.1: archived rows expose ONLY Unarchive + Permanently delete.
+  // All other actions (Live Logs, Restart, Compile, Pin, Rename,
+  // Duplicate, Commit changes, etc.) are meaningless when the YAML
+  // sits in ``.archive/`` — the poller / scheduler / queue do not see
+  // archived targets, so any of those would either no-op or 404. Drop
+  // the whole "Device" / "Config" sections and render a minimal menu.
+  if (t.archived) {
+    return (
+      <DropdownMenu open={open} onOpenChange={onOpenChange}>
+        <DropdownMenuTrigger
+          className="action-menu-trigger cursor-pointer inline-flex items-center justify-center"
+          aria-label="More actions"
+          title="More actions"
+        >
+          <MoreVertical className="size-4" />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          className="min-w-[200px] w-max max-w-[320px] data-[state=closed]:!animate-none"
+        >
+          <DropdownMenuGroup>
+            <DropdownMenuLabel>Archived</DropdownMenuLabel>
+            <DropdownMenuItem onClick={() => onUnarchive(t.target)}>
+              Unarchive
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              variant="destructive"
+              onClick={() => onPermanentDelete(t.target)}
+            >
+              Permanently delete…
+            </DropdownMenuItem>
+          </DropdownMenuGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    );
   }
 
   return (
@@ -118,33 +159,16 @@ function DeviceContextMenuImpl({
            only the close animation is suppressed. */
         className="min-w-[200px] w-max max-w-[320px] data-[state=closed]:!animate-none"
       >
-        <DropdownMenuGroup>
-          <DropdownMenuLabel>Device</DropdownMenuLabel>
-          <DropdownMenuItem onClick={() => onLogs(t.target)}>Live Logs</DropdownMenuItem>
-          {/* JH.5: per-device past-compiles drawer. Reads from the
-              persistent /ui/api/history table so the view survives
-              queue coalescing + clears. */}
-          <DropdownMenuItem onClick={() => onOpenCompileHistory(t.target)}>
-            Compile history…
-          </DropdownMenuItem>
-          {/* #14: grayed out when the YAML doesn't expose a restart button. */}
-          <DropdownMenuItem
-            onClick={handleRestart}
-            disabled={!t.has_restart_button}
-            title={t.has_restart_button ? undefined : "No restart button in this device's YAML — add `button: [{platform: restart}]` to enable."}
-          >
-            Restart
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            onClick={handleCopyApiKey}
-            disabled={!t.has_api_key}
-            /* UX.11: disable-don't-fail tooltips explain why the item
-               is disabled + what YAML change enables it. */
-            title={t.has_api_key ? undefined : "This device has no `api:` block with an encryption key. Add `api: { encryption: { key: ... } }` to enable."}
-          >
-            Copy API Key
-          </DropdownMenuItem>
-        </DropdownMenuGroup>
+        {/* #209: shared "Device" section so the Devices-tab hamburger
+            and the Queue-tab hamburger render the exact same actions. */}
+        <DeviceMenuSection
+          target={t}
+          onToast={onToast}
+          onLogs={onLogs}
+          onOpenCompileHistory={onOpenCompileHistory}
+          onPing={onPing}
+          onInstallToAddress={onInstallToAddress}
+        />
 
         <DropdownMenuSeparator />
 
@@ -180,6 +204,12 @@ function DeviceContextMenuImpl({
           >
             Config history…
           </DropdownMenuItem>
+          {/* RC.1: open the read-only "what will ESPHome compile?"
+              view. Cheap to surface — runs `esphome config <yaml>`
+              server-side and caches the result keyed by mtime. */}
+          <DropdownMenuItem onClick={() => onViewRenderedConfig(t.target)}>
+            View rendered config…
+          </DropdownMenuItem>
           {/* Bug #16: only shown when the target has uncommitted changes.
               Bug #111: and only when versioning is on — the "commit"
               vocabulary is meaningless otherwise. */}
@@ -188,6 +218,12 @@ function DeviceContextMenuImpl({
               Commit changes…
             </DropdownMenuItem>
           )}
+          {/* Bug #3: Archive as a first-order action — no confirmation
+              modal, archived configs are restorable from
+              Settings → Archived devices. */}
+          <DropdownMenuItem onClick={() => onArchive(t.target)}>
+            Archive
+          </DropdownMenuItem>
           <DropdownMenuItem
             variant="destructive"
             onClick={() => onDelete(t.target)}
@@ -217,7 +253,9 @@ function propsEqual(prev: Props, next: Props): boolean {
     a.has_api_key === b.has_api_key &&
     a.pinned_version === b.pinned_version &&
     // Bug #16: dirty state controls the "Commit changes…" item's visibility.
-    a.has_uncommitted_changes === b.has_uncommitted_changes
+    a.has_uncommitted_changes === b.has_uncommitted_changes &&
+    // DM.1: ``archived`` flips the entire menu shape — must invalidate.
+    a.archived === b.archived
   );
 }
 

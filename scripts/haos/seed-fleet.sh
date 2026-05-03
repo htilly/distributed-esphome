@@ -59,8 +59,12 @@ FLEET_SOURCE_DIR="${FLEET_SOURCE_DIR:-/usr/share/hassio/homeassistant/esphome}"
 # specs need when HASS4_TARGET=cyd-world-clock.yaml. Extend as specs grow.
 # `fonts` + `images` are directories — tar recurses. cyd-world-clock.yaml
 # references fonts/*.ttf and images/flag_*.png; without them the server-
-# side validator rejects the bundle (#192).
-FLEET_TARGETS="${FLEET_TARGETS:-cyd-world-clock.yaml garage-door-big.yaml .common.yaml secrets.yaml fonts images}"
+# side validator rejects the bundle (#192). `includes/` carries
+# `common.yaml` (and friends) which `garage-door-big.yaml` pulls in via
+# `packages: common: !include includes/common.yaml`; without it the
+# `parallel compile: garage-door-big pinned to local-worker` smoke
+# fast-fails on file-not-found (#225).
+FLEET_TARGETS="${FLEET_TARGETS:-cyd-world-clock.yaml garage-door-big.yaml .common.yaml secrets.yaml fonts images includes}"
 GUEST_ESPHOME_DIR="${GUEST_ESPHOME_DIR:-/mnt/data/supervisor/homeassistant/esphome}"
 
 if [[ "$FLEET_SOURCE" != "repo" && "$FLEET_SOURCE" != "hass-4" ]]; then
@@ -130,10 +134,35 @@ else
   log "  Files: $FLEET_TARGETS"
   # Build the tar on the source host and stream it back. Preserving dot-files
   # (e.g. .common.yaml) is default for explicit file lists — no --wildcards
-  # hack needed. --ignore-failed-read gives us a clear error below if a file
-  # the test suite expects has been renamed or removed upstream.
+  # hack needed.
+  #
+  # Some FLEET_TARGETS entries may legitimately not be present on
+  # ``hass-4`` (e.g. a freshly-imaged HA install that hasn't been
+  # populated yet, or a developer who keeps `.common.yaml` only in the
+  # repo fixture). Filter the target list down to what actually exists
+  # on the source host before tarring; missing entries get a warning
+  # so the operator notices but the seed still proceeds with whatever
+  # IS available rather than aborting all downstream targets.
+  available_targets=$(src_ssh "$FLEET_SOURCE_HOST" \
+    "cd '$FLEET_SOURCE_DIR' 2>/dev/null && \
+     for t in $FLEET_TARGETS; do \
+       if [ -e \"\$t\" ]; then echo \"\$t\"; \
+       else echo \"missing: \$t\" >&2; \
+       fi; \
+     done" 2>&1 1>/tmp/seed-fleet.available.$$)
+  if [[ -n "$available_targets" ]]; then
+    while IFS= read -r line; do
+      log "  warning: $line — skipping"
+    done <<<"$available_targets"
+  fi
+  available=$(tr '\n' ' ' </tmp/seed-fleet.available.$$)
+  rm -f /tmp/seed-fleet.available.$$
+  if [[ -z "${available// /}" ]]; then
+    echo "ERROR: no FLEET_TARGETS exist on source host: $FLEET_SOURCE_HOST:$FLEET_SOURCE_DIR" >&2
+    exit 4
+  fi
   src_ssh "$FLEET_SOURCE_HOST" \
-    "tar cf - -C '$FLEET_SOURCE_DIR' $FLEET_TARGETS" > "$TARBALL"
+    "tar cf - -C '$FLEET_SOURCE_DIR' $available" > "$TARBALL"
 fi
 
 if [[ ! -s "$TARBALL" ]]; then

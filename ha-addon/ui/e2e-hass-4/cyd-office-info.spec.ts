@@ -126,8 +126,9 @@ test.describe.serial('cyd-office-info hass-4 smoke', () => {
     const queueRow = await findQueueRow(page);
     await expect(queueRow).toBeVisible({ timeout: 30_000 });
 
-    // Open the log modal by clicking the row's Log button
-    const logBtn = queueRow.getByRole('button', { name: /^log$/i });
+    // #221: per-row Log button is inline (was hamburgered between
+    // #209 and #221).
+    const logBtn = queueRow.getByRole('button', { name: 'Log', exact: true });
     await expect(logBtn).toBeVisible({ timeout: 30_000 });
     await logBtn.click();
 
@@ -190,8 +191,14 @@ test.describe.serial('cyd-office-info hass-4 smoke', () => {
     await expect(page.locator('.monaco-editor').first()).toBeVisible({ timeout: 15_000 });
     // …and actually rendered text (regression guard for the empty-loader
     // failure mode where the div appears but Monaco never finished loading).
-    const firstViewLine = page.locator('.monaco-editor .view-line').first();
-    await expect(firstViewLine).toContainText(/esphome|wifi|api|substitutions/, { timeout: 15_000 });
+    // Bug: the first Monaco view-line used to be `esphome:` reliably, but
+    // when the device has a `# esphome-fleet:` metadata comment block at
+    // the top (TG.5 tags / pin_version / schedule_once etc. all live
+    // there) the first line is now the explanatory header. Match against
+    // the *full* rendered text rather than just the first view-line so
+    // the regex hits regardless of how many comment lines lead the file.
+    const monaco = page.locator('.monaco-editor').first();
+    await expect(monaco).toContainText(/esphome|wifi|api|substitutions/, { timeout: 15_000 });
 
     // Read the original content via the API so we can edit it precisely
     // (Monaco-driven keyboard input is fragile across platforms).

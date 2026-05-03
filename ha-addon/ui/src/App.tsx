@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ExternalLink, Eye, EyeOff, Moon, Settings as SettingsIcon, Sun } from 'lucide-react';
-import useSWR from 'swr';
+import useSWR, { useSWRConfig } from 'swr';
 import {
   cancelJobs,
   cleanWorkerCache,
@@ -24,6 +24,7 @@ import {
   removeWorker,
   renameTarget,
   setWorkerParallelJobs,
+  setWorkerDiskQuota,
   retryAllFailed,
   retryJobs,
   requestServerDiagnostics,
@@ -42,6 +43,9 @@ import { DeviceLogModal } from './components/DeviceLogModal';
 import { DevicesTab, RenameModal } from './components/DevicesTab';
 import { NewDeviceModal } from './components/NewDeviceModal';
 import { UpgradeModal } from './components/UpgradeModal';
+import { RenderedConfigModal } from './components/RenderedConfigModal';
+import PingDeviceModal from './components/PingDeviceModal';
+import InstallToAddressModal from './components/InstallToAddressModal';
 // ScheduleModal retired in #22 — absorbed into the unified UpgradeModal.
 import { SchedulesTab } from './components/SchedulesTab';
 import { EditorModal } from './components/EditorModal';
@@ -65,8 +69,9 @@ import {
   DialogTitle,
 } from './components/ui/dialog';
 import { WorkersTab } from './components/WorkersTab';
+import { RoutingRulesModal } from './components/RoutingRulesModal';
 import type { Device, Job, Target, Worker } from './types';
-import { setTimeFormatPref, stripYaml } from './utils';
+import { setDateFormatPref, setTimeFormatPref, stripYaml } from './utils';
 import { downloadTextFile } from './utils/terminal';
 import esphomeLogoUrl from './assets/esphome-logo.svg';
 import './theme.css';
@@ -174,6 +179,15 @@ export default function App() {
   const [commitDialogTarget, setCommitDialogTarget] = useState<string | null>(null);
   const [commitDialogMessage, setCommitDialogMessage] = useState('');
   const [commitDialogBusy, setCommitDialogBusy] = useState(false);
+  // RC.1: read-only "rendered config" viewer. ``null`` = closed; the
+  // string is the target filename. Modal fetches /rendered-config on
+  // open and discards the output on close — the response carries
+  // plaintext !secret values, so we never persist it.
+  const [renderedConfigTarget, setRenderedConfigTarget] = useState<string | null>(null);
+  // DM.2: target whose Ping modal is currently open (or null if none).
+  const [pingTarget, setPingTarget] = useState<string | null>(null);
+  // DM.3: target whose Install-to-address modal is currently open.
+  const [installAddressTarget, setInstallAddressTarget] = useState<string | null>(null);
   // QS.6: SWR's default compare (stable-hash) already prevents re-renders
   // when polled data is structurally unchanged. The custom JSON.stringify
   // compare we used to have was strictly worse — O(n) serialization of the
@@ -184,6 +198,11 @@ export default function App() {
   const logSwrError = useCallback((key: string) => (err: unknown) => {
     console.error('SWR', key, err);
   }, []);
+
+  // Bug #2: invalidate the archived-configs SWR key after archive/restore so
+  // the Devices toolbar's "Restore from archive" button enables/disables
+  // without waiting for a manual reload.
+  const { mutate: mutateGlobal } = useSWRConfig();
 
   const { data: serverInfo = { token: '', port: 8765 }, error: serverInfoError, mutate: mutateServerInfo } = useSWR(
     'serverInfo',
@@ -214,6 +233,9 @@ export default function App() {
   useEffect(() => {
     if (appSettings?.time_format) setTimeFormatPref(appSettings.time_format);
   }, [appSettings?.time_format]);
+  useEffect(() => {
+    if (appSettings?.date_format) setDateFormatPref(appSettings.date_format);
+  }, [appSettings?.date_format]);
   // Poll at 1 Hz for live-feeling updates. Workers + queue are pure in-memory
   // reads. Targets/devices does a readdir + per-target stat() for mtime cache
   // checks (metadata resolution is cached and only re-fires when a file
@@ -283,12 +305,32 @@ export default function App() {
   const [editorTarget, setEditorTarget] = useState<string | null>(null);
   const [connectModalOpen, setConnectModalOpen] = useState(false);
   const [connectModalPreset, setConnectModalPreset] = useState<import('./types').WorkerPreset | null>(null);
-  // #22: unified Upgrade modal. Stores target + display name + which mode to open in.
-  const [upgradeModalTarget, setUpgradeModalTarget] = useState<{ target: string; displayName: string; defaultMode: 'now' | 'schedule' } | null>(null);
+  // #22: unified Upgrade modal. Stores target list + display name + which mode to open in.
+  // Bug #107: the bulk Upgrade dropdown (Upgrade All / Online / Outdated /
+  // Selected) now routes through this modal too — `targets` carries the
+  // affected set; single-target callers wrap in a 1-element array.
+  // Bug #109: `seed` carries the original job's parameters when the user
+  // reruns from the Queue or LogModal so the modal opens pre-populated.
+  const [upgradeModalTarget, setUpgradeModalTarget] = useState<{
+    targets: string[];
+    displayName: string;
+    defaultMode: 'now' | 'schedule';
+    seed?: {
+      pinnedClientId?: string | null;
+      workerTagFilter?: { op: 'all_of' | 'any_of' | 'none_of'; tags: string[] } | null;
+      esphomeVersion?: string | null;
+      action?: 'upgrade-now' | 'download-now';
+    };
+  } | null>(null);
   const [renameModalTarget, setRenameModalTarget] = useState<string | null>(null);
   // CD.4-CD.6: shared "create / duplicate" modal state. null = closed, object = open.
   // sourceTarget is set when duplicating an existing device.
   const [newDeviceModal, setNewDeviceModal] = useState<{ mode: 'new' | 'duplicate'; sourceTarget?: string } | null>(null);
+  // TG.9: lifted out of WorkersTab so the Queue's BLOCKED-badge click can
+  // also open it (deep-linked to the offending rule). null = closed, ''
+  // = open in list mode, '<id>' = open with that rule pre-selected for
+  // edit. The QueueTab's badge passes job.blocked_reason.rule_id.
+  const [routingRulesEditId, setRoutingRulesEditId] = useState<string | null>(null);
   // #42: targets that were just created via the NewDeviceModal and haven't
   // been saved yet. If the editor closes without a successful save, the
   // stub/duplicated file is deleted so cancelled-out creates don't leave
@@ -350,55 +392,68 @@ export default function App() {
   // memoized so the columns hook (useDeviceColumns) can keep its memo cache
   // across SWR polls. Without useCallback they'd be fresh refs every render
   // and the columns block would rebuild on every 1Hz tick.
-  const handleCompile = useCallback(async (targets_: string[] | 'all' | 'outdated') => {
-    try {
-      const data = await compile(targets_);
-      addToast(`Queued ${data.enqueued} device(s)`, 'success');
-      switchTab('queue');
-      // Mutate BOTH queue and devices: queue so the new job appears on the
-      // queue tab immediately, devices so the orange "Upgrading" dot
-      // appears on the source row immediately (#11). Without the devices
-      // mutate the dot lags by up to one poll interval.
-      mutateQueue();
-      mutateDevices();
-    } catch (err) {
-      addToast('Error: ' + (err as Error).message, 'error');
-    }
-  }, [addToast, switchTab, mutateQueue, mutateDevices]);
 
   // #22: open the unified Upgrade modal. defaultMode controls whether it
   // opens on "Now" or "Schedule" tab.
   const handleOpenUpgradeModal = useCallback((target: string, defaultMode: 'now' | 'schedule' = 'now') => {
     const t = targets.find(x => x.target === target);
     const displayName = t?.friendly_name || stripYaml(target);
-    setUpgradeModalTarget({ target, displayName, defaultMode });
+    setUpgradeModalTarget({ targets: [target], displayName, defaultMode });
   }, [targets]);
+
+  // Bug #107: open the Upgrade modal for a multi-device set. Used by the
+  // four bulk-upgrade items in the Devices toolbar (All / Online /
+  // Outdated / Selected). Caller is responsible for materialising the
+  // target list and a human-readable displayName ("12 devices",
+  // "5 outdated devices", etc.).
+  const handleOpenUpgradeModalMany = useCallback((targets_: string[], displayName: string, defaultMode: 'now' | 'schedule' = 'now') => {
+    if (targets_.length === 0) return;
+    setUpgradeModalTarget({ targets: targets_, displayName, defaultMode });
+  }, []);
 
   async function handleUpgradeConfirm(params: {
     pinnedClientId: string | null;
     esphomeVersion: string | null;
     updatePin?: string | null;
     downloadOnly?: boolean;
+    // Bug #97: per-job worker_tag_filter from the Upgrade modal's
+    // "Tag expression" worker-selection radio. Mutually exclusive
+    // with pinnedClientId at the UI level.
+    workerTagFilter?: { op: 'all_of' | 'any_of' | 'none_of'; tags: string[] } | null;
+    // Bug #110: true when the user confirmed the routing-rule
+    // conflict warning — the server will skip routing-rule
+    // eligibility checks for this job.
+    bypassRoutingRules?: boolean;
   }) {
     const ctx = upgradeModalTarget;
     if (!ctx) return;
     setUpgradeModalTarget(null);
     try {
-      // #12: if the user changed the version on a pinned device, update the pin first.
-      if (params.updatePin) {
-        await pinTargetVersion(ctx.target, params.updatePin);
+      // #12: if the user changed the version on a pinned device, update
+      // the pin first. Pin updates only happen in the single-target
+      // case — the modal suppresses the pin warning when there's no
+      // single device to compare against (multi-target sets have no
+      // shared "current pin" to bump).
+      if (params.updatePin && ctx.targets.length === 1) {
+        await pinTargetVersion(ctx.targets[0], params.updatePin);
       }
+      // Bug #107: bulk path enqueues the entire set in one POST so the
+      // server-side counter / toast reads correctly (`Queued N device(s)`).
       await compile(
-        [ctx.target],
+        ctx.targets,
         params.pinnedClientId ?? undefined,
         params.esphomeVersion ?? undefined,
         params.downloadOnly ?? false,
+        params.workerTagFilter ?? undefined,
+        params.bypassRoutingRules ?? undefined,
       );
       const versionSuffix = params.esphomeVersion ? ` (ESPHome ${params.esphomeVersion})` : '';
       const workerSuffix = params.pinnedClientId
         ? ` on ${workers.find(w => w.client_id === params.pinnedClientId)?.hostname ?? params.pinnedClientId}`
-        : '';
-      const pinSuffix = params.updatePin ? ` (pin updated to ${params.updatePin})` : '';
+        : params.workerTagFilter
+          ? ` (workers ${params.workerTagFilter.op.replace('_', ' ')} [${params.workerTagFilter.tags.join(', ')}])`
+          : '';
+      const pinSuffix = params.updatePin && ctx.targets.length === 1 ? ` (pin updated to ${params.updatePin})` : '';
       // FD.3: different toast verb when producing a downloadable binary
       // so the user understands the device won't be OTA'd this round.
       const verb = params.downloadOnly ? 'Compile-and-download queued for' : 'Queued';
@@ -437,13 +492,48 @@ export default function App() {
     }
   }
 
+  // Bug #109: open the UpgradeModal seeded with a previous job's
+  // worker / version / action / tag-filter so a single-job rerun goes
+  // through the same picker the user originally saw — but with the
+  // chance to tweak any field before re-submitting. Bulk reruns
+  // (Rerun All Failed / Rerun Selected) keep the immediate
+  // re-enqueue path because there's no single set of params to seed.
+  function rerunSingleJobViaModal(job: Job) {
+    const t = targets.find(x => x.target === job.target);
+    const displayName = t?.friendly_name || stripYaml(job.target);
+    setUpgradeModalTarget({
+      targets: [job.target],
+      displayName,
+      defaultMode: 'now',
+      seed: {
+        pinnedClientId: job.pinned_client_id ?? null,
+        workerTagFilter: job.worker_tag_filter ?? null,
+        esphomeVersion: job.esphome_version ?? null,
+        action: job.download_only ? 'download-now' : 'upgrade-now',
+      },
+    });
+  }
+
   async function handleRetryJobs(ids: string[]) {
+    // Bug #109: when the user reruns a single existing job from the
+    // Queue / LogModal, open the UpgradeModal pre-populated with that
+    // job's worker / version / action / tag-filter so the user can
+    // tweak before submitting. Bulk reruns (>1 id) keep the immediate
+    // re-enqueue path — there's no single set of params to seed a
+    // modal with.
+    if (ids.length === 1) {
+      const job = queue.find(j => j.id === ids[0]);
+      if (job) {
+        rerunSingleJobViaModal(job);
+        return;
+      }
+    }
     try {
       const data = await retryJobs(ids);
       if (data.retried > 0) {
         const msg = data.retried === 1
-          ? `Retrying ${stripYaml(queue.find(j => j.id === ids[0])?.target ?? ids[0])}`
-          : `Retrying ${data.retried} jobs`;
+          ? `Rerunning ${stripYaml(queue.find(j => j.id === ids[0])?.target ?? ids[0])}`
+          : `Rerunning ${data.retried} jobs`;
         addToast(msg, 'success');
       }
       mutateQueue();
@@ -456,7 +546,7 @@ export default function App() {
     try {
       const data = await retryAllFailed();
       if (data.retried > 0) {
-        const msg = data.retried === 1 ? 'Retrying 1 job' : `Retrying ${data.retried} failed jobs`;
+        const msg = data.retried === 1 ? 'Rerunning 1 job' : `Rerunning ${data.retried} failed jobs`;
         addToast(msg, 'success');
       }
       mutateQueue();
@@ -601,15 +691,30 @@ export default function App() {
     }
   }
 
+  async function handleSetDiskQuota(id: string, bytes: number | null) {
+    try {
+      await setWorkerDiskQuota(id, bytes);
+      const label = bytes == null
+        ? 'Cleared override — using fleet default'
+        : `Set quota to ${Math.round(bytes / (1024 ** 3))} GiB`;
+      addToast(label, 'success');
+      mutateWorkers();
+    } catch (err) {
+      addToast('Error: ' + (err as Error).message, 'error');
+    }
+  }
+
   const handleDeleteDevice = useCallback(async (target: string, archive: boolean) => {
     try {
       await deleteTarget(target, archive);
       addToast(`${archive ? 'Archived' : 'Deleted'} ${stripYaml(target)}`, 'success');
       mutateDevices();
+      // Bug #2: archive populated → enable "Restore from archive" without a reload.
+      if (archive) mutateGlobal('archived-configs');
     } catch (err) {
       addToast('Delete failed: ' + (err as Error).message, 'error');
     }
-  }, [addToast, mutateDevices]);
+  }, [addToast, mutateDevices, mutateGlobal]);
 
   const handleRenameDevice = useCallback(async (oldTarget: string, newName: string) => {
     try {
@@ -785,8 +890,8 @@ export default function App() {
             workers={workers}
             streamerMode={streamerMode}
             activeJobsByTarget={activeJobsByTarget}
-            onCompile={handleCompile}
             onUpgradeOne={handleOpenUpgradeModal}
+            onUpgradeMany={handleOpenUpgradeModalMany}
             onEdit={setEditorTarget}
             onLogs={setDeviceLogTarget}
             onToast={addToast}
@@ -798,6 +903,9 @@ export default function App() {
             onOpenHistory={(target) => setHistoryTarget(target)}
             onOpenCompileHistory={(target) => setCompileHistoryTarget(target)}
             onCommitChanges={(target) => { setCommitDialogMessage(''); setCommitDialogTarget(target); }}
+            onViewRenderedConfig={(target) => setRenderedConfigTarget(target)}
+            onPing={(target) => setPingTarget(target)}
+            onInstallToAddress={(target) => setInstallAddressTarget(target)}
             onRefresh={() => mutateDevices()}
           />
         )}
@@ -819,21 +927,33 @@ export default function App() {
               setHistoryFromHash(fromHash);
               setHistoryTarget(target);
             }}
+            // TG.9: BLOCKED-badge click opens the routing-rules editor
+            // pre-selected to the rule that fired.
+            onOpenRoutingRule={(ruleId) => setRoutingRulesEditId(ruleId)}
+            // #209: device-section actions mirrored from the Devices tab.
+            onToast={addToast}
+            onLogs={setDeviceLogTarget}
+            onOpenCompileHistory={(target) => setCompileHistoryTarget(target)}
+            onPing={(target) => setPingTarget(target)}
+            onInstallToAddress={(target) => setInstallAddressTarget(target)}
           />
         )}
         {activeTab === 'workers' && (
           <WorkersTab
             workers={workers}
+            targets={targets}
             queue={displayQueue}
             serverClientVersion={serverInfo.server_client_version}
             minImageVersion={serverInfo.min_image_version}
             onRemove={handleRemoveWorker}
             onSetParallelJobs={handleSetParallelJobs}
+            onSetDiskQuota={handleSetDiskQuota}
             onCleanCache={handleCleanWorkerCache}
             onCleanAllCaches={handleCleanAllCaches}
             onConnectWorker={(preset) => { setConnectModalPreset(preset ?? null); setConnectModalOpen(true); }}
             onViewLogs={setLogWorkerId}
             onRequestDiagnostics={handleRequestWorkerDiagnostics}
+            onOpenRoutingRules={() => setRoutingRulesEditId('')}
           />
         )}
         {activeTab === 'schedules' && (
@@ -939,6 +1059,7 @@ export default function App() {
           // happens AFTER the save.
           onCompile={(target) => handleOpenUpgradeModal(target)}
           onOpenHistory={(target) => setHistoryTarget(target)}
+          onViewRenderedConfig={(target) => setRenderedConfigTarget(target)}
           monacoTheme={theme === 'light' ? 'vs' : 'vs-dark'}
           esphomeVersion={esphomeVersions.selected ?? esphomeVersions.detected ?? undefined}
           // Bug #31: bump to trigger a re-fetch after History Restore.
@@ -951,6 +1072,18 @@ export default function App() {
           serverInfo={serverInfo}
           esphomeVersion={seedVersion}
           preset={connectModalPreset}
+          // Bug #96 (was #27): worker tag pool only — the dialog
+          // configures a *worker*, so suggesting device tags
+          // (`kitchen`, `cosy`, `ratgdo`) is misleading and dilutes
+          // the autocomplete signal. Worker-only matches the routing-
+          // rule worker_match autocomplete in `RoutingRuleBuilder`.
+          tagSuggestions={(() => {
+            const pool = new Set<string>();
+            for (const w of workers) {
+              if (w.tags) for (const x of w.tags) pool.add(x);
+            }
+            return Array.from(pool).sort();
+          })()}
           onClose={() => { setConnectModalOpen(false); setConnectModalPreset(null); }}
         />
       )}
@@ -1061,12 +1194,37 @@ export default function App() {
         </DialogContent>
       </Dialog>
 
-      {/* #22: Unified Upgrade modal — handles both immediate upgrades and scheduling */}
+      {/* #22: Unified Upgrade modal — handles both immediate upgrades and scheduling.
+          Bug #107: now also handles multi-device sets — `t` is undefined when
+          there's no single device to read pin/schedule context from, which
+          implicitly suppresses the modal's pin warning + the "Remove existing
+          schedule" button. Schedule saves fan out across the target list. */}
       {upgradeModalTarget && (() => {
-        const t = targets.find(x => x.target === upgradeModalTarget.target);
+        const isMulti = upgradeModalTarget.targets.length > 1;
+        const t = isMulti ? undefined : targets.find(x => x.target === upgradeModalTarget.targets[0]);
+        // Bug #110: materialise per-target tag lists so the modal can
+        // detect routing-rule conflicts client-side. parseTags
+        // duplicates the trim/dedupe logic the server applies on the
+        // YAML metadata round-trip.
+        const parseTags = (s: string | null | undefined): string[] => {
+          if (!s) return [];
+          const seen = new Set<string>();
+          const out: string[] = [];
+          for (const part of s.split(',')) {
+            const v = part.trim();
+            if (!v || seen.has(v)) continue;
+            seen.add(v);
+            out.push(v);
+          }
+          return out;
+        };
+        const affectedTargetTags = upgradeModalTarget.targets.map(name => {
+          const tt = targets.find(x => x.target === name);
+          return parseTags(tt?.tags);
+        });
         return (
           <UpgradeModal
-            target={upgradeModalTarget.target}
+            target={upgradeModalTarget.targets[0] ?? ''}
             displayName={upgradeModalTarget.displayName}
             workers={workers}
             esphomeVersions={esphomeVersions.available}
@@ -1077,11 +1235,16 @@ export default function App() {
             currentScheduleTz={t?.schedule_tz}
             currentOnce={t?.schedule_once}
             defaultMode={upgradeModalTarget.defaultMode}
+            seed={upgradeModalTarget.seed}
+            affectedTargetTags={affectedTargetTags}
             onUpgradeNow={handleUpgradeConfirm}
             onSaveSchedule={async (cron, version, tz) => {
               try {
-                await applyScheduleVersion(upgradeModalTarget.target, t?.pinned_version ?? null, version);
-                await setTargetSchedule(upgradeModalTarget.target, cron, tz);
+                await Promise.all(upgradeModalTarget.targets.map(async (target) => {
+                  const tt = targets.find(x => x.target === target);
+                  await applyScheduleVersion(target, tt?.pinned_version ?? null, version);
+                  await setTargetSchedule(target, cron, tz);
+                }));
                 addToast(`Schedule set for ${upgradeModalTarget.displayName}`, 'success');
                 setUpgradeModalTarget(null);
                 mutateDevices();
@@ -1092,8 +1255,11 @@ export default function App() {
             onSaveOnce={async (datetime, version) => {
               try {
                 const { setTargetScheduleOnce } = await import('./api/client');
-                await applyScheduleVersion(upgradeModalTarget.target, t?.pinned_version ?? null, version);
-                await setTargetScheduleOnce(upgradeModalTarget.target, datetime);
+                await Promise.all(upgradeModalTarget.targets.map(async (target) => {
+                  const tt = targets.find(x => x.target === target);
+                  await applyScheduleVersion(target, tt?.pinned_version ?? null, version);
+                  await setTargetScheduleOnce(target, datetime);
+                }));
                 addToast(`One-time upgrade scheduled for ${upgradeModalTarget.displayName}`, 'success');
                 setUpgradeModalTarget(null);
                 mutateDevices();
@@ -1102,8 +1268,11 @@ export default function App() {
               }
             }}
             onDeleteSchedule={async () => {
+              // Single-target only — the modal hides this button when
+              // there's no current schedule to remove (which is the
+              // multi-target case).
               try {
-                await deleteTargetSchedule(upgradeModalTarget.target);
+                await Promise.all(upgradeModalTarget.targets.map(target => deleteTargetSchedule(target)));
                 addToast(`Schedule removed for ${upgradeModalTarget.displayName}`, 'success');
                 setUpgradeModalTarget(null);
                 mutateDevices();
@@ -1112,6 +1281,43 @@ export default function App() {
               }
             }}
             onClose={() => setUpgradeModalTarget(null)}
+          />
+        );
+      })()}
+
+      {/* RC.1: read-only YAML viewer for `esphome config <yaml>` output. */}
+      {renderedConfigTarget && (() => {
+        const t = targets.find(x => x.target === renderedConfigTarget);
+        return (
+          <RenderedConfigModal
+            target={renderedConfigTarget}
+            displayName={t?.friendly_name || stripYaml(renderedConfigTarget)}
+            monacoTheme={theme === 'light' ? 'vs' : 'vs-dark'}
+            onClose={() => setRenderedConfigTarget(null)}
+          />
+        );
+      })()}
+
+      {/* DM.2: ICMP ping diagnostic for the per-row hamburger entry. */}
+      {pingTarget && (
+        <PingDeviceModal
+          target={pingTarget}
+          onClose={() => setPingTarget(null)}
+          onToast={addToast}
+        />
+      )}
+
+      {/* DM.3: install-to-specific-address from the per-row hamburger.
+          Pre-fills with the device's resolved IP from the poller; the
+          user can edit before triggering the OTA. */}
+      {installAddressTarget && (() => {
+        const t = targets.find(x => x.target === installAddressTarget);
+        return (
+          <InstallToAddressModal
+            target={installAddressTarget}
+            defaultAddress={t?.ip_address ?? null}
+            onClose={() => setInstallAddressTarget(null)}
+            onToast={addToast}
           />
         );
       })()}
@@ -1146,6 +1352,18 @@ export default function App() {
           onToast={addToast}
         />
       )}
+
+      {/* TG.9: shared routing-rules editor — same instance is reached
+          from the Workers tab toolbar AND the Queue tab BLOCKED-badge
+          click. ``initialEditRuleId`` lets the Queue path deep-link to
+          the rule that's blocking the job. */}
+      <RoutingRulesModal
+        open={routingRulesEditId !== null}
+        onOpenChange={(o) => { if (!o) setRoutingRulesEditId(null); }}
+        targets={targets}
+        workers={workers}
+        initialEditRuleId={routingRulesEditId || null}
+      />
     </>
   );
 }
