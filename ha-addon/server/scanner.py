@@ -707,6 +707,88 @@ def duplicate_device(config_dir: str, source: str, new_name: str) -> str:
     return yaml.dump(data, Dumper=Dumper, sort_keys=False, default_flow_style=False)
 
 
+def rename_device_in_yaml(content: str, new_name: str) -> tuple[str, bool]:
+    """Rewrite the device name binding in *content*, preserving comments.
+
+    Parses *content* via ``yaml.safe_load`` to identify (a) the OLD name
+    string and (b) which top-level block holds it: ``substitutions.name``
+    is preferred (the convention used by ESPHome packages via ``${name}``);
+    a literal ``esphome.name`` is the fallback. ``${...}`` indirection
+    that doesn't resolve to a known substitution is treated as
+    not-safely-rewriteable and the function bails out with
+    ``(content, False)``.
+
+    Once the binding is found, the actual rewrite is a literal string
+    replacement on the single matching ``name:`` line — no regex on YAML
+    structure (PY-1), no `yaml.safe_dump` (which would drop comments and
+    re-flow the file). Returns ``(new_content, rewritten)``.
+
+    The caller decides what to do with ``rewritten=False``: rename can
+    still proceed at the filesystem level, but the device's internal name
+    in YAML will not match the new filename until the user edits it
+    manually. ``ui_api.rename_target`` surfaces this as a warning.
+    """
+    import yaml as _yaml  # noqa: PLC0415
+
+    try:
+        data = _yaml.safe_load(content)
+    except _yaml.YAMLError:
+        return content, False
+    if not isinstance(data, dict):
+        return content, False
+
+    subs = data.get("substitutions") if isinstance(data.get("substitutions"), dict) else None
+    target_block: str
+    old_name: str
+    if subs and isinstance(subs.get("name"), str):
+        target_block = "substitutions"
+        old_name = subs["name"]
+    else:
+        esp = data.get("esphome")
+        if not (isinstance(esp, dict) and isinstance(esp.get("name"), str)):
+            return content, False
+        existing = esp["name"]
+        if existing.startswith("${") and existing.endswith("}"):
+            return content, False  # indirection without a substitutions target — unsafe to touch
+        target_block = "esphome"
+        old_name = existing
+
+    if old_name == new_name:
+        return content, True  # nothing to change but the binding exists
+
+    lines = content.splitlines(keepends=True)
+    out: list[str] = []
+    in_block = False
+    rewritten = False
+    for line in lines:
+        if rewritten:
+            out.append(line)
+            continue
+        stripped = line.lstrip(" \t")
+        if stripped and not stripped.startswith("#"):
+            indent_len = len(line) - len(stripped)
+            if indent_len == 0 and ":" in stripped:
+                key = stripped.split(":", 1)[0].strip()
+                in_block = (key == target_block)
+                out.append(line)
+                continue
+            if in_block and stripped.startswith("name:"):
+                # Literal-value substitution on the identified line. Handle
+                # bare, single-quoted, and double-quoted forms; preserve
+                # any trailing comment by replacing only the value token.
+                for quote in ("\"", "'", ""):
+                    needle = f"name: {quote}{old_name}{quote}"
+                    if needle in line:
+                        replacement = f"name: {quote}{new_name}{quote}"
+                        out.append(line.replace(needle, replacement, 1))
+                        rewritten = True
+                        break
+                if rewritten:
+                    continue
+        out.append(line)
+    return "".join(out), rewritten
+
+
 # ---------------------------------------------------------------------------
 # Per-device metadata stored as a YAML comment block at the top of each file.
 # Format:

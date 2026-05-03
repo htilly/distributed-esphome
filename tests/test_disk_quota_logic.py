@@ -142,39 +142,43 @@ def test_compute_usage_ignores_other_top_level_files(tmp_path: Path) -> None:
 
 
 def test_prune_orphans_removes_slots_above_max(tmp_path: Path) -> None:
-    """Slot dirs with id >= max_slots evicted unconditionally.
+    """Slot dirs with id > max_slots evicted unconditionally.
 
-    Spec: "slots/N/ + pio-slot-N/ for N >= MAX_PARALLEL_JOBS". With
-    max_slots=2 the valid ids are 0..1; ids 2 and 5 are both orphans.
+    Worker thread ids are 1..max_slots (see ``client.start_workers`` →
+    ``args=(i + 1, ...)``). With max_slots=2 the valid ids are {1, 2};
+    ids 3+ are orphans from a downsize. Regression for the off-by-one
+    that previously deleted the highest live slot.
     """
     base = tmp_path
-    _make_slot_target(base, 0, "stem-a", size=10)
     _make_slot_target(base, 1, "stem-a", size=10)
-    _make_slot_target(base, 2, "stem-a", size=20)  # orphan
+    _make_slot_target(base, 2, "stem-a", size=10)  # live (was wrongly evicted pre-fix)
+    _make_slot_target(base, 3, "stem-a", size=20)  # orphan
     _make_slot_target(base, 5, "stem-a", size=30)  # orphan
-    _make_pio_slot(base, 1, size=10, mtime=1.0)
-    _make_pio_slot(base, 5, size=40, mtime=1.0)   # orphan
+    _make_pio_slot(base, 2, size=10, mtime=1.0)    # live
+    _make_pio_slot(base, 5, size=40, mtime=1.0)    # orphan
 
     result = prune_orphans(base, max_slots=2)
     assert result.orphan_slots_evicted == 2
     assert result.freed_bytes == 20 + 30 + 40
-    assert (base / "slots" / "0").exists()
     assert (base / "slots" / "1").exists()
-    assert not (base / "slots" / "2").exists()
+    assert (base / "slots" / "2").exists()
+    assert not (base / "slots" / "3").exists()
     assert not (base / "slots" / "5").exists()
     assert not (base / "pio-slot-5").exists()
-    assert (base / "pio-slot-1").exists()
+    assert (base / "pio-slot-2").exists()
 
 
 def test_prune_orphans_keeps_in_range_slots(tmp_path: Path) -> None:
     base = tmp_path
     _make_slot_target(base, 1, "stem-a", size=10)
     _make_slot_target(base, 2, "stem-a", size=20)
+    _make_slot_target(base, 3, "stem-a", size=30)
 
     result = prune_orphans(base, max_slots=3)
     assert result.orphan_slots_evicted == 0
     assert (base / "slots" / "1").exists()
     assert (base / "slots" / "2").exists()
+    assert (base / "slots" / "3").exists()
 
 
 def test_prune_orphans_handles_pio_slot_only(tmp_path: Path) -> None:
@@ -184,6 +188,24 @@ def test_prune_orphans_handles_pio_slot_only(tmp_path: Path) -> None:
     result = prune_orphans(base, max_slots=2)
     assert result.orphan_slots_evicted == 1
     assert result.freed_bytes == 50
+
+
+def test_prune_orphans_keeps_highest_live_slot(tmp_path: Path) -> None:
+    """Regression: the highest live slot (id == max_slots) must survive.
+
+    Pre-fix the guard was ``slot_id < max_slots`` — with the default
+    MAX_PARALLEL_JOBS=2, slot 2 (the second live worker) got nuked under
+    a running compile on every prune sweep.
+    """
+    base = tmp_path
+    _make_slot_target(base, 2, "live-stem", size=100)
+    _make_pio_slot(base, 2, size=100, mtime=1.0)
+
+    result = prune_orphans(base, max_slots=2)
+
+    assert result.orphan_slots_evicted == 0
+    assert (base / "slots" / "2").exists(), "live worker's slot was evicted"
+    assert (base / "pio-slot-2").exists(), "live worker's pio-slot was evicted"
 
 
 # ---------------------------------------------------------------------------

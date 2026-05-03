@@ -29,6 +29,7 @@ from routing import (
     _clause_from_dict,
     find_blocking_rule,
     is_eligible,
+    validate_rule,
 )
 
 if TYPE_CHECKING:
@@ -69,6 +70,10 @@ def _device_routing_extra(meta: dict) -> list[Rule]:
                 device_match=[_clause_from_dict(c) for c in (r.get("device_match") or [])],
                 worker_match=[_clause_from_dict(c) for c in (r.get("worker_match") or [])],
             )
+            # validate_rule rejects empty-tags clauses (which would
+            # match every device via vacuous-truth) and unknown
+            # severities — same bar global rules pass at create time.
+            validate_rule(rule)
             out.append(rule)
         except RoutingRuleError as exc:
             logger.warning("dropping malformed routing_extra rule: %s", exc)
@@ -229,29 +234,11 @@ def fire_and_forget(app: "web.Application") -> None:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return  # not in an event loop (sync test harness, etc.)
-    # Skip the spawn when there are no global rules AND no jobs in
-    # PENDING/BLOCKED — the sweep would be a guaranteed no-op. We can't
-    # cheaply tell whether any device has routing_extra without reading
-    # every YAML, so when global_rules is non-empty we always sweep.
-    if not rule_store.list_rules():
-        # Still need to sweep when there *are* BLOCKED jobs — they may be
-        # blocked from a now-deleted rule and need rescuing.
-        queue = app.get("queue")
-        if queue is None:
-            return
-        # Cheap state probe avoids an empty-sweep spawn for the
-        # rule-free common case. The .get_all() snapshot is already
-        # in-memory; no I/O.
-        from job_queue import JobState  # noqa: PLC0415
-        if not any(j.state == JobState.BLOCKED for j in queue.get_all()):
-            # Also skip when all jobs are already PENDING with no
-            # blocked_reason stale-state to clear. Rare edge case —
-            # still cheap to skip.
-            if not any(
-                j.state == JobState.PENDING and j.blocked_reason is not None
-                for j in queue.get_all()
-            ):
-                return
+    # No global-rules short-circuit: per-device ``routing_extra`` blocks
+    # in YAML can also block jobs, and we can't see those without
+    # reading every YAML. The 30-second routing_watchdog is the perf
+    # safety net; the sweep itself is microseconds for an empty fleet
+    # and sub-ms for typical home-lab sizes.
     loop.create_task(re_evaluate_routing(app))
 
 

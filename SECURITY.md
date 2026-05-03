@@ -4,7 +4,7 @@
 
 | Version  | Supported          |
 |----------|--------------------|
-| 1.7.0.x  | ✅ Current release  |
+| 1.7.0    | ✅ Current release  |
 | 1.6.2    | ✅ Previous stable — security fixes only if trivially backportable |
 | < 1.6.2  | ❌ No patches       |
 

@@ -96,6 +96,30 @@ def _cfg(request: web.Request) -> AppConfig:
     return request.app["config"]
 
 
+async def _ensure_pinned_esphome_bin(pin: str) -> str:
+    """Lazy-install the pinned ESPHome version into ``/data/esphome-versions``
+    and return the path to its ``esphome`` binary.
+
+    Used by the validate and rendered-config endpoints, both of which run
+    a one-off subprocess outside the worker bundle path. Wraps the
+    blocking ``VersionManager.ensure_version`` call so the event loop
+    isn't held for the install duration.
+    """
+    import asyncio as _asyncio  # noqa: PLC0415
+    import sys as _sys  # noqa: PLC0415
+    from pathlib import Path as _Path  # noqa: PLC0415
+    if "/app/client" not in _sys.path:
+        _sys.path.insert(0, "/app/client")
+    from version_manager import VersionManager  # noqa: PLC0415
+    vm = VersionManager(
+        versions_base=_Path("/data/esphome-versions"),
+        max_versions=5,
+    )
+    return await _asyncio.get_running_loop().run_in_executor(
+        None, vm.ensure_version, pin,
+    )
+
+
 @routes.get("/ui/api/_debug/scheduler")
 async def debug_scheduler(request: web.Request) -> web.Response:
     """Diagnostic endpoint — reports on the APScheduler state (#87)."""
@@ -1789,20 +1813,8 @@ async def validate_config(request: web.Request) -> web.Response:
 
     if pin and pin != installed_binary_version:
         try:
-            from pathlib import Path as _Path  # noqa: PLC0415
-            import sys as _sys  # noqa: PLC0415
-            # The version manager lives in the bundled client code
-            if "/app/client" not in _sys.path:
-                _sys.path.insert(0, "/app/client")
-            from version_manager import VersionManager  # noqa: PLC0415
-            vm = VersionManager(
-                versions_base=_Path("/data/esphome-versions"),
-                max_versions=5,
-            )
             logger.info("Validating %s: ensuring ESPHome %s is installed for pinned version", target, pin)
-            esphome_bin = await _asyncio.get_event_loop().run_in_executor(
-                None, vm.ensure_version, pin,
-            )
+            esphome_bin = await _ensure_pinned_esphome_bin(pin)
         except Exception as exc:
             logger.warning("Could not install pinned ESPHome %s for validation: %s", pin, exc)
             # Fall back to server default
@@ -1966,19 +1978,8 @@ async def get_rendered_config(request: web.Request) -> web.Response:
 
     if pin and pin != installed_binary_version:
         try:
-            from pathlib import Path as _Path  # noqa: PLC0415
-            import sys as _sys  # noqa: PLC0415
-            if "/app/client" not in _sys.path:
-                _sys.path.insert(0, "/app/client")
-            from version_manager import VersionManager  # noqa: PLC0415
-            vm = VersionManager(
-                versions_base=_Path("/data/esphome-versions"),
-                max_versions=5,
-            )
             logger.info("Rendering %s: ensuring ESPHome %s is installed for pinned version", filename, pin)
-            esphome_bin = await asyncio.get_event_loop().run_in_executor(
-                None, vm.ensure_version, pin,
-            )
+            esphome_bin = await _ensure_pinned_esphome_bin(pin)
         except Exception as exc:
             logger.warning("Could not install pinned ESPHome %s for rendering: %s", pin, exc)
 
@@ -2738,9 +2739,18 @@ async def delete_target(request: web.Request) -> web.Response:
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=500)
 
-    # Cancel any pending jobs for this target
+    # Cancel any non-terminal jobs for this target. PENDING is the obvious
+    # case; BLOCKED jobs would otherwise stick around forever pointing at a
+    # deleted target; WORKING jobs may still be compiling on a worker and
+    # the cancel won't actually stop the in-flight subprocess (the worker
+    # will surface a "job in unexpected state CANCELLED" warning when it
+    # reports back), but at least the queue state is correct after delete.
     queue = request.app["queue"]
-    job_ids = [j.id for j in queue.get_all() if j.target == filename and j.state == JobState.PENDING]
+    job_ids = [
+        j.id for j in queue.get_all()
+        if j.target == filename
+        and j.state in (JobState.PENDING, JobState.BLOCKED, JobState.WORKING)
+    ]
     if job_ids:
         await queue.cancel(job_ids)
 
@@ -2894,19 +2904,26 @@ async def rename_target(request: web.Request) -> web.Response:
 
     try:
         content = old_path.read_text(encoding="utf-8")
-        # Update the esphome.name field to match the new filename stem.
-        # Matches:  name: old-name  or  name: "old-name"  or  name: 'old-name'
+        # PY-1: parse YAML to identify the right binding (substitutions.name
+        # preferred, esphome.name as fallback) and the OLD value, then do a
+        # literal-value rewrite on that single line. Comments are preserved;
+        # ${...} indirection is handled correctly. The previous regex misfired
+        # on substitutions, on quoted-with-trailing-comment values, and on
+        # configs where esphome: wasn't the first top-level block.
+        from scanner import rename_device_in_yaml  # noqa: PLC0415
         base_name = new_filename.replace(".yaml", "")
-        content = re.sub(
-            r"(^\s*name:\s*[\"']?)[\w-]+([\"']?\s*$)",
-            rf"\g<1>{base_name}\g<2>",
-            content,
-            count=1,
-            flags=re.MULTILINE,
-        )
-        new_path.write_text(content, encoding="utf-8")
+        new_content, rewritten = rename_device_in_yaml(content, base_name)
+        new_path.write_text(new_content, encoding="utf-8")
         if new_path != old_path:
             old_path.unlink()
+        if not rewritten:
+            logger.warning(
+                "rename_target: %s → %s renamed on disk but the YAML's "
+                "internal name binding wasn't safely rewriteable "
+                "(no substitutions.name, no literal esphome.name, or "
+                "an unresolvable ${...} reference) — user must edit it manually",
+                filename, new_filename,
+            )
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=500)
 

@@ -15,6 +15,7 @@ from scanner import (
     create_bundle,
     create_stub_yaml,
     duplicate_device,
+    rename_device_in_yaml,
     get_archived_device_metadata,
     get_device_address,
     get_device_metadata,
@@ -1700,3 +1701,65 @@ def test_bundle_subprocess_stderr_does_not_leak_esphome_logger_chatter():
         "ESPHome's _LOGGER namespace is leaking through the silencing "
         "in scanner._BUNDLE_SUBPROCESS_SCRIPT — bug #112 regression."
     )
+
+
+# ---------------------------------------------------------------------------
+# rename_device_in_yaml — PY-1 regression for ui_api.rename_target's prior
+# regex-driven rewrite. Each case asserts a previously-misfiring shape now
+# rewrites correctly while preserving comments.
+# ---------------------------------------------------------------------------
+
+
+def test_rename_device_in_yaml_literal_esphome_name():
+    src = """\
+esphome:
+  name: old-name  # the device's hostname
+  platform: ESP32
+"""
+    out, ok = rename_device_in_yaml(src, "new-name")
+    assert ok is True
+    assert "name: new-name" in out
+    assert "# the device's hostname" in out, "trailing comment was clobbered"
+    assert "old-name" not in out
+
+
+def test_rename_device_in_yaml_substitutions_indirection():
+    src = """\
+substitutions:
+  name: old-name
+  area: garage
+
+esphome:
+  name: ${name}
+  friendly_name: My Device
+"""
+    out, ok = rename_device_in_yaml(src, "new-name")
+    assert ok is True
+    # The rewrite lands on substitutions.name, not on the ${name} indirection.
+    assert "name: new-name" in out
+    assert "${name}" in out, "indirection was clobbered"
+    # area stays untouched (not the first `name:` we matched, regression for
+    # the old regex's count=1 picking the wrong key in non-esphome-first files).
+    assert "area: garage" in out
+
+
+def test_rename_device_in_yaml_quoted_value():
+    src = """\
+esphome:
+  name: "old-name"
+"""
+    out, ok = rename_device_in_yaml(src, "new-name")
+    assert ok is True
+    assert 'name: "new-name"' in out
+    assert "old-name" not in out
+
+
+def test_rename_device_in_yaml_skips_unsafe_indirection():
+    """${...} esphome.name with no matching substitutions key is unsafe."""
+    src = """\
+esphome:
+  name: ${unresolved}
+"""
+    out, ok = rename_device_in_yaml(src, "new-name")
+    assert ok is False
+    assert out == src  # untouched

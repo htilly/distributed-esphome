@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -330,7 +331,13 @@ class RoutingRuleStore:
         tmp = self._path.with_suffix(self._path.suffix + ".tmp")
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            # fsync before rename so an OOM-kill / power loss between the
+            # write and the rename doesn't silently empty the rule set on
+            # next boot via _load's graceful-corruption fallback.
+            with tmp.open("w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, sort_keys=True)
+                f.flush()
+                os.fsync(f.fileno())
             tmp.replace(self._path)
         except OSError as exc:
             logger.error("routing-rules save failed: %s", exc)

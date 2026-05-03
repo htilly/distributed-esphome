@@ -319,14 +319,17 @@ def compute_usage(base: Path) -> Usage:
 
 
 def prune_orphans(base: Path, max_slots: int) -> SweepResult:
-    """Remove ``slots/<N>/`` + ``pio-slot-N/`` for ``N >= max_slots``.
+    """Remove ``slots/<N>/`` + ``pio-slot-N/`` for ``N > max_slots``.
 
-    These can't be in flight (the worker only spawns slot ids
-    ``1..max_slots``), so eviction is unconditional.
+    Worker thread ids are ``1..max_slots`` (1-indexed; see
+    ``client.start_workers`` → ``args=(i + 1, ...)``). Slots in that
+    range can be in flight; only ids strictly above ``max_slots`` are
+    orphaned by a downsizing of ``MAX_PARALLEL_JOBS`` and safe to wipe
+    unconditionally.
     """
     result = SweepResult()
     for slot_id in _list_slot_ids(base):
-        if slot_id < max_slots:
+        if slot_id <= max_slots:
             continue
         slot_dir = base / "slots" / str(slot_id)
         pio_dir = base / f"pio-slot-{slot_id}"

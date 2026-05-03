@@ -3,7 +3,7 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
 } from '../ui/dropdown-menu';
-import { getApiKey, restartDevice } from '../../api/client';
+import { ApiError, getApiKey, restartDevice } from '../../api/client';
 import { stripYaml } from '../../utils';
 import type { Target } from '../../types';
 
@@ -49,12 +49,28 @@ export function DeviceMenuSection({
   label = 'Device',
 }: DeviceMenuSectionProps) {
   async function handleCopyApiKey() {
+    let key: string;
     try {
-      const key = await getApiKey(t.target);
+      key = await getApiKey(t.target);
+    } catch (err) {
+      // 404 = device YAML has no `api:` block / no encryption key — info,
+      // not an error. Anything else (network, auth, server 500) is a real
+      // failure the operator needs to see, otherwise they think the device
+      // just doesn't have an API key when actually the request never made it.
+      if (err instanceof ApiError && err.status === 404) {
+        onToast('No API key found', 'info');
+      } else {
+        onToast('Could not fetch API key: ' + (err as Error).message, 'error');
+      }
+      return;
+    }
+    try {
       await navigator.clipboard.writeText(key);
       onToast('API key copied!', 'success');
-    } catch {
-      onToast('No API key found', 'info');
+    } catch (err) {
+      // Clipboard writes can fail in iframe contexts, when the page lost
+      // focus, or when the browser refuses without a recent user gesture.
+      onToast('Could not copy to clipboard: ' + (err as Error).message, 'error');
     }
   }
 

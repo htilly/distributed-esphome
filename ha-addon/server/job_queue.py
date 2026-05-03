@@ -508,11 +508,15 @@ class JobQueue:
             # else: active is WORKING (or None) → fall through to create.
             # When active is WORKING the new job becomes a follow-up.
 
-            # Clear old terminal jobs for this target before adding the new one.
+            # Clear old terminal jobs (and stale BLOCKED relics — non-terminal
+            # but unclaimable, so they'd otherwise sit alongside the new
+            # PENDING entry as zombie rows) for this target before adding the
+            # new one.
             stale = [
                 jid for jid, j in self._jobs.items()
                 if j.target == target and j.state in (
-                    JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT, JobState.CANCELLED
+                    JobState.SUCCESS, JobState.FAILED, JobState.TIMED_OUT,
+                    JobState.CANCELLED, JobState.BLOCKED,
                 )
             ]
             # JH.2: defensively record each coalesced job before evicting.
@@ -822,7 +826,7 @@ class JobQueue:
                 job = self._jobs.get(job_id)
                 if job is None:
                     continue
-                if job.state not in (JobState.SUCCESS, JobState.FAILED, JobState.CANCELLED):
+                if job.state in (JobState.PENDING, JobState.WORKING, JobState.BLOCKED):
                     prior_state = job.state
                     job.state = JobState.CANCELLED
                     job.finished_at = _utcnow()
