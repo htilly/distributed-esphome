@@ -6,8 +6,7 @@ Roadmap and bug tracking for ESPHome Fleet, organized by release.
 
 Each WORKITEMS file's first paragraph is the authoritative theme — read the file, not this index.
 
-- **[WORKITEMS-1.7.0.md](WORKITEMS-1.7.0.md)** — **Current release.** heffneil-inspired device-management polish + fleet tags & routing.
-- **[WORKITEMS-1.7.1.md](WORKITEMS-1.7.1.md)** — Honest Gold tier flip (carryover from 1.7.0).
+- **[WORKITEMS-1.7.1.md](WORKITEMS-1.7.1.md)** — **Current release.** Honest Gold tier flip.
 - **[WORKITEMS-1.8.md](WORKITEMS-1.8.md)** — LLM assistance.
 - **[WORKITEMS-1.9.md](WORKITEMS-1.9.md)** — ESPHome dashboard parity.
 - **[WORKITEMS-future.md](WORKITEMS-future.md)** — Unscheduled backlog.
@@ -28,6 +27,7 @@ Historical release plans for versions already shipped. Themes only — details l
 - **[archive/WORKITEMS-1.6.md](archive/WORKITEMS-1.6.md)** — Per-file config history + Settings drawer.
 - **[archive/WORKITEMS-1.6.1.md](archive/WORKITEMS-1.6.1.md)** — HA polish + Bronze→Silver.
 - **[archive/WORKITEMS-1.6.2.md](archive/WORKITEMS-1.6.2.md)** — Install paths + AppArmor narrowing.
+- **[archive/WORKITEMS-1.7.0.md](archive/WORKITEMS-1.7.0.md)** — heffneil-inspired device-management polish + fleet tags & routing.
 
 ## How this works
 
