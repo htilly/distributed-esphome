@@ -64,7 +64,7 @@ The stated threat model is a **trusted home network** behind Home Assistant's In
 
 ### UI-API authentication (mandatory since 1.5.0)
 
-- **`require_ha_auth` add-on option** — **default `true` in 1.5.0** (AU.7). Direct-port (`:8765`) `/ui/api/*` requests must carry a valid Bearer token or get `401 Bearer realm="ESPHome Fleet"`. Ingress-tunneled access is unaffected (Supervisor injects `X-Ingress-Path`).
+- **`require_ha_auth` add-on option** — **default `true` in 1.5.0** (AU.7). Direct-port (`:8765`) `/ui/api/*` requests must carry a valid Bearer token or get `401 Bearer realm="Fleet for ESPHome"`. Ingress-tunneled access is unaffected (Supervisor injects `X-Ingress-Path`).
 - **Two Bearer shapes accepted:** (a) the add-on's shared worker token — used automatically by the native HA integration's coordinator, which receives it via the Supervisor-discovery payload; (b) a Home Assistant long-lived access token, validated against the Supervisor's `/auth` endpoint.
 - **Mutation attribution** — when the request was authenticated, compile / pin / schedule / rename / delete log lines suffix the resolved user's name (`…enqueued by stefan`), giving per-user audit trails in the add-on log. System-Bearer callers (the integration) attribute to `esphome_fleet_integration` so you can distinguish system from user actions.
 

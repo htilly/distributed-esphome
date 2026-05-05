@@ -1,12 +1,12 @@
 # Development Plans
 
-Roadmap and bug tracking for ESPHome Fleet, organized by release.
+Roadmap and bug tracking for Fleet for ESPHome, organized by release.
 
 ## Active files
 
 Each WORKITEMS file's first paragraph is the authoritative theme — read the file, not this index.
 
-- **[WORKITEMS-1.7.1.md](WORKITEMS-1.7.1.md)** — **Current release.** Brand refresh: "ESPHome Fleet" → "Fleet for ESPHome".
+- **[WORKITEMS-1.7.1.md](WORKITEMS-1.7.1.md)** — **Current release.** Brand refresh: "ESPHome Fleet" → "Fleet for ESPHome". <!-- br1-allow: rebrand-history pointer -->
 - **[WORKITEMS-1.7.2.md](WORKITEMS-1.7.2.md)** — Honest Gold tier flip (slipped from 1.7.1).
 - **[WORKITEMS-1.8.md](WORKITEMS-1.8.md)** — LLM assistance.
 - **[WORKITEMS-1.9.md](WORKITEMS-1.9.md)** — ESPHome dashboard parity.
@@ -24,7 +24,7 @@ Historical release plans for versions already shipped. Themes only — details l
 - **[archive/WORKITEMS-1.3.md](archive/WORKITEMS-1.3.md)** — Quality + testing.
 - **[archive/WORKITEMS-1.3.1.md](archive/WORKITEMS-1.3.1.md)** — Typed protocol + supply chain hardening.
 - **[archive/WORKITEMS-1.4.md](archive/WORKITEMS-1.4.md)** — Fleet management + scheduled upgrades.
-- **[archive/WORKITEMS-1.5.md](archive/WORKITEMS-1.5.md)** — Rebrand to ESPHome Fleet + native HA integration.
+- **[archive/WORKITEMS-1.5.md](archive/WORKITEMS-1.5.md)** — Rebrand to ESPHome Fleet + native HA integration. <!-- br1-allow: 1.5 historical-rebrand description -->
 - **[archive/WORKITEMS-1.6.md](archive/WORKITEMS-1.6.md)** — Per-file config history + Settings drawer.
 - **[archive/WORKITEMS-1.6.1.md](archive/WORKITEMS-1.6.1.md)** — HA polish + Bronze→Silver.
 - **[archive/WORKITEMS-1.6.2.md](archive/WORKITEMS-1.6.2.md)** — Install paths + AppArmor narrowing.

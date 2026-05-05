@@ -530,7 +530,7 @@ async def get_next_job(request: web.Request) -> web.Response:
         err_msg = (
             f"Bundle creation failed for {job.target}: "
             f"{type(exc).__name__}: {exc}\n\n"
-            "ESPHome Fleet validates the target config before dispatching "
+            "Fleet for ESPHome validates the target config before dispatching "
             "it to a worker (BD). Fix the YAML error above and re-queue."
         )
         await queue.submit_result(job.id, "failed", log=err_msg)

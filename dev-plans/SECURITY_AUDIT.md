@@ -1,6 +1,6 @@
-# Security Audit: ESPHome Fleet
+# Security Audit: Fleet for ESPHome
 
-**Original audit:** 2026-03-29 (version 0.0.21; at the time of audit the product was called "ESPHome Distributed Build Server", renamed to ESPHome Fleet in 1.4.1, renumbered to 1.5.0 late cycle).
+**Original audit:** 2026-03-29 (version 0.0.21; at the time of audit the product was called "ESPHome Distributed Build Server"; renamed to "ESPHome Fleet" in 1.4.1, renumbered to 1.5.0 late cycle; renamed to "Fleet for ESPHome" in 1.7.1). <!-- br1-allow: rebrand chronology -->
 **Last refreshed:** 2026-05-02 against 1.7.0.
 **Scope:** Server add-on (`ha-addon/server/`), Dockerfile, `run.sh`, `config.yaml`, and the bundled worker (`client/client.py`) as it interacts with the server security model.
 
@@ -49,7 +49,7 @@
 
 ## Executive Summary
 
-ESPHome Fleet is a Home Assistant add-on that coordinates remote firmware compilation. Its threat model is deliberately relaxed: it runs on a trusted home network, behind Home Assistant's ingress authentication for the browser UI, and uses a shared secret token for build workers. Within that context, the implementation is generally sound — the code is clean, intentional, and most of the obvious risks are already mitigated.
+Fleet for ESPHome is a Home Assistant add-on that coordinates remote firmware compilation. Its threat model is deliberately relaxed: it runs on a trusted home network, behind Home Assistant's ingress authentication for the browser UI, and uses a shared secret token for build workers. Within that context, the implementation is generally sound — the code is clean, intentional, and most of the obvious risks are already mitigated.
 
 However, several meaningful security issues remain. The most significant are:
 
@@ -69,7 +69,7 @@ The findings below are detailed with affected code locations and concrete recomm
 
 ## Threat Model
 
-**Deployment assumption.** ESPHome Fleet is deployed as a Home Assistant add-on on a **trusted home LAN**. The server, all build workers, the Home Assistant instance, and the ESP32/ESP8266 devices all share this LAN. The design deliberately optimizes for **operator convenience** over hardening against a LAN-local adversary. This is the same trust posture as Home Assistant itself, Node-RED, Frigate, Zigbee2MQTT, and the other canonical HA add-ons: if an attacker is already inside your LAN, the compromise budget for "my home-automation firmware server" is already spent.
+**Deployment assumption.** Fleet for ESPHome is deployed as a Home Assistant add-on on a **trusted home LAN**. The server, all build workers, the Home Assistant instance, and the ESP32/ESP8266 devices all share this LAN. The design deliberately optimizes for **operator convenience** over hardening against a LAN-local adversary. This is the same trust posture as Home Assistant itself, Node-RED, Frigate, Zigbee2MQTT, and the other canonical HA add-ons: if an attacker is already inside your LAN, the compromise budget for "my home-automation firmware server" is already spent.
 
 Explicit trust assumptions that this audit treats as accepted risk:
 
@@ -235,7 +235,7 @@ The safest fix is to remove the auto-update mechanism entirely and rely on Docke
 
 ### F-03 — UI API Has No Authentication; Relies Entirely on HA Ingress
 
-**Status:** AVAILABLE (opt-in) via `require_ha_auth` add-on option (AU.3). AU.7 (1.5.0) flipped the default to `true`; bug #83 (1.6.2) flipped it back to `false` because the true default hard-broke the standalone `docker-compose` path where there's no Home Assistant Supervisor to validate against. When enabled, direct-port `/ui/api/*` requests (and the static UI shell) that don't carry a valid Bearer token are rejected with 401 + `WWW-Authenticate: Bearer realm="ESPHome Fleet"`; browsers land on a styled HTML remediation page, API clients keep the original JSON body. Two Bearer shapes are accepted: (a) the add-on's own shared worker token — used by the native HA integration's coordinator, which receives it automatically via the Supervisor-discovery payload (AU.7); (b) a Home Assistant long-lived access token, validated against Supervisor's `/auth` endpoint (AU.2). Ingress-tunneled access is always allowed — Supervisor's peer-IP trust short-circuits the middleware before the flag is read. Users whose direct port is exposed to an untrusted network enable the flag in Settings → Authentication. See AU.1–AU.7 in WORKITEMS-1.5.md and bug #83 in WORKITEMS-1.6.2.md.
+**Status:** AVAILABLE (opt-in) via `require_ha_auth` add-on option (AU.3). AU.7 (1.5.0) flipped the default to `true`; bug #83 (1.6.2) flipped it back to `false` because the true default hard-broke the standalone `docker-compose` path where there's no Home Assistant Supervisor to validate against. When enabled, direct-port `/ui/api/*` requests (and the static UI shell) that don't carry a valid Bearer token are rejected with 401 + `WWW-Authenticate: Bearer realm="Fleet for ESPHome"`; browsers land on a styled HTML remediation page, API clients keep the original JSON body. Two Bearer shapes are accepted: (a) the add-on's own shared worker token — used by the native HA integration's coordinator, which receives it automatically via the Supervisor-discovery payload (AU.7); (b) a Home Assistant long-lived access token, validated against Supervisor's `/auth` endpoint (AU.2). Ingress-tunneled access is always allowed — Supervisor's peer-IP trust short-circuits the middleware before the flag is read. Users whose direct port is exposed to an untrusted network enable the flag in Settings → Authentication. See AU.1–AU.7 in WORKITEMS-1.5.md and bug #83 in WORKITEMS-1.6.2.md.
 
 **Severity:** MEDIUM (HIGH if port 8765 is directly reachable) — pre-fix
 

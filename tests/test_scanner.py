@@ -1193,7 +1193,7 @@ def test_write_device_meta_adds_block(tmp_path):
     content = f.read_text()
     assert "# esphome-fleet:" in content
     # Writer should emit the explanatory header so users know not to remove it.
-    assert "ESPHome Fleet" in content
+    assert "Fleet for ESPHome" in content
     assert "#   pin_version: 2026.3.3" in content
     # Original content is preserved
     assert "esphome:" in content

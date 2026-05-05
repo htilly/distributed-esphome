@@ -1,4 +1,4 @@
-"""DataUpdateCoordinator for ESPHome Fleet (HI.10).
+"""DataUpdateCoordinator for Fleet for ESPHome (HI.10).
 
 Polls the add-on's /ui/api/* endpoints and exposes a merged snapshot to
 entities, services, and automations. Keeping the coordinator thin: one

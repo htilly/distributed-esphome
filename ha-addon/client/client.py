@@ -46,7 +46,7 @@ from sysinfo import collect_system_info
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.7.1-dev.5"
+CLIENT_VERSION = "1.7.1-dev.6"
 
 
 def _read_image_version() -> Optional[str]:
@@ -918,7 +918,7 @@ def _in_process_thread_dump() -> str:
     threads_by_ident = {t.ident: t for t in threading.enumerate()}
 
     lines: list[str] = [
-        "ESPHome Fleet worker thread dump",
+        "Fleet for ESPHome worker thread dump",
         f"Process: pid={os.getpid()}  v{CLIENT_VERSION}  image={IMAGE_VERSION}",
         f"Python {platform.python_version()} on {sys.platform}",
         f"{len(frames)} thread(s)",

@@ -133,7 +133,7 @@ def ensure_esphome_installed(
     if _version_tuple(version) < _version_tuple(MIN_ESPHOME_VERSION):
         logger.error(
             "Refusing to install ESPHome %s: version too old. "
-            "ESPHome Fleet 1.6.2+ requires %s or newer "
+            "Fleet for ESPHome 1.6.2+ requires %s or newer "
             "(bundle creation uses esphome.bundle, which landed in "
             "ESPHome 2026.4). Pin a newer version via the UI or the "
             "HA ESPHome add-on.",
@@ -815,11 +815,14 @@ _META_MARKERS: tuple[str, ...] = (_META_MARKER, _LEGACY_META_MARKER)
 # "skip me" prelude so rewrites don't accumulate duplicates. Add new lines
 # to this set if the phrasing evolves; never remove old ones (they'll exist
 # in real user files).
-_EXPLANATORY_HEADER_DEFAULT = "# Read by the ESPHome Fleet add-on. Do not remove."
+_EXPLANATORY_HEADER_DEFAULT = "# Read by the Fleet for ESPHome add-on. Do not remove."
 _EXPLANATORY_HEADERS: frozenset[str] = frozenset(
     {
         _EXPLANATORY_HEADER_DEFAULT,
-        # Prior phrasings would go here if the text ever changes.
+        # 1.7.1 BR.1 rebrand: pre-rebrand wording lived in user YAMLs from
+        # 1.6.1 onward. Keep recognizing it so the rewriter doesn't dupe
+        # when it sees an old header alongside the new marker block.
+        "# Read by the ESPHome Fleet add-on. Do not remove.",  # br1-allow: pre-rebrand back-compat
     }
 )
 

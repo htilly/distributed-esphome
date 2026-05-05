@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.7.1
+
+A brand-refresh release.
+
+**Renamed to "Fleet for ESPHome"** (the add-on shipped as **ESPHome Fleet** in 1.5.0–1.7.0; before that **ESPHome Distributed Build Server**). The add-on store entry, sidebar tile, browser tab title, in-app wordmark, HA-integration display name, and the device-registry rows under Settings → Devices all flip to the new name on next deploy. The add-on slug, the integration domain, every `esphome_fleet.*` HA service, the GitHub repo, and the worker's Docker image names stay on their existing identifiers — nothing to migrate.
+
+**Bug fixes (carried from earlier in the cycle).**
+
+- **#231** — The "Authentication Expired" repair flow, the initial config-flow copy, and the underlying error message used to point users to *Settings → Add-ons → ESPHome Fleet → Configuration* (the Supervisor add-on Configuration tab). The Server token actually lives in the add-on's own UI at **Settings → Authentication → Server token**. The four affected strings now match the visible UI labels.
+
 ## 1.7.0
 
 A major release built around **fleet tags + rule-based job routing**, with bounded worker disk, device-management polish, and a unified Upgrade modal on top.

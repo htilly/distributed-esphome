@@ -18,7 +18,7 @@ QS.G10 (declare HA-version floor in `manifest.json`) was attempted in 1.7.0-dev.
 
 ### QS.B — Bronze (only `brands` outstanding — landed via BR.2 in 1.7.1)
 
-QS.B1 (Submit brand assets to `home-assistant/brands`) was absorbed into BR.2 in 1.7.1 alongside the rebrand to "Fleet for ESPHome", since the brands-repo PR ships with the post-rebrand wordmark rather than the old "ESPHome Fleet" one. Once that PR merges, flip `quality_scale.yaml:brands` to `done`. Until merged, leave it `todo` with the open PR URL in the comment so it's visible why Gold's on hold.
+QS.B1 (Submit brand assets to `home-assistant/brands`) was absorbed into BR.2 in 1.7.1 alongside the rebrand to "Fleet for ESPHome", since the brands-repo PR ships with the post-rebrand wordmark rather than the pre-rebrand one. Once that PR merges, flip `quality_scale.yaml:brands` to `done`. Until merged, leave it `todo` with the open PR URL in the comment so it's visible why Gold's on hold.
 
 ### QS.S — Silver
 

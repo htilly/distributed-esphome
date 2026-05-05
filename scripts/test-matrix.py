@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Multi-target deploy + smoke orchestrator for ESPHome Fleet.
+"""Multi-target deploy + smoke orchestrator for Fleet for ESPHome.
 
 Deploys the current dev build (ha-addon/VERSION) to three install paths in
 parallel, runs the e2e-hass-4 Playwright suite against each, and prints a
