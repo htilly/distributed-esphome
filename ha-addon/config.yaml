@@ -1,8 +1,8 @@
 name: "ESPHome Fleet"
-version: "1.8.0-dev.4"
+version: "1.8.0-dev.5"
 slug: "esphome_dist_server"
 description: "A modern Home Assistant UI for ESPHome — git-backed config history with rollback, live compile queue, per-device version pinning, scheduled OTA, optional distributed compilation. Works whether you have 3 or 300 devices."
-url: "https://github.com/weirded/distributed-esphome"
+url: "https://github.com/htilly/distributed-esphome"
 # #10: dropped armhf, armv7, i386 — Supervisor flags them as deprecated, and
 # ESPHome compilation is a 64-bit-only game in practice. No real users on
 # 32-bit ARM or x86; the toolchains for new ESP32 variants don't ship for them.
@@ -24,7 +24,7 @@ init: true
 # build when GHCR is unreachable and ``push-to-hass-4.sh`` can
 # continue rsync-deploying dev builds (see IM.5 for the sed filter
 # that strips this line on the dev loop).
-image: ghcr.io/weirded/{arch}-addon-esphome-dist-server
+image: ghcr.io/htilly/{arch}-addon-esphome-dist-server
 # Bug #5 (1.6.1): `stage: experimental` removed. The add-on has
 # shipped stable releases through 1.6 with full test coverage,
 # cosign + SBOM supply-chain hardening, an AppArmor profile, and
@@ -38,7 +38,7 @@ image: ghcr.io/weirded/{arch}-addon-esphome-dist-server
 # path was dead code in that window anyway.
 homeassistant: "2024.11.0"
 codeowners:
-  - "@weirded"
+  - "@htilly"
 
 # Ingress: Web UI embedded in HA sidebar, authenticated by HA
 ingress: true
