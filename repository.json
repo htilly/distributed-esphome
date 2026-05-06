@@ -1,6 +1,6 @@
 {
   "name": "ESPHome Fleet",
-  "url": "https://github.com/weirded/distributed-esphome",
-  "maintainer": "weirded",
+  "url": "https://github.com/htilly/distributed-esphome",
+  "maintainer": "htilly",
   "channel": "stable"
 }
