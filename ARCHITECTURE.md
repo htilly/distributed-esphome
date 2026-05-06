@@ -15,11 +15,11 @@ Fleet for ESPHome is a Home Assistant add-on that manages a fleet of ESPHome dev
   Web UI  ──────►│  Server (ha-addon/server/)  ◄───│──  Worker(s)
                  │    + built-in local worker      │     (ha-addon/client/)
                  │         │                       │        │
-                 │         │ OTA (Thread/Matter     │        │ OTA (WiFi/Ethernet
-                 │         │  — IPv6 mesh only      │        │  — worker needs
-                 │         │  reachable from HA)    │        │  LAN reach to ESP)
+                 │         │ OTA (Thread/Matter    │        │ OTA (WiFi/Ethernet
+                 │         │  — IPv6 mesh only     │        │  — worker needs
+                 │         │  reachable from HA)   │        │  LAN reach to ESP)
                  │         ▼                       │        ▼
-                 │    Thread devices               │     ESP devices
+                 │    ESP Thread devices           │     ESP devices
 ```
 
 ### Server (`ha-addon/server/`)
