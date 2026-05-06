@@ -56,11 +56,11 @@ Three moving parts:
 
 > **Add-ons only work on Home Assistant OS (HAOS) and Home Assistant Supervised.** If you're on **HA Container** (HA running in Docker) or **HA Core** (HA in a Python venv), there's no Add-on Store and the badge below won't do anything — skip to [As a standalone Docker container](#as-a-standalone-docker-container) instead. Not sure which you have? Open **Settings → About** in Home Assistant; *Installation Type* tells you.
 
-[![Add repository to my Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fweirded%2Fdistributed-esphome)
+[![Add repository to my Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fhtilly%2Fdistributed-esphome)
 
 Or manually:
 
-1. **Settings → Add-ons → Add-on Store → ⋮ (top right) → Repositories** and add `https://github.com/weirded/fleet-for-esphome`.
+1. **Settings → Add-ons → Add-on Store → ⋮ (top right) → Repositories** and add `https://github.com/htilly/distributed-esphome`.
 2. Find **Fleet for ESPHome** in the store and click **Install**.
 3. **Start** the add-on. Open the web UI from the HA sidebar.
 
@@ -74,9 +74,9 @@ You don't need one to start — the add-on ships with a built-in local worker th
 2. Pick **Bash**, **PowerShell**, or **Docker Compose** depending on the target machine.
 3. Copy the generated snippet (the snippet bakes in your server URL + auth token, nothing to edit) and run it on the target machine. That's it — the worker registers and shows up in the Workers tab within a few seconds.
 
-The worker container is `ghcr.io/weirded/esphome-dist-client:latest`. All it needs on the host is Docker and network reach to (a) the add-on's HTTP API and (b) the ESP devices it'll flash. No inbound ports.
+The worker container is `ghcr.io/htilly/esphome-dist-client:latest`. All it needs on the host is Docker and network reach to (a) the add-on's HTTP API and (b) the ESP devices it'll flash. No inbound ports.
 
-The worker's Python source updates itself from the server whenever the add-on upgrades (so bug fixes to client code reach remote machines automatically). Its **Docker image** doesn't — when the image needs refreshing (system packages, Python version, pinned dependencies), the Workers tab flags it with an **Image stale** badge and you refresh it on the worker host with `docker pull ghcr.io/weirded/esphome-dist-client:latest && docker restart <name>`. [DOCS.md](ha-addon/DOCS.md) has the longer explanation.
+The worker's Python source updates itself from the server whenever the add-on upgrades (so bug fixes to client code reach remote machines automatically). Its **Docker image** doesn't — when the image needs refreshing (system packages, Python version, pinned dependencies), the Workers tab flags it with an **Image stale** badge and you refresh it on the worker host with `docker pull ghcr.io/htilly/esphome-dist-client:latest && docker restart <name>`. [DOCS.md](ha-addon/DOCS.md) has the longer explanation.
 
 ### As a standalone Docker container
 
@@ -89,7 +89,7 @@ docker run -d \
   -v /path/to/esphome/configs:/config/esphome \
   -v esphome-dist-data:/data \
   -e SERVER_TOKEN=choose-a-random-string \
-  ghcr.io/weirded/esphome-dist-server:latest
+  ghcr.io/htilly/esphome-dist-server:latest
 ```
 
 The UI is at `http://your-host:8765`. `--network host` is required so the server can discover ESP devices over mDNS.
