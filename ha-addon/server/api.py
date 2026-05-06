@@ -627,6 +627,33 @@ async def _server_ota_push(app: web.Application, job: object) -> None:
             ota_bin_path = target_yaml.with_suffix(".ota.bin")
             ota_bin_path.write_bytes(ota_binary)
 
+            # Pre-flight ping to surface connectivity issues early in the log.
+            # Runs on the server (HA host), not on the compile worker.
+            import socket as _socket  # noqa: PLC0415
+            server_hostname = _socket.gethostname()
+            ping_cmd = ["ping6", "-c", "3", "-W", "5", ota_addr]
+            logger.info(
+                "Server OTA %s: pinging %s from server (%s)",
+                job_id, ota_addr, server_hostname,
+            )
+            try:
+                ping_proc = await asyncio.create_subprocess_exec(
+                    *ping_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                ping_out, _ = await asyncio.wait_for(ping_proc.communicate(), timeout=20)
+                ping_log = ping_out.decode("utf-8", errors="replace") if ping_out else ""
+                ping_ok = ping_proc.returncode == 0
+                logger.info(
+                    "Server OTA %s: ping %s — %s",
+                    job_id, ota_addr, "reachable" if ping_ok else "unreachable",
+                )
+            except Exception as ping_exc:
+                ping_log = f"ping failed: {ping_exc}"
+                ping_ok = False
+                logger.warning("Server OTA %s: ping error: %s", job_id, ping_exc)
+
             cmd = [
                 esphome_bin, "upload",
                 "--device", ota_addr,
@@ -636,6 +663,7 @@ async def _server_ota_push(app: web.Application, job: object) -> None:
             logger.info(
                 "Server OTA %s (%s): %s", job_id, target, " ".join(cmd)
             )
+            ota_log = f"--- ping {ota_addr} from server ({server_hostname}) ---\n{ping_log}\n"
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
@@ -644,14 +672,16 @@ async def _server_ota_push(app: web.Application, job: object) -> None:
                     cwd=tmpdir,
                 )
                 stdout_bytes, _ = await asyncio.wait_for(
-                    proc.communicate(), timeout=120
+                    proc.communicate(), timeout=300
                 )
                 ota_ok = proc.returncode == 0
-                ota_log = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
+                ota_log += stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
             except asyncio.TimeoutError:
-                ota_log = "Server OTA timed out after 120s"
+                ota_ok = False
+                ota_log += "Server OTA timed out after 300s"
             except Exception as exc:
-                ota_log = f"Server OTA subprocess error: {exc}"
+                ota_ok = False
+                ota_log += f"Server OTA subprocess error: {exc}"
     except Exception:
         logger.exception("Server OTA %s: unexpected error during OTA push", job_id)
         await queue.patch_ota_result(job_id, "failed")
