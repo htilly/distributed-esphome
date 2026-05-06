@@ -158,7 +158,13 @@ class VersionManager:
                 capture_output=True,
                 text=True,
             )
-        except Exception:
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            stdout = (exc.stdout or "").strip()
+            logger.error(
+                "python -m venv failed (exit %d):\nstderr: %s\nstdout: %s",
+                exc.returncode, stderr, stdout,
+            )
             shutil.rmtree(str(venv_dir), ignore_errors=True)
             raise
 
