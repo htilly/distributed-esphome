@@ -1113,6 +1113,18 @@ def _resolve_esphome_config(config_dir: str, target: str) -> Optional[dict]:
 
         # Stage 1 — full validation. Catches domain-aware addressing and
         # every other schema-level field ESPHome injects.
+        #
+        # Non-blocking lock check: _full_validate_config acquires
+        # _validator_lock which can be held for 60-120 s when resolving
+        # configs with external git components. If this function is called
+        # from the event loop thread (e.g. /ui/api/targets 1-Hz poll),
+        # blocking here freezes the entire server. Return None immediately
+        # if the lock is busy — the caller falls back to raw YAML metadata
+        # and the cache will be populated by the background executor task
+        # (build_name_to_target_map / reseed_device_poller_from_config).
+        if not _validator_lock.acquire(blocking=False):
+            return None
+        _validator_lock.release()
         try:
             config = _full_validate_config(path)
             _config_cache[target] = (mtime, config)
