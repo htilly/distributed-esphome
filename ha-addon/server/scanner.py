@@ -1578,6 +1578,17 @@ def _fill_missing_metadata(raw_config: dict, result: dict) -> None:
     if not result["has_web_server"] and "web_server" in raw_config:
         result["has_web_server"] = True
 
+    # SOTA.3: detect network_type from raw YAML so Thread auto-detection works
+    # even when full ESPHome resolution fails or ESPHome isn't ready yet.
+    # Precedence mirrors _extract_metadata: openthread > ethernet > wifi.
+    if result["network_type"] is None:
+        if isinstance(raw_config.get("openthread"), dict):
+            result["network_type"] = "thread"
+        elif isinstance(raw_config.get("ethernet"), dict):
+            result["network_type"] = "ethernet"
+        elif isinstance(raw_config.get("wifi"), dict):
+            result["network_type"] = "wifi"
+
 
 def get_friendly_name(config_dir: str, target: str) -> Optional[str]:
     """Return the best available display name for a target (backwards compat)."""
