@@ -1338,6 +1338,72 @@ async def test_compile_defaults_download_only_to_false(tmp_path):
         await ta.close()
 
 
+# ---------------------------------------------------------------------------
+# SOTA.3 — auto-detect Thread targets as server_ota at enqueue time
+# ---------------------------------------------------------------------------
+
+async def test_compile_auto_detects_thread_target_as_server_ota(tmp_path):
+    """A target whose metadata reports network_type=='thread' is enqueued
+    with server_ota=True even though the caller never asked for it —
+    Thread devices are only OTA-reachable from the HA host."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "thread-dev.yaml", "thread-dev")
+        with patch(
+            "ui_api.get_device_metadata",
+            return_value={"network_type": "thread"},
+        ):
+            resp = await ta.post("/ui/api/compile", json={"targets": ["thread-dev.yaml"]})
+        assert resp.status == 200
+        jobs = ta.queue.get_all()
+        assert len(jobs) == 1
+        assert jobs[0].server_ota is True
+    finally:
+        await ta.close()
+
+
+async def test_compile_non_thread_target_not_auto_server_ota(tmp_path):
+    """A wifi/ethernet target is not force-flagged server_ota — the normal
+    worker-performs-OTA flow is unaffected by SOTA.3's auto-detection."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "wifi-dev.yaml", "wifi-dev")
+        with patch(
+            "ui_api.get_device_metadata",
+            return_value={"network_type": "wifi"},
+        ):
+            resp = await ta.post("/ui/api/compile", json={"targets": ["wifi-dev.yaml"]})
+        assert resp.status == 200
+        jobs = ta.queue.get_all()
+        assert len(jobs) == 1
+        assert jobs[0].server_ota is False
+    finally:
+        await ta.close()
+
+
+async def test_compile_thread_target_honors_explicit_server_ota_too(tmp_path):
+    """A non-Thread target with server_ota explicitly requested in the body
+    still gets server_ota=True — auto-detection ORs with, not replaces, the
+    caller's explicit flag."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "wifi-dev.yaml", "wifi-dev")
+        with patch(
+            "ui_api.get_device_metadata",
+            return_value={"network_type": "wifi"},
+        ):
+            resp = await ta.post(
+                "/ui/api/compile",
+                json={"targets": ["wifi-dev.yaml"], "server_ota": True},
+            )
+        assert resp.status == 200
+        jobs = ta.queue.get_all()
+        assert len(jobs) == 1
+        assert jobs[0].server_ota is True
+    finally:
+        await ta.close()
+
+
 async def test_firmware_download_streams_stored_bin(tmp_path, monkeypatch):
     import firmware_storage
     firmware_dir = tmp_path / "firmware"
