@@ -2043,9 +2043,19 @@ def _submit_result(
 def _collect_firmware_variants(build_dir: str, target_stem: str) -> dict[str, Path]:
     """Find every compiled firmware binary under .esphome/build/<device>/.
 
-    ESPHome layout after ``esphome compile`` is:
-      {build_dir}/.esphome/build/{device_name}/.pioenvs/{device_name}/firmware.factory.bin   (ESP32)
-      {build_dir}/.esphome/build/{device_name}/.pioenvs/{device_name}/firmware.bin           (ESP8266 or ESP32 OTA-only)
+    ESPHome's build layout depends on the toolchain in use:
+      {build_dir}/.esphome/build/{device_name}/.pioenvs/{device_name}/firmware.factory.bin  (PlatformIO — ESP32 Arduino, ESP8266, LibreTiny)
+      {build_dir}/.esphome/build/{device_name}/.pioenvs/{device_name}/firmware.bin
+
+      {build_dir}/.esphome/build/{device_name}/build/firmware.factory.bin                   (native ESP-IDF — ESP32 since ESPHome 2026.7)
+      {build_dir}/.esphome/build/{device_name}/build/firmware.bin
+
+    ESPHome 2026.7 replaced PlatformIO with a native ESP-IDF installer
+    for ESP32 targets; that toolchain drops the
+    ``.pioenvs/{device_name}/`` staging directory entirely and writes
+    binaries straight into ``build/``. Both shapes are checked so
+    Arduino/LibreTiny targets (still PlatformIO) and ESP-IDF-native
+    ESP32 targets both resolve.
 
     Returns a mapping of ``variant → path``:
       - ``factory``: full flash image (ESP32 only; used for first
@@ -2071,25 +2081,34 @@ def _collect_firmware_variants(build_dir: str, target_stem: str) -> dict[str, Pa
     for device_dir in esphome_build.iterdir():
         if not device_dir.is_dir():
             continue
-        pioenvs = device_dir / ".pioenvs" / device_dir.name
-        candidates = {
-            "factory": pioenvs / "firmware.factory.bin",
-            "ota": pioenvs / "firmware.bin",
-        }
-        for variant_name, path in candidates.items():
-            if not path.is_file():
-                continue
-            # First-match wins when multiple device_dirs exist (usually
-            # there's only one; substitutions don't spawn duplicates).
-            if variant_name not in variants:
-                variants[variant_name] = path
-                logger.info(
-                    "Located firmware variant %s for %s: %s (%d bytes)",
-                    variant_name, target_stem, path, path.stat().st_size,
-                )
+        candidate_roots = [
+            device_dir / ".pioenvs" / device_dir.name,  # PlatformIO layout
+            device_dir / "build",                        # native ESP-IDF layout
+        ]
+        for root in candidate_roots:
+            candidates = {
+                "factory": root / "firmware.factory.bin",
+                "ota": root / "firmware.bin",
+            }
+            for variant_name, path in candidates.items():
+                if not path.is_file():
+                    continue
+                # First-match wins when multiple device_dirs/roots exist
+                # (usually there's only one; substitutions don't spawn
+                # duplicates).
+                if variant_name not in variants:
+                    variants[variant_name] = path
+                    logger.info(
+                        "Located firmware variant %s for %s: %s (%d bytes)",
+                        variant_name, target_stem, path, path.stat().st_size,
+                    )
 
     if not variants:
-        logger.warning("No firmware binary found under %s", esphome_build)
+        logger.warning(
+            "No firmware binary found under %s — checked .pioenvs/<device>/ "
+            "(PlatformIO) and build/ (native ESP-IDF) in every device dir",
+            esphome_build,
+        )
     return variants
 
 
@@ -2120,7 +2139,9 @@ def _archive_firmware_to_server(
         _flush_log_text(
             job_id,
             f"\n{tone}: Compile succeeded but no firmware binary was found "
-            f"under .pioenvs/ — nothing to archive.\033[0m\n",
+            f"under .esphome/build/<device>/ — checked both .pioenvs/<device>/ "
+            f"(PlatformIO) and build/ (native ESP-IDF). Nothing to archive."
+            f"\033[0m\n",
         )
         return False
 
