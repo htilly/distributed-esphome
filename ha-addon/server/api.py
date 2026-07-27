@@ -418,70 +418,90 @@ async def get_next_job(request: web.Request) -> web.Response:
     defer_beats_me_on_jobs = False
     defer_beats_me_on_perf = False
     if worker:
-        my_info = worker.system_info or {}
-        my_perf = my_info.get("perf_score", 0)
-        my_cpu = my_info.get("cpu_usage")
-        my_effective = my_perf * (1 - (my_cpu or 0) / 100)
-        from settings import get_settings  # noqa: PLC0415
-        cfg_threshold = get_settings().worker_offline_threshold
-        # Count active jobs per worker from the queue
-        active_jobs_by_worker: dict[str, int] = {}
-        for j in queue.get_all():
-            if j.state == JobState.WORKING and j.assigned_client_id:
-                active_jobs_by_worker[j.assigned_client_id] = \
-                    active_jobs_by_worker.get(j.assigned_client_id, 0) + 1
-        my_active = active_jobs_by_worker.get(client_id, 0)
-        for other in registry.get_all():
-            if other.client_id == client_id:
-                continue
-            if other.disabled or not registry.is_online(other.client_id, cfg_threshold):
-                continue
-            # #219: a disk-blocked worker won't claim, so deferring to it
-            # would just strand the job. Skip it from the candidate pool
-            # the same way an offline/disabled worker is skipped.
-            if other.health_blocked_reason:
-                continue
-            other_candidate_count += 1
-            other_active = active_jobs_by_worker.get(other.client_id, 0)
-            other_info = other.system_info or {}
-            other_perf = other_info.get("perf_score", 0)
-            other_cpu = other_info.get("cpu_usage")
-            other_effective = other_perf * (1 - (other_cpu or 0) / 100)
-            other_free = other_active < other.max_parallel_jobs
-            # Bug #98 / #99 / #210: tag-eligibility is computed BEFORE
-            # the busy-skip so the reason hint can distinguish "rules
-            # narrowed the field" from "others are eligible but busy".
-            # Bug #98 (deferral loop) still gates on free-AND-eligible.
-            if my_eligible_pending:
-                other_check = build_claim_eligibility(request.app, list(other.tags or []))
-                is_other_eligible = any(
-                    other_check(j)
-                    and (not j.pinned_client_id or j.pinned_client_id == other.client_id)
-                    for j in my_eligible_pending
-                )
-            else:
-                is_other_eligible = True
-            if is_other_eligible:
-                eligible_other_count_any += 1
-            if not other_free:
-                continue  # fully busy, ignore for deferral logic below
-            if not is_other_eligible:
-                continue  # eligible-but-ineligible-for-our-jobs — skip deferral
-            eligible_other_free_count += 1
-            # Rule 1: another worker has fewer jobs — let them catch up
-            if other_active < my_active:
-                should_defer = True
-                break
-            # Rule 2: same job count but higher effective score — let them go first
-            if other_active == my_active and other_effective > my_effective:
-                should_defer = True
-                break
-            # This `other` worker LOST to *client_id* — record which
-            # rule did the winning so we can name the reason below.
-            if other_active > my_active:
-                defer_beats_me_on_jobs = True
-            elif other_effective < my_effective:
-                defer_beats_me_on_perf = True
+        try:
+            my_info = worker.system_info or {}
+            my_perf = my_info.get("perf_score", 0) or 0  # #234: None guard
+            my_cpu = my_info.get("cpu_usage")
+            my_effective = my_perf * (1 - (my_cpu or 0) / 100)
+            from settings import get_settings  # noqa: PLC0415
+            cfg_threshold = get_settings().worker_offline_threshold
+            # Count active jobs per worker from the queue
+            active_jobs_by_worker: dict[str, int] = {}
+            for j in queue.get_all():
+                if j.state == JobState.WORKING and j.assigned_client_id:
+                    active_jobs_by_worker[j.assigned_client_id] = \
+                        active_jobs_by_worker.get(j.assigned_client_id, 0) + 1
+            my_active = active_jobs_by_worker.get(client_id, 0)
+            # #235: accumulate free slots across all workers that beat us, then
+            # cap deferral so we claim overflow when the queue exceeds the
+            # higher-priority pool's capacity.
+            deferral_pool_free_slots = 0
+            for other in registry.get_all():
+                if other.client_id == client_id:
+                    continue
+                if other.disabled or not registry.is_online(other.client_id, cfg_threshold):
+                    continue
+                # #219: a disk-blocked worker won't claim, so deferring to it
+                # would just strand the job. Skip it from the candidate pool
+                # the same way an offline/disabled worker is skipped.
+                if other.health_blocked_reason:
+                    continue
+                other_candidate_count += 1
+                other_active = active_jobs_by_worker.get(other.client_id, 0)
+                other_info = other.system_info or {}
+                other_perf = other_info.get("perf_score", 0) or 0  # #234: None guard
+                other_cpu = other_info.get("cpu_usage")
+                other_effective = other_perf * (1 - (other_cpu or 0) / 100)
+                other_free = other_active < other.max_parallel_jobs
+                # Bug #98 / #99 / #210: tag-eligibility is computed BEFORE
+                # the busy-skip so the reason hint can distinguish "rules
+                # narrowed the field" from "others are eligible but busy".
+                # Bug #98 (deferral loop) still gates on free-AND-eligible.
+                if my_eligible_pending:
+                    other_check = build_claim_eligibility(request.app, list(other.tags or []))
+                    is_other_eligible = any(
+                        other_check(j)
+                        and (not j.pinned_client_id or j.pinned_client_id == other.client_id)
+                        for j in my_eligible_pending
+                    )
+                else:
+                    is_other_eligible = True
+                if is_other_eligible:
+                    eligible_other_count_any += 1
+                if not other_free:
+                    continue  # fully busy, ignore for deferral logic below
+                if not is_other_eligible:
+                    continue  # eligible-but-ineligible-for-our-jobs — skip deferral
+                eligible_other_free_count += 1
+                # Rule 1: another worker has fewer jobs — let them catch up
+                # Rule 2: same job count but higher effective score — let them go first
+                # #235: don't break early; accumulate free slots for the cap below.
+                beats_on_jobs = other_active < my_active
+                beats_on_perf = other_active == my_active and other_effective > my_effective
+                if beats_on_jobs or beats_on_perf:
+                    deferral_pool_free_slots += other.max_parallel_jobs - other_active
+                else:
+                    # This `other` worker LOST to *client_id* — record which
+                    # rule did the winning so we can name the reason below.
+                    if other_active > my_active:
+                        defer_beats_me_on_jobs = True
+                    elif other_effective < my_effective:
+                        defer_beats_me_on_perf = True
+            # #235: only defer when the higher-priority pool has enough free
+            # slots to absorb the entire eligible queue; otherwise claim the
+            # overflow ourselves instead of letting it sit idle.
+            should_defer = (
+                deferral_pool_free_slots > 0
+                and len(my_eligible_pending) <= deferral_pool_free_slots
+            )
+        except Exception:
+            logger.warning(
+                "Scheduler eligibility check failed for client_id=%s;"
+                " treating as no-job-for-you (HTTP 204)",
+                client_id,
+                exc_info=True,
+            )
+            return web.Response(status=204)
 
     # Bug #8: compose the reason hint now that we know we aren't
     # deferring. Only evaluated when claim_next actually hands out a
@@ -535,7 +555,7 @@ async def get_next_job(request: web.Request) -> web.Response:
         err_msg = (
             f"Bundle creation failed for {job.target}: "
             f"{type(exc).__name__}: {exc}\n\n"
-            "ESPHome Fleet validates the target config before dispatching "
+            "Fleet for ESPHome validates the target config before dispatching "
             "it to a worker (BD). Fix the YAML error above and re-queue."
         )
         await queue.submit_result(job.id, "failed", log=err_msg)
@@ -547,12 +567,18 @@ async def get_next_job(request: web.Request) -> web.Response:
     # Different timezones produce different config_hash → unnecessary clean rebuilds.
     import time as _time  # noqa: PLC0415
     server_tz = _time.tzname[0] if _time.daylight == 0 else _time.tzname[1]
-    try:
-        # Prefer the actual TZ env var or read /etc/timezone for the IANA name
-        import os as _os  # noqa: PLC0415
-        server_tz = _os.environ.get("TZ") or open("/etc/timezone").read().strip() or server_tz
-    except Exception:
-        pass
+    import os as _os  # noqa: PLC0415
+
+    # Prefer the actual TZ env var or read /etc/timezone for the IANA name
+    tz_env = _os.environ.get("TZ")
+    if tz_env:
+        server_tz = tz_env
+    else:
+        try:
+            with open("/etc/timezone") as f:
+                server_tz = f.read().strip() or server_tz
+        except OSError:
+            pass
 
     assignment = JobAssignment(
         job_id=job.id,
@@ -727,7 +753,10 @@ async def submit_job_result(request: web.Request) -> web.Response:
 
     # SOTA.2: after a server_ota compile succeeds, push OTA from the server.
     # The worker submitted ota_result=None (compile only); the server now
-    # performs the actual flash using esphome upload server-side.
+    # performs the actual flash using esphome upload server-side. The block
+    # below (note_target_flashed / refresh_target) does not fire for this
+    # submission since msg.ota_result is None here — _server_ota_push fires
+    # its own refresh_target once the real OTA completes.
     refreshed_job = queue.get(job_id)
     if (
         refreshed_job is not None
@@ -741,15 +770,20 @@ async def submit_job_result(request: web.Request) -> web.Response:
         except Exception:
             logger.exception("Failed to schedule server OTA push for job %s", job_id)
 
-    # #11: trigger an immediate device-info refresh after a successful OTA so
-    # the UI sees the new running_version + compilation_time within ~1s
-    # instead of waiting up to one device_poller cycle (default 60s). Skip on
-    # failures and on validate-only jobs (which don't change the device).
-    # server_ota jobs: _server_ota_push handles the refresh after it completes.
+    # #11: push fresh ``running_version`` + ``compilation_time`` into the UI
+    # within ~1s after a successful OTA instead of waiting up to one
+    # device_poller cycle. Skip on failures and on validate-only jobs.
+    # #238: stamp ``compilation_time`` server-side immediately (the firmware
+    # we just flashed was compiled moments ago, so server-time is correct
+    # within a few seconds), then ALSO fire ``refresh_target`` async to pick
+    # up the device-reported ``running_version`` once it's back on the
+    # network. The synchronous stamp means the UI updates instantly even
+    # when the device is mid-reboot and the API connect is going to fail.
     if msg.status == "success" and msg.ota_result == "success" and job is not None:
         device_poller = request.app.get("device_poller")
         if device_poller is not None:
             try:
+                await device_poller.note_target_flashed(job.target)
                 # Don't block the response on the device-info round-trip;
                 # fire-and-forget on the event loop.
                 asyncio.create_task(device_poller.refresh_target(job.target))
@@ -763,6 +797,17 @@ async def submit_job_result(request: web.Request) -> web.Response:
 # whitelist so stale/unexpected values can't create arbitrary filenames.
 # "firmware" = pre-#69 legacy shape (see firmware_storage.LEGACY_VARIANT).
 _UPLOADABLE_VARIANTS = ("factory", "ota", "firmware")
+
+# Bug #236: grace window during which firmware-variant uploads are
+# accepted on a job whose state has just transitioned out of WORKING.
+# Reporter saw 409 ``job_not_working`` on the SECOND variant upload of a
+# successful flash because the server's timeout-checker had flipped the
+# job mid-upload (slow Unraid + compose worker, ~minute-long upload of
+# both factory + ota). The worker-side ordering is already correct
+# (every success path uploads variants before submit_result), so the
+# fix is to tolerate the late upload from the still-assigned worker
+# rather than discard the binary the user can hand-flash later.
+_FIRMWARE_UPLOAD_GRACE_SECONDS = 60
 
 
 async def _handle_firmware_upload(
@@ -800,14 +845,35 @@ async def _handle_firmware_upload(
     # worker (the one that was abandoned by bug #17's offline
     # short-circuit) will fail this check and we refuse without
     # touching disk.
-    from job_queue import JobState  # noqa: PLC0415
+    from job_queue import JobState, _utcnow  # noqa: PLC0415
+    in_grace_window = False
     if job.state != JobState.WORKING:
-        logger.info(
-            "Refusing firmware upload for job %s (variant=%s) — state is %s "
-            "(stale worker %s; current assigned: %s)",
-            job_id, variant, job.state.value, caller_client_id, job.assigned_client_id,
+        # Bug #236: tolerate a late variant upload from the still-assigned
+        # worker if the job's terminal transition was within the grace
+        # window. This handles the slow-worker race where the server's
+        # timeout-checker flips the job mid-upload of variant 2.
+        finished_at = job.finished_at
+        now = _utcnow()
+        in_grace_window = (
+            finished_at is not None
+            and (now - finished_at).total_seconds() <= _FIRMWARE_UPLOAD_GRACE_SECONDS
+            and caller_client_id is not None
+            and job.assigned_client_id == caller_client_id
         )
-        return _protocol_error("job_not_working", status=409)
+        if not in_grace_window:
+            logger.info(
+                "Refusing firmware upload for job %s (variant=%s) — state is %s "
+                "(stale worker %s; current assigned: %s)",
+                job_id, variant, job.state.value, caller_client_id, job.assigned_client_id,
+            )
+            return _protocol_error("job_not_working", status=409)
+        logger.info(
+            "Accepting late firmware upload for job %s (variant=%s) — state is %s "
+            "but worker %s is still the assigned worker and finished_at is within "
+            "%ds grace window (#236)",
+            job_id, variant, job.state.value, caller_client_id,
+            _FIRMWARE_UPLOAD_GRACE_SECONDS,
+        )
 
     # #24 (2) / security audit F-08: worker identity must match the
     # currently-assigned worker. Without this, an abandoned-then-late
@@ -836,6 +902,15 @@ async def _handle_firmware_upload(
             "Failed to save firmware for job %s (variant=%s)", job_id, variant,
         )
         return _protocol_error("firmware_save_failed", status=500)
+
+    if in_grace_window:
+        # Bug #236: terminal job; skip the WORKING-only mark and just
+        # set has_firmware so the UI/firmware-reconciler doesn't sweep
+        # the file we just wrote. Job state stays terminal — the worker
+        # will follow up with submit_result (which is also tolerant)
+        # or has already done so.
+        await queue.mark_firmware_stored_force(job_id)
+        return web.json_response(OkResponse().model_dump())
 
     ok = await queue.mark_firmware_stored(job_id)
     if not ok:
@@ -1126,3 +1201,71 @@ async def get_status(request: web.Request) -> web.Response:
             "queue_size": queue.queue_size(),
         }
     )
+
+
+# Schema version for the /metrics/queue payload (#168). Bump if a field is
+# removed or its meaning changes — additive fields don't need a bump.
+METRICS_QUEUE_SCHEMA_VERSION = 1
+
+
+@routes.get("/api/v1/metrics/queue")
+async def get_metrics_queue(request: web.Request) -> web.Response:
+    """#168: machine-readable queue-depth metric for external autoscalers.
+
+    Compatible with KEDA's ``metrics-api`` scaler (JSONPath ``$.active``),
+    HPA via the ``external`` metrics adapter, Sablier, or any custom
+    controller. Bearer auth via the existing /api/v1 middleware — same
+    trust boundary as the worker-claim endpoints (read-only metric).
+
+    Response shape (1.7.2-dev.6):
+
+    .. code-block:: json
+
+        {
+          "pending": 2,
+          "working": 1,
+          "active": 3,
+          "online_workers": 1,
+          "max_parallel_capacity": 2,
+          "schema_version": 1
+        }
+
+    - ``active = pending + working`` — the metric the autoscaler should
+      scale on. Pending alone undercounts a mid-compile run; working
+      alone undercounts a backlog the existing workers can't catch up
+      on at parallelism = 1.
+    - ``max_parallel_capacity`` = ``sum(w.max_parallel_jobs)`` across
+      online workers — lets a controller answer "do existing online
+      workers have headroom?" before spinning a new pod/VM/LXC.
+    - ``schema_version`` is monotonic; downstream consumers can pin a
+      version and refuse to read newer payloads if a future bump
+      removes a field they depend on.
+    """
+    registry = request.app["registry"]
+    queue = request.app["queue"]
+    from settings import get_settings  # noqa: PLC0415
+    threshold = get_settings().worker_offline_threshold
+
+    pending = 0
+    working = 0
+    for j in queue.get_all():
+        if j.state == JobState.PENDING:
+            pending += 1
+        elif j.state == JobState.WORKING:
+            working += 1
+
+    online_workers = 0
+    max_parallel_capacity = 0
+    for w in registry.get_all():
+        if registry.is_online(w.client_id, threshold):
+            online_workers += 1
+            max_parallel_capacity += max(0, int(w.max_parallel_jobs or 0))
+
+    return web.json_response({
+        "pending": pending,
+        "working": working,
+        "active": pending + working,
+        "online_workers": online_workers,
+        "max_parallel_capacity": max_parallel_capacity,
+        "schema_version": METRICS_QUEUE_SCHEMA_VERSION,
+    })

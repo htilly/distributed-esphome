@@ -1299,7 +1299,10 @@ async def ws_device_log(request: web.Request) -> web.WebSocketResponse:
         return ws
 
     noise_psk = device_poller._encryption_keys.get(dev.name)
-    addr = device_poller._address_overrides.get(dev.name) or dev.ip_address
+    # Bug #134 (1.7.2): consolidate onto resolve_ota_address so live-logs
+    # honours wifi.use_address (especially FQDN forms like
+    # ``device.example.com``) instead of falling back to ``.local``.
+    addr = device_poller.resolve_ota_address(dev.name) or dev.ip_address
     # Bug #11 (1.6.1): if we end up with no key for a device the YAML
     # declared one for, the usual symptom is ``Connection requires
     # encryption`` from the device. That message lands in the user's
@@ -1522,6 +1525,20 @@ async def _get_workers_response(request: web.Request) -> web.Response:
     # without a separate /ui/api/settings call).
     default_quota = s.default_worker_disk_quota_bytes
 
+    # #151: derive a "working" / "active job count" view per worker by
+    # scanning the queue. Worker.current_job_id is single-job and lossy
+    # when max_parallel_jobs > 1, so we count WORKING jobs assigned to
+    # each client_id. ≤O(jobs × workers) but both are tiny in practice.
+    active_jobs_by_worker: dict[str, int] = {}
+    for j in queue.get_all():
+        if (
+            j.state == JobState.WORKING
+            and j.assigned_client_id
+        ):
+            active_jobs_by_worker[j.assigned_client_id] = (
+                active_jobs_by_worker.get(j.assigned_client_id, 0) + 1
+            )
+
     result = []
     for worker in registry.get_all():
         d = worker.to_dict()
@@ -1532,6 +1549,14 @@ async def _get_workers_response(request: web.Request) -> web.Response:
                 d["current_job_target"] = job.target
         d["disk_quota_bytes"] = worker.effective_disk_quota_bytes(default_quota)
         d["default_worker_disk_quota_bytes"] = default_quota
+        # #151: HA-integration-facing fields. ``active_job_count`` is the
+        # primary signal (handles max_parallel_jobs > 1 cleanly).
+        # ``is_working`` is the boolean derived view for the
+        # WorkerWorkingBinarySensor; same precedence as the
+        # WorkerOnlineBinarySensor's `online` field.
+        active = active_jobs_by_worker.get(worker.client_id, 0)
+        d["active_job_count"] = active
+        d["is_working"] = active > 0
         result.append(d)
     return web.json_response(result)
 
@@ -2566,6 +2591,12 @@ async def save_target_content(request: web.Request) -> web.Response:
     # /files/{f}/commit path for that case.
     raw_msg = body.get("commit_message")
     commit_message = raw_msg.strip() if isinstance(raw_msg, str) and raw_msg.strip() else None
+    # Bug #136 follow-up: editor's plain Save now writes the file but
+    # skips the implicit commit; the Save & Close path handles the
+    # commit explicitly via commit_file_now. ``skip_commit=True`` on
+    # the request body short-circuits the auto-commit branch so a
+    # save-then-close-then-commit sequence isn't double-committed.
+    skip_commit = bool(body.get("skip_commit", False))
 
     from git_versioning import commit_file  # noqa: PLC0415
 
@@ -2583,7 +2614,8 @@ async def save_target_content(request: web.Request) -> web.Response:
         except Exception as exc:
             return web.json_response({"error": str(exc)}, status=500)
         logger.info("Saved staged %s → %s (%d bytes)", filename, final_name, len(content))
-        await commit_file(Path(config_dir), final_name, "create", commit_message)
+        if not skip_commit:
+            await commit_file(Path(config_dir), final_name, "create", commit_message)
         return web.json_response({"ok": True, "renamed_to": final_name})
 
     try:
@@ -2594,7 +2626,8 @@ async def save_target_content(request: web.Request) -> web.Response:
     from scanner import _config_cache  # noqa: PLC0415
     _config_cache.pop(filename, None)
     logger.info("Saved %s (%d bytes)%s", filename, len(content), _who(request))
-    await commit_file(Path(config_dir), filename, "save", commit_message)
+    if not skip_commit:
+        await commit_file(Path(config_dir), filename, "save", commit_message)
     _broadcast_ws("targets_changed")
     return web.json_response({"ok": True})
 
@@ -3053,7 +3086,9 @@ async def restart_device(request: web.Request) -> web.Response:
                 break
         if dev and dev.ip_address:
             noise_psk = device_poller._encryption_keys.get(dev.name)
-            addr = device_poller._address_overrides.get(dev.name) or dev.ip_address
+            # Bug #134 (1.7.2): mirror the precedence used by OTA-bound
+            # callers so a YAML ``wifi.use_address`` FQDN wins here too.
+            addr = device_poller.resolve_ota_address(dev.name) or dev.ip_address
             try:
                 client = _api.APIClient(addr, 6053, password=None, noise_psk=noise_psk)
                 await client.connect(login=True)

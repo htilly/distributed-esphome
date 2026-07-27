@@ -143,6 +143,18 @@ class AppSettings:
     worker_offline_threshold: int = 30
     # Seconds between ESPHome-device API polls (online / running version).
     device_poll_interval: int = 60
+    # #238: when False (default), the device poller trusts mDNS for liveness +
+    # ``running_version`` and only opens an ``aioesphomeapi`` connection on
+    # first sight (to backfill ``mac_address`` + ``compilation_time``), as a
+    # fallback for devices the mDNS browser hasn't seen recently (Ethernet,
+    # OpenThread, ``mdns: enabled: false``), or via the post-OTA refresh hook.
+    # When True, every tick fans out an API query to every known device — the
+    # pre-1.7.1 behaviour. Reported by pricklyguy in #143: the every-60-s
+    # blanket query churned the device's ``api.connection`` log, fired
+    # ``on_connect:`` automations, and pressured ``reboot_timeout`` on devices
+    # whose HA persistent connection competed for the same client slot. Power
+    # users diagnosing a flaky device can flip this back on transiently.
+    device_native_api_poll: bool = False
     # When true, direct-port access on :8765 (outside Ingress) requires
     # a valid HA Bearer or the add-on's own server token. The dataclass
     # default is ``False`` so standalone Docker installs (no Supervisor →
@@ -168,6 +180,25 @@ class AppSettings:
     # through ``utils/format.ts::setDateFormatPref`` from App.tsx on settings
     # load and on every drawer commit.
     date_format: str = "auto"
+
+    # I18N.2 (#141): UI language preference. ``'auto'`` resolves to
+    # ``navigator.language`` in the browser; explicit ``'en'`` / ``'de'``
+    # force the locale regardless of the browser setting. Wired through
+    # ``i18next.changeLanguage()`` from App.tsx. Adding a language here is
+    # not enough — its catalog also has to ship in
+    # ``ha-addon/ui/src/i18n/locales/`` and the ``_validate_enum`` call
+    # below has to enumerate it.
+    language: str = "auto"
+
+    # #145: UI font-size scale. ``'normal'`` = today's sizing (default,
+    # byte-identical render to pre-#145); ``'small'`` shrinks the whole UI
+    # proportionally for users running HA at a Brave/Firefox/Edge zoom
+    # below 100 % (Wolfgang-TH runs Brave at 80 % to match HA); ``'large'``
+    # is the accessibility step up. Wired through App.tsx by setting
+    # ``data-font-size`` on the root element; CSS in index.css picks up
+    # ``html[data-font-size="small"]`` etc. and shifts the Tailwind base
+    # font-size variable.
+    font_size: str = "normal"
 
     # DQ.1: fleet-wide default per-worker disk quota for the
     # ``/esphome-versions/`` tree (venvs + per-target caches + per-slot
@@ -309,12 +340,17 @@ _VALIDATORS: dict[str, Callable[[Any, str], Any]] = {
     "worker_offline_threshold": _validate_int_range(15, 3600),
     # Device poll: 10s floor (below that we hammer devices), 1h ceiling.
     "device_poll_interval": _validate_int_range(10, 3600),
+    "device_native_api_poll": _validate_bool,
     "require_ha_auth": _validate_bool,
     # #82: enum validator — 'auto' / '12h' / '24h'. See AppSettings.time_format.
     "time_format": _validate_enum("auto", "12h", "24h"),
     # Bug #5: date enum — 'auto' / 'iso' (2026-04-27) / 'us' (4/27/2026)
     # / 'eu' (27/04/2026) / 'long' (Apr 27, 2026).
     "date_format": _validate_enum("auto", "iso", "us", "eu", "long"),
+    # I18N.2 (#141): UI locale — 'auto' (browser) / 'en' / 'de'.
+    "language": _validate_enum("auto", "en", "de"),
+    # #145: font-size scale — 'small' / 'normal' (default) / 'large'.
+    "font_size": _validate_enum("small", "normal", "large"),
     # DQ.1: ≥1 GiB floor stops a typo from starving every worker into
     # constant eviction; 1 TiB ceiling matches firmware_cache_max_gb's
     # upper bound (anything bigger is misconfiguration). Also pinned to

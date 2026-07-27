@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import subprocess
 import sys
+import tarfile
 import threading
 from pathlib import Path
 from typing import Optional
@@ -120,27 +122,20 @@ def ensure_esphome_installed(
     Idempotent: a second call for the same version is a fast cache hit
     inside VersionManager and just re-activates the venv on sys.path.
 
-    Refuses to install any ESPHome older than ``MIN_ESPHOME_VERSION``
-    (BD.2 — WORKITEMS-1.6.2). ``scanner.create_bundle`` delegates to
-    ``esphome.bundle.ConfigBundleCreator`` which landed in ESPHome
-    2026.4; older versions would fail on import and leave every job
-    un-dispatchable. Surfacing the refusal here gives the UI a clear
-    banner instead of a cascade of silent bundle failures.
+    #131: prior to 1.7.1 we refused to install any ESPHome older than
+    ``MIN_ESPHOME_VERSION`` (2026.4.0) because ``create_bundle``
+    delegated unconditionally to ``esphome.bundle.ConfigBundleCreator``
+    which only landed in 2026.4. The floor blocked legitimate use
+    cases — ricardopadilha (#130) pinning 2026.3.3 to dodge a 2026.4
+    YAML-parser regression, TobiasB71 (#131) keeping older toolchains
+    around. ``create_bundle`` now branches on the installed server
+    version: ≥2026.4 keeps the validated, scoped bundle; <2026.4
+    falls back to a legacy full-config-dir tar (see
+    ``_create_legacy_bundle``). Any version the user picks is
+    installable.
     """
     global _server_esphome_venv, _server_esphome_bin, _esphome_install_failed
     global _esphome_version_cache
-
-    if _version_tuple(version) < _version_tuple(MIN_ESPHOME_VERSION):
-        logger.error(
-            "Refusing to install ESPHome %s: version too old. "
-            "ESPHome Fleet 1.6.2+ requires %s or newer "
-            "(bundle creation uses esphome.bundle, which landed in "
-            "ESPHome 2026.4). Pin a newer version via the UI or the "
-            "HA ESPHome add-on.",
-            version, MIN_ESPHOME_VERSION,
-        )
-        _esphome_install_failed = True
-        return
 
     # VersionManager lives in the bundled client code. In production the
     # Dockerfile copies client/ to /app/client; locally the test harness
@@ -178,6 +173,15 @@ def ensure_esphome_installed(
     # version from what we previously reported (e.g. after a refresh).
     _esphome_version_cache = None
     _esphome_ready.set()
+    # #119 (round 2): publish this venv so the in-container local worker
+    # (which shares ``versions_base``) never evicts it out from under
+    # ``create_bundle``. Best-effort; create_bundle self-heals if it
+    # vanishes anyway.
+    try:
+        from version_manager import write_server_active_version  # noqa: PLC0415
+        write_server_active_version(versions_base, version)
+    except Exception:
+        logger.debug("write_server_active_version(%s) failed", version, exc_info=True)
     logger.info("ESPHome %s ready at %s", version, bin_path)
 
 
@@ -443,38 +447,119 @@ def _venv_python() -> str:
     return sys.executable
 
 
+# #131: paths to skip when building the legacy full-config-dir tar.
+# Mirrors the pre-1.6.2 behaviour (mac metadata + obvious build caches)
+# plus the ``__pycache__`` / ``.git`` exclusions the bundler already had.
+_LEGACY_BUNDLE_SKIP_NAMES = frozenset(
+    (".DS_Store", ".esphome", ".pioenvs", ".pio", ".git", "__pycache__"),
+)
+
+
+def _create_legacy_bundle(config_dir: str, target: str) -> bytes:
+    """#131: pre-1.6.2 fallback — tar the full config directory.
+
+    Used when the server's selected ESPHome version is older than
+    2026.4 (and therefore lacks ``esphome.bundle.ConfigBundleCreator``).
+    The worker's ``esphome compile`` resolves ``!secret`` references,
+    ``!include`` / ``packages:`` / ``external_components:`` from the
+    extracted directory exactly as it would on the user's own machine.
+
+    Trade-off: this bundle ships every device's ``secrets.yaml``, every
+    other YAML, and any external-component cache to the claiming
+    worker. ConfigBundleCreator scopes the bundle to the target's
+    referenced files; the legacy path can't because dependency
+    resolution lives in ESPHome 2026.4's validator. Documented in
+    DOCS.md / CHANGELOG: pinning to old ESPHome versions reduces
+    bundle isolation; users sharing workers with untrusted parties
+    should pin to ≥2026.4.
+    """
+    base = Path(config_dir)
+    target_path = base / target
+    if not target_path.is_file():
+        raise FileNotFoundError(f"Target not found: {target_path}")
+
+    buf = io.BytesIO()
+    entries_added = 0
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        # Use a sorted walk for deterministic bundle output (cache-key
+        # stability on the worker side; same target → same bytes).
+        for entry in sorted(base.rglob("*")):
+            rel = entry.relative_to(base)
+            parts = rel.parts
+            # Skip mac metadata files (``._foo``) and known build caches.
+            if any(p.startswith("._") for p in parts):
+                continue
+            if any(p in _LEGACY_BUNDLE_SKIP_NAMES for p in parts):
+                continue
+            if entry.is_dir():
+                continue  # tarfile.add(recursive=False) on file entries is enough
+            tar.add(str(entry), arcname=str(rel), recursive=False)
+            entries_added += 1
+    data = buf.getvalue()
+    logger.info(
+        "Legacy bundle for %s: %d bytes / %d entries (full-config-dir tar; "
+        "server ESPHome <2026.4 — see #131 for context)",
+        target, len(data), entries_added,
+    )
+    return data
+
+
+def _supports_modern_bundle() -> bool:
+    """True iff the active ESPHome venv has ``esphome.bundle``.
+
+    The version comparison runs against the *installed* version (not
+    the user-selected sentinel like ``"installing"``) so a fresh boot
+    where lazy install hasn't completed yet doesn't accidentally
+    pick the legacy path. Falls back to the modern path on any
+    parse failure — ConfigBundleCreator is strictly better when
+    available.
+    """
+    installed = _get_installed_esphome_version()
+    if installed in ("unknown", "installing"):
+        # No idea what's loaded; trust the modern path. If it's
+        # actually missing the import the subprocess will fail with
+        # an actionable error.
+        return True
+    parts = _version_tuple(installed)
+    floor = _version_tuple(MIN_ESPHOME_VERSION)
+    return parts >= floor
+
+
 def create_bundle(config_dir: str, target: str) -> bytes:
     """Create a self-contained bundle for *target* under *config_dir*.
 
-    BD — Bundle discipline (WORKITEMS-1.6.2). Delegates to ESPHome's
-    ``ConfigBundleCreator`` (``esphome/bundle.py``, ESPHome 2026.4+)
-    so the bundle walks the target's validated config tree and ships
-    only the files the target actually references — secrets.yaml is
-    filtered to just the keys this target uses, `.git/` and unrelated
-    device YAMLs don't ship by construction, and ``.esphome`` /
-    ``.pioenvs`` / ``.pio`` build caches are ignored.
+    BD — Bundle discipline (WORKITEMS-1.6.2). The default path
+    delegates to ESPHome's ``ConfigBundleCreator``
+    (``esphome/bundle.py``, ESPHome 2026.4+) so the bundle walks the
+    target's validated config tree and ships only the files the
+    target actually references — ``secrets.yaml`` is filtered to
+    just the keys this target uses, ``.git/`` and unrelated device
+    YAMLs don't ship by construction, and ``.esphome`` / ``.pioenvs``
+    / ``.pio`` build caches are ignored.
 
-    Pre-1.6.2 shipped the entire ``/config/esphome/`` tree to every
-    claiming worker (``base.rglob("*")`` with only macOS ``._*`` /
-    ``.DS_Store`` filters), which was a latent secret-exfiltration
-    vector — a worker on a friend's Docker host received every device's
-    Wi-Fi PSK, API noise keys, the fleet's git remote URL, and any
-    in-place ``esphome compile`` PlatformIO cache. Cleaned up here.
+    #131: when the server's active ESPHome is <2026.4 (no
+    ``esphome.bundle`` module), falls back to ``_create_legacy_bundle``
+    — a full-config-dir tar, identical in shape to the pre-1.6.2
+    bundling. Trade-off documented above and on the user-facing dropdown
+    UI; lifts the artificial floor that prevented compiling against
+    pinned older versions (#130 / #131).
 
-    Validation + bundling runs in a **fresh subprocess** via the
-    ESPHome venv's python (``_BUNDLE_SUBPROCESS_SCRIPT``). In-process
-    validate_config is not safe to call repeatedly: external components
-    (e.g. ratgdo dashboard_import) register module-level validators
-    whose state persists across ``CORE.reset()``, causing phantom
-    "Only one binary sensor of type 'motion' is allowed" errors on
-    targets that pass ``esphome compile`` standalone. Fresh-process
-    isolation mirrors what the ESPHome CLI gets for free.
+    Validation + bundling on the modern path runs in a **fresh
+    subprocess** via the ESPHome venv's python
+    (``_BUNDLE_SUBPROCESS_SCRIPT``). In-process ``validate_config`` is
+    not safe to call repeatedly: external components (e.g. ratgdo
+    dashboard_import) register module-level validators whose state
+    persists across ``CORE.reset()``, causing phantom "Only one
+    binary sensor of type 'motion' is allowed" errors on targets that
+    pass ``esphome compile`` standalone. Fresh-process isolation
+    mirrors what the ESPHome CLI gets for free.
 
     Validation failures are surfaced as ``RuntimeError`` so the caller
     can fail the job cleanly — intentional: targets that don't
     validate under the server's ESPHome version can't be dispatched
-    until the YAML is fixed. Far better than silently shipping the
-    full config directory.
+    until the YAML is fixed. The legacy path skips validation; if the
+    YAML is broken under the pinned version the worker's
+    ``esphome compile`` reports it.
 
     Returns raw bytes (caller base64-encodes if needed).
     """
@@ -482,11 +567,33 @@ def create_bundle(config_dir: str, target: str) -> bytes:
     if not path.is_file():
         raise FileNotFoundError(f"Target not found: {path}")
 
+    if not _supports_modern_bundle():
+        return _create_legacy_bundle(config_dir, target)
+
+    # #119 (round 2) self-heal: the in-container local worker shares the
+    # venv dir, and an eviction race can delete the server's bundling
+    # venv between installs. If the interpreter is gone, transparently
+    # reinstall the selected version instead of failing every compile
+    # with ``FileNotFoundError: '.../bin/python'`` until the add-on
+    # restarts. ``_venv_python`` returns ``sys.executable`` (always
+    # present) on the dev/legacy path, so this only fires on a genuinely
+    # evicted managed venv.
+    venv_python = _venv_python()
+    if not Path(venv_python).exists():
+        recover_version = get_esphome_version()
+        logger.warning(
+            "Bundle venv python missing (%s) — reinstalling ESPHome %s "
+            "(local worker likely evicted the shared venv; #119)",
+            venv_python, recover_version,
+        )
+        ensure_esphome_installed(recover_version)
+        venv_python = _venv_python()
+
     # PY-2: log the command line before the subprocess runs so a failure
     # triage has the actual invocation visible in the add-on log (the
     # `-c <inline-script>` shape means argv in any crash message shows
     # up as `-c`, not a readable path — the readable info is this line).
-    cmd = [_venv_python(), "-c", _BUNDLE_SUBPROCESS_SCRIPT, str(path)]
+    cmd = [venv_python, "-c", _BUNDLE_SUBPROCESS_SCRIPT, str(path)]
     logger.debug("Running bundle subprocess: %s %s -c <script> %s",
                  cmd[0], cmd[1], cmd[3])
     proc = subprocess.run(
@@ -815,11 +922,14 @@ _META_MARKERS: tuple[str, ...] = (_META_MARKER, _LEGACY_META_MARKER)
 # "skip me" prelude so rewrites don't accumulate duplicates. Add new lines
 # to this set if the phrasing evolves; never remove old ones (they'll exist
 # in real user files).
-_EXPLANATORY_HEADER_DEFAULT = "# Read by the ESPHome Fleet add-on. Do not remove."
+_EXPLANATORY_HEADER_DEFAULT = "# Read by the Fleet for ESPHome add-on. Do not remove."
 _EXPLANATORY_HEADERS: frozenset[str] = frozenset(
     {
         _EXPLANATORY_HEADER_DEFAULT,
-        # Prior phrasings would go here if the text ever changes.
+        # 1.7.1 BR.1 rebrand: pre-rebrand wording lived in user YAMLs from
+        # 1.6.1 onward. Keep recognizing it so the rewriter doesn't dupe
+        # when it sees an old header alongside the new marker block.
+        "# Read by the ESPHome Fleet add-on. Do not remove.",  # br1-allow: pre-rebrand back-compat
     }
 )
 
@@ -1152,7 +1262,11 @@ def _resolve_esphome_config(config_dir: str, target: str) -> Optional[dict]:
         # already have a cached result for any version of this file — the first
         # resolution will clone, subsequent ones reuse the local checkout.
         already_resolved = target in _config_cache
-        config = do_packages_pass(config, skip_update=already_resolved)
+        import inspect
+        if "skip_update" in inspect.signature(do_packages_pass).parameters:
+            config = do_packages_pass(config, skip_update=already_resolved)
+        else:
+            config = do_packages_pass(config)
         config = merge_packages(config)
 
         # Resolve ${substitutions}. ESPHome 2026.4.0 reshaped the API
@@ -1473,6 +1587,11 @@ def _extract_metadata(config: dict, result: dict) -> None:
     elif isinstance(config.get("rp2040"), dict):
         result["esp_type"] = "RP2040"
         board = config["rp2040"].get("board")
+        if board:
+            result["board"] = str(board)
+    elif isinstance(config.get("bk72xx"), dict):
+        result["esp_type"] = "BK72XX"
+        board = config["bk72xx"].get("board")
         if board:
             result["board"] = str(board)
     elif "host" in config:

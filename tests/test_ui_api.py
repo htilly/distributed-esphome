@@ -953,6 +953,44 @@ async def test_workers_lists_registered(tmp_path):
         assert len(data) == 2
         hostnames = {w["hostname"] for w in data}
         assert hostnames == {"worker-1", "worker-2"}
+        # #151: every worker row carries the active_job_count / is_working
+        # fields the HA WorkerWorkingBinarySensor reads off — zero baseline.
+        for row in data:
+            assert row["active_job_count"] == 0
+            assert row["is_working"] is False
+    finally:
+        await ta.close()
+
+
+async def test_workers_exposes_active_job_count_and_is_working(tmp_path):
+    """#151 (KriVaTri): a worker with a WORKING job assigned reports
+    ``active_job_count == 1`` and ``is_working is True`` so the HA
+    integration's WorkerWorkingBinarySensor flips on without an extra
+    server round-trip. Workers that are idle remain ``is_working False``
+    even if some other worker is busy."""
+    from job_queue import JobState  # noqa: PLC0415
+
+    ta = await _make_ui_app(tmp_path)
+    try:
+        busy_id = ta.registry.register("busy", "linux/amd64", image_version="4")
+        ta.registry.register("idle", "linux/amd64", image_version="4")
+
+        job = await ta.queue.enqueue(
+            target="device.yaml",
+            esphome_version="2024.3.1",
+            run_id="run-1",
+            timeout_seconds=300,
+        )
+        job.state = JobState.WORKING
+        job.assigned_client_id = busy_id
+
+        resp = await ta.get("/ui/api/workers")
+        assert resp.status == 200
+        rows = {w["hostname"]: w for w in await resp.json()}
+        assert rows["busy"]["active_job_count"] == 1
+        assert rows["busy"]["is_working"] is True
+        assert rows["idle"]["active_job_count"] == 0
+        assert rows["idle"]["is_working"] is False
     finally:
         await ta.close()
 
@@ -1300,6 +1338,72 @@ async def test_compile_defaults_download_only_to_false(tmp_path):
         await ta.close()
 
 
+# ---------------------------------------------------------------------------
+# SOTA.3 — auto-detect Thread targets as server_ota at enqueue time
+# ---------------------------------------------------------------------------
+
+async def test_compile_auto_detects_thread_target_as_server_ota(tmp_path):
+    """A target whose metadata reports network_type=='thread' is enqueued
+    with server_ota=True even though the caller never asked for it —
+    Thread devices are only OTA-reachable from the HA host."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "thread-dev.yaml", "thread-dev")
+        with patch(
+            "ui_api.get_device_metadata",
+            return_value={"network_type": "thread"},
+        ):
+            resp = await ta.post("/ui/api/compile", json={"targets": ["thread-dev.yaml"]})
+        assert resp.status == 200
+        jobs = ta.queue.get_all()
+        assert len(jobs) == 1
+        assert jobs[0].server_ota is True
+    finally:
+        await ta.close()
+
+
+async def test_compile_non_thread_target_not_auto_server_ota(tmp_path):
+    """A wifi/ethernet target is not force-flagged server_ota — the normal
+    worker-performs-OTA flow is unaffected by SOTA.3's auto-detection."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "wifi-dev.yaml", "wifi-dev")
+        with patch(
+            "ui_api.get_device_metadata",
+            return_value={"network_type": "wifi"},
+        ):
+            resp = await ta.post("/ui/api/compile", json={"targets": ["wifi-dev.yaml"]})
+        assert resp.status == 200
+        jobs = ta.queue.get_all()
+        assert len(jobs) == 1
+        assert jobs[0].server_ota is False
+    finally:
+        await ta.close()
+
+
+async def test_compile_thread_target_honors_explicit_server_ota_too(tmp_path):
+    """A non-Thread target with server_ota explicitly requested in the body
+    still gets server_ota=True — auto-detection ORs with, not replaces, the
+    caller's explicit flag."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "wifi-dev.yaml", "wifi-dev")
+        with patch(
+            "ui_api.get_device_metadata",
+            return_value={"network_type": "wifi"},
+        ):
+            resp = await ta.post(
+                "/ui/api/compile",
+                json={"targets": ["wifi-dev.yaml"], "server_ota": True},
+            )
+        assert resp.status == 200
+        jobs = ta.queue.get_all()
+        assert len(jobs) == 1
+        assert jobs[0].server_ota is True
+    finally:
+        await ta.close()
+
+
 async def test_firmware_download_streams_stored_bin(tmp_path, monkeypatch):
     import firmware_storage
     firmware_dir = tmp_path / "firmware"
@@ -1479,7 +1583,10 @@ async def test_get_settings_returns_defaults_on_fresh_boot(tmp_path, _settings_i
             "require_ha_auth": False,
             "time_format": "auto",
             "date_format": "auto",
+            "language": "auto",
+            "font_size": "normal",
             "default_worker_disk_quota_bytes": 10 * 1024 ** 3,
+            "device_native_api_poll": False,
         }
     finally:
         await ta.close()
@@ -1611,6 +1718,61 @@ async def test_editor_save_triggers_auto_commit(tmp_path, _settings_init):
         ).stdout.splitlines()
         # Bug #34: auto-save subject is the human-readable form.
         assert "Automatically saved after editing in UI" in log
+    finally:
+        gv._reset_for_tests()
+        await ta.close()
+
+
+async def test_editor_save_with_skip_commit_writes_file_but_no_commit(
+    tmp_path, _settings_init,
+):
+    """Bug #136 follow-up: ``skip_commit: true`` writes the file but
+    leaves the commit step to the explicit Save & Close path."""
+    import subprocess
+
+    import git_versioning as gv
+    gv._reset_for_tests()
+
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "bedroom.yaml", "bedroom")
+        gv.init_repo(ta.config_dir)
+
+        # Snapshot current commit count so we can assert no NEW commit lands.
+        baseline = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD"],
+            cwd=str(ta.config_dir), capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        old = gv.DEBOUNCE_SECONDS
+        gv.DEBOUNCE_SECONDS = 0.05
+        try:
+            resp = await ta.post(
+                "/ui/api/targets/bedroom.yaml/content",
+                json={
+                    "content": "esphome:\n  name: bedroom\n# edited via plain Save\n",
+                    "skip_commit": True,
+                },
+            )
+            assert resp.status == 200
+            await gv.drain_pending_commits()
+        finally:
+            gv.DEBOUNCE_SECONDS = old
+
+        # File written.
+        assert (
+            "edited via plain Save"
+            in (ta.config_dir / "bedroom.yaml").read_text()
+        )
+
+        # No new commit landed — the commit count is unchanged from baseline.
+        after = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD"],
+            cwd=str(ta.config_dir), capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert after == baseline, (
+            f"skip_commit=true must not produce a commit (was {baseline}, now {after})"
+        )
     finally:
         gv._reset_for_tests()
         await ta.close()

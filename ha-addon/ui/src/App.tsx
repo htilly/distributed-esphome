@@ -74,7 +74,19 @@ import type { Device, Job, Target, Worker } from './types';
 import { setDateFormatPref, setTimeFormatPref, stripYaml } from './utils';
 import { downloadTextFile } from './utils/terminal';
 import esphomeLogoUrl from './assets/esphome-logo.svg';
+import i18n from './i18n';
 import './theme.css';
+
+// I18N.2 (#141): map `AppSettings.language` to an i18next locale.
+// 'auto' resolves to the browser's preferred language; an unknown
+// browser locale falls through to 'en' so a Spanish browser doesn't
+// see raw keys until we ship a Spanish catalog.
+function resolveLanguage(setting: 'auto' | 'en' | 'de'): string {
+  if (setting !== 'auto') return setting;
+  const nav = (typeof navigator !== 'undefined' ? navigator.language : 'en').toLowerCase();
+  if (nav.startsWith('de')) return 'de';
+  return 'en';
+}
 
 type TabName = 'devices' | 'queue' | 'workers' | 'schedules';
 
@@ -236,6 +248,26 @@ export default function App() {
   useEffect(() => {
     if (appSettings?.date_format) setDateFormatPref(appSettings.date_format);
   }, [appSettings?.date_format]);
+  // I18N.2 (#141): propagate AppSettings.language → i18next. The
+  // singleton is already initialised in main.tsx; this effect just
+  // calls changeLanguage() when the setting toggles. No-op while
+  // appSettings is still loading (first render).
+  useEffect(() => {
+    if (!appSettings?.language) return;
+    const resolved = resolveLanguage(appSettings.language);
+    if (i18n.language !== resolved) {
+      void i18n.changeLanguage(resolved);
+    }
+  }, [appSettings?.language]);
+  // #145: stamp data-font-size on <html> so the CSS in index.css can
+  // pick up the override and scale the Tailwind type ramp. 'normal' is
+  // the default; we still set the attribute explicitly so the CSS
+  // selector matches and a future stylesheet diff is auditable.
+  useEffect(() => {
+    const root = document.documentElement;
+    const size = appSettings?.font_size ?? 'normal';
+    root.setAttribute('data-font-size', size);
+  }, [appSettings?.font_size]);
   // Poll at 1 Hz for live-feeling updates. Workers + queue are pure in-memory
   // reads. Targets/devices does a readdir + per-target stat() for mtime cache
   // checks (metadata resolution is cached and only re-fires when a file
@@ -753,13 +785,13 @@ export default function App() {
     <>
       <header>
         {/* #85: replaced the CDN-hotlinked ESPHome wordmark with just the
-            house glyph served locally, paired with our own "ESPHome Fleet"
+            house glyph served locally, paired with our own "Fleet for ESPHome"
             wordmark rendered in the app's own type. Also removes the
             dependency on a third-party CDN at page-load time (wordmark
             was served from media.esphome.io). */}
         <img
           src={esphomeLogoUrl}
-          alt="ESPHome Fleet"
+          alt="Fleet for ESPHome"
           /* actual size is driven by `header img { height: 40px }` in
              theme.css — attributes here are just intrinsic-aspect hints
              for the browser (square → width = height). */
@@ -776,7 +808,7 @@ export default function App() {
             letterSpacing: '-0.01em',
           }}
         >
-          ESPHome Fleet
+          Fleet for ESPHome
         </span>
         <span className="rounded-full border border-[var(--border)] bg-[var(--surface2)] px-2 py-0.5 text-[11px] text-[var(--text-muted)] whitespace-nowrap">
           {serverInfo.addon_version ? `v${serverInfo.addon_version}` : 'v?'}
@@ -978,7 +1010,7 @@ export default function App() {
               Session expired
             </h2>
             <p className="mb-4 text-sm text-[var(--text-muted)]">
-              ESPHome Fleet requires a valid Home Assistant session. Your
+              Fleet for ESPHome requires a valid Home Assistant session. Your
               session likely timed out, or the <code>?token=</code> you used
               for direct-port access is no longer valid. Reload to
               re-authenticate through Home Assistant.

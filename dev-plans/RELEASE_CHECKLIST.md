@@ -73,7 +73,7 @@ The goal here is **what isn't automated**. Anything covered by CI, the pre-push 
     # and a 512×512 upscale, both rejected. Use the exact bytes that
     # shipped in 1.6.0.
     curl -sSL -o ha-addon/logo.png \
-      https://raw.githubusercontent.com/weirded/distributed-esphome/v1.6.0/ha-addon/logo.png
+      https://raw.githubusercontent.com/weirded/fleet-for-esphome/v1.6.0/ha-addon/logo.png
     cp ha-addon/logo.png ha-addon/custom_integration/esphome_fleet/logo.png
 
     # home-assistant/brands submission. Icons are the square glyph; the
@@ -82,7 +82,7 @@ The goal here is **what isn't automated**. Anything covered by CI, the pre-push 
     magick -background none ha-addon/ui/src/assets/esphome-logo.svg -resize 256x256 docs/brands-submission/custom_integrations/esphome_fleet/icon.png
     magick -background none ha-addon/ui/src/assets/esphome-logo.svg -resize 512x512 docs/brands-submission/custom_integrations/esphome_fleet/icon@2x.png
     WORDMARK() { magick -background none -fill "#18BCF2" -font "Helvetica-Bold" \
-      -pointsize "$1" label:"ESPHome Fleet" \
+      -pointsize "$1" label:"Fleet for ESPHome" \
       -bordercolor none -border "$2" "$3"; }
     WORDMARK 64   20x16  docs/brands-submission/custom_integrations/esphome_fleet/logo.png
     WORDMARK 128  40x32  docs/brands-submission/custom_integrations/esphome_fleet/logo@2x.png

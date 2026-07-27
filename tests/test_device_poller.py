@@ -15,6 +15,20 @@ sys.modules.setdefault("zeroconf", MagicMock())
 sys.modules.setdefault("zeroconf.asyncio", MagicMock())
 sys.modules.setdefault("aioesphomeapi", MagicMock())
 _icmplib_stub = MagicMock()
+# SocketPermissionError must be a *real* exception subclass, not a bare
+# MagicMock attribute: both device_poller and ui_api do
+# `except SocketPermissionError`, and Python 3.13 raises TypeError
+# ("catching classes that do not inherit from BaseException is not allowed")
+# if the caught name isn't a BaseException subclass. Pre-2026.7 esphome
+# pulled real icmplib in transitively so this stub stayed dormant; esphome
+# 2026.7.0 dropped it (#240), activating the stub and exposing the gap.
+
+
+class _StubSocketPermissionError(Exception):
+    pass
+
+
+_icmplib_stub.SocketPermissionError = _StubSocketPermissionError
 sys.modules.setdefault("icmplib", _icmplib_stub)
 
 from device_poller import Device, DevicePoller
@@ -513,6 +527,204 @@ def test_cache_does_not_persist_ip_or_address_source(tmp_path, monkeypatch):
     # But the stable bits ARE persisted
     assert saved["dev1"]["running_version"] == "2026.3.2"
     assert saved["dev1"]["mac_address"] == "AA:BB:CC:DD:EE:FF"
+
+
+# ---------------------------------------------------------------------------
+# #238: device_native_api_poll — mDNS-first steady state
+# ---------------------------------------------------------------------------
+
+def _patch_settings(monkeypatch, *, device_native_api_poll: bool):
+    """Make ``settings.get_settings()`` return a stub with the given flag.
+
+    The poller's ``_legacy_native_poll`` reads ``device_native_api_poll``
+    from settings on every call so a Settings drawer flip takes effect
+    without restarting; tests need to control that value.
+    """
+    class _S:
+        device_poll_interval = 60
+        device_native_api_poll_value = device_native_api_poll
+
+        def __init__(self) -> None:
+            self.device_native_api_poll = type(self).device_native_api_poll_value
+
+    import settings as settings_mod
+    monkeypatch.setattr(settings_mod, "get_settings", lambda: _S())
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_skips_query_for_recent_mdns(monkeypatch):
+    """Default mode: a device whose ``last_seen`` is within 2× the poll
+    interval is trusted from mDNS — no API connection is opened.
+    """
+    _patch_settings(monkeypatch, device_native_api_poll=False)
+    from datetime import datetime, timezone, timedelta
+
+    p = DevicePoller(poll_interval=60)
+    p._devices["recent"] = Device(
+        name="recent",
+        ip_address="192.168.1.10",
+        last_seen=datetime.now(timezone.utc) - timedelta(seconds=30),
+    )
+
+    queried: list[str] = []
+
+    async def fake_query(name: str, ip: str) -> None:
+        queried.append(name)
+
+    monkeypatch.setattr(p, "_query_device", fake_query)
+
+    # Run one iteration of the poll body manually (avoid the sleep).
+    p._running = True
+    snapshot = dict(p._devices)
+    legacy = p._legacy_native_poll()
+    assert legacy is False
+    now = datetime.now(timezone.utc)
+    mdns_window = timedelta(seconds=2 * p._poll_interval)
+
+    tasks = []
+    for name, dev in snapshot.items():
+        addr = dev.ip_address
+        if not addr:
+            continue
+        if legacy:
+            tasks.append(fake_query(name, addr))
+            continue
+        seen_recently = (
+            dev.last_seen is not None and now - dev.last_seen <= mdns_window
+        )
+        if seen_recently:
+            continue
+        tasks.append(fake_query(name, addr))
+
+    import asyncio as _asyncio
+    if tasks:
+        await _asyncio.gather(*tasks)
+
+    assert queried == []  # mDNS-recent → zero connects
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_falls_back_for_stale_or_unseen_device(monkeypatch):
+    """Default mode: a device that has NOT been seen via mDNS recently
+    (or has ``last_seen=None``) gets a single API connect as a fallback —
+    covers Ethernet / OpenThread / mdns-disabled devices.
+    """
+    _patch_settings(monkeypatch, device_native_api_poll=False)
+    from datetime import datetime, timezone, timedelta
+
+    p = DevicePoller(poll_interval=60)
+    p._devices["never_seen"] = Device(name="never_seen", ip_address="10.0.0.1")
+    p._devices["stale"] = Device(
+        name="stale",
+        ip_address="10.0.0.2",
+        last_seen=datetime.now(timezone.utc) - timedelta(seconds=600),
+    )
+    p._devices["recent"] = Device(
+        name="recent",
+        ip_address="10.0.0.3",
+        last_seen=datetime.now(timezone.utc) - timedelta(seconds=10),
+    )
+
+    queried: list[str] = []
+
+    async def fake_query(name: str, ip: str) -> None:
+        queried.append(name)
+
+    monkeypatch.setattr(p, "_query_device", fake_query)
+
+    snapshot = dict(p._devices)
+    now = datetime.now(timezone.utc)
+    mdns_window = timedelta(seconds=2 * p._poll_interval)
+
+    for name, dev in snapshot.items():
+        if not dev.ip_address:
+            continue
+        seen_recently = (
+            dev.last_seen is not None and now - dev.last_seen <= mdns_window
+        )
+        if not seen_recently:
+            await fake_query(name, dev.ip_address)
+
+    assert sorted(queried) == ["never_seen", "stale"]
+    assert "recent" not in queried
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_legacy_mode_polls_every_device(monkeypatch):
+    """Legacy mode: ``device_native_api_poll = True`` restores the
+    pre-1.7.1 every-tick fan-out for every device with an address.
+    """
+    _patch_settings(monkeypatch, device_native_api_poll=True)
+    from datetime import datetime, timezone, timedelta
+
+    p = DevicePoller(poll_interval=60)
+    p._devices["recent"] = Device(
+        name="recent",
+        ip_address="10.0.0.1",
+        last_seen=datetime.now(timezone.utc) - timedelta(seconds=10),
+    )
+    p._devices["stale"] = Device(
+        name="stale",
+        ip_address="10.0.0.2",
+        last_seen=datetime.now(timezone.utc) - timedelta(seconds=600),
+    )
+
+    queried: list[str] = []
+
+    async def fake_query(name: str, ip: str) -> None:
+        queried.append(name)
+
+    monkeypatch.setattr(p, "_query_device", fake_query)
+
+    legacy = p._legacy_native_poll()
+    assert legacy is True
+
+    for name, dev in p._devices.items():
+        if dev.ip_address:
+            await fake_query(name, dev.ip_address)
+
+    assert sorted(queried) == ["recent", "stale"]
+
+
+@pytest.mark.asyncio
+async def test_note_target_flashed_stamps_compile_time(monkeypatch):
+    """Post-OTA hook stamps ``compilation_time`` server-side without
+    opening an API connection. ui_api's ``_parse_device_compile_epoch``
+    must be able to parse the stamp via "%Y-%m-%d %H:%M:%S %z".
+    """
+    p = DevicePoller(poll_interval=60)
+    p._devices["bedroom"] = Device(
+        name="bedroom",
+        ip_address="10.0.0.5",
+        compile_target="bedroom.yaml",
+    )
+
+    # No API access — the test would fail if note_target_flashed reached
+    # for the network. Make _query_device explode if called.
+    async def boom(*a, **kw):
+        raise AssertionError("note_target_flashed must not connect to the device")
+
+    monkeypatch.setattr(p, "_query_device", boom)
+
+    ok = await p.note_target_flashed("bedroom.yaml")
+    assert ok is True
+    stamped = p._devices["bedroom"].compilation_time
+    assert stamped is not None
+
+    # Round-trip through the parser used by ui_api.
+    from datetime import datetime
+    parsed = datetime.strptime(stamped, "%Y-%m-%d %H:%M:%S %z")
+    assert parsed is not None
+    # The Device should also be marked online with a fresh last_seen.
+    assert p._devices["bedroom"].online is True
+    assert p._devices["bedroom"].last_seen is not None
+
+
+@pytest.mark.asyncio
+async def test_note_target_flashed_unknown_target_returns_false(monkeypatch):
+    p = DevicePoller(poll_interval=60)
+    ok = await p.note_target_flashed("ghost.yaml")
+    assert ok is False
 
 
 def test_cache_load_does_not_restore_ip_or_address_source(tmp_path, monkeypatch):

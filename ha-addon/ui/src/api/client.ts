@@ -293,6 +293,17 @@ export interface AppSettings {
   // 'iso' = YYYY-MM-DD, 'us' = M/D/YYYY, 'eu' = DD/MM/YYYY,
   // 'long' = "Apr 27, 2026". Wired to App.tsx → setDateFormatPref.
   date_format: 'auto' | 'iso' | 'us' | 'eu' | 'long';
+  // I18N.2 (#141) — UI locale. 'auto' resolves to navigator.language;
+  // 'en' / 'de' force a specific locale. Wired to App.tsx →
+  // i18n.changeLanguage(). Adding a language requires (a) shipping its
+  // catalog in src/i18n/locales/, (b) adding it here, and (c) listing
+  // it in `_validate_enum` on the server.
+  language: 'auto' | 'en' | 'de';
+  // #145 — UI font-size scale. 'normal' = today's sizing (byte-identical
+  // render to pre-#145). 'small' / 'large' shift the root font-size so
+  // Tailwind's whole type ramp scales proportionally; persisted via
+  // [data-font-size] attribute on <html>, applied at App.tsx mount.
+  font_size: 'small' | 'normal' | 'large';
 }
 
 export async function getSettings(): Promise<AppSettings> {
@@ -477,9 +488,11 @@ export async function saveTargetContent(
   filename: string,
   content: string,
   commitMessage?: string,
+  skipCommit?: boolean,
 ): Promise<{ renamedTo: string | null }> {
   const body: Record<string, unknown> = { content };
   if (commitMessage && commitMessage.trim()) body.commit_message = commitMessage.trim();
+  if (skipCommit) body.skip_commit = true;
   const data = await parseResponse<SaveTargetResponse>(
     await apiFetch(`./ui/api/targets/${encodeURIComponent(filename)}/content`, {
       method: 'POST',

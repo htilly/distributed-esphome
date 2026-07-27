@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Capture a Python thread dump from the running ESPHome Fleet add-on.
+# Capture a Python thread dump from the running Fleet for ESPHome add-on.
 #
 # **Normally you don't need this script.** Since 1.6.2 (#189) the
 # add-on UI has a first-class "Request diagnostics" action (Settings
@@ -20,7 +20,7 @@
 #
 # Requires Docker on the host (HAOS: SSH & Web Terminal add-on with
 # Protection Mode OFF; Supervised: the host shell). No extra packages to
-# install — the sidecar pulls python:3.11-slim and `pip install py-spy`
+# install — the sidecar pulls python:3.13-slim and `pip install py-spy`
 # on the fly (~15s first time, cached after). The add-on image itself
 # no longer ships py-spy (removed in #189 when the UI path landed).
 #
@@ -49,7 +49,7 @@ esac
 
 CONTAINER="$(docker ps --format '{{.Names}}' | grep -E '^addon_.*_esphome_dist_server$' | head -1 || true)"
 if [[ -z "$CONTAINER" ]]; then
-  echo "No running ESPHome Fleet add-on container found." >&2
+  echo "No running Fleet for ESPHome add-on container found." >&2
   echo "Running add-on containers:" >&2
   docker ps --format '  {{.Names}}' | grep -E '^addon_' >&2 || echo "  (none)" >&2
   exit 1
@@ -64,7 +64,7 @@ docker run --rm \
   --cap-add SYS_PTRACE \
   --security-opt apparmor=unconfined \
   -e TARGET="$TARGET" \
-  python:3.11-slim \
+  python:3.13-slim \
   bash -c '
 set -eu
 PIP_ROOT_USER_ACTION=ignore PIP_DISABLE_PIP_VERSION_CHECK=1 \

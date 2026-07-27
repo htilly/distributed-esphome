@@ -291,20 +291,31 @@ class DevicePoller:
                     dev.running_version = txt_version
                 self._save_cache()
 
-            # Trigger an immediate API query for the full version.
-            # Prefer use_address from config over mDNS IP. The address override
-            # may be keyed under either the normalized or original name; check
-            # both. Use existing_key (the merged-into device) for the query so
-            # ping/API results land on the right Device row.
-            query_addr = (
-                self._address_overrides.get(existing_key)
-                or self._address_overrides.get(device_name)
-                or ip
+            # #238: only open an aioesphomeapi connection when we genuinely
+            # need to backfill information mDNS doesn't carry — the device's
+            # ``mac_address`` and ``compilation_time``. Once those are set,
+            # subsequent mDNS announces (every ~75 % of the TXT TTL, i.e.
+            # roughly once a minute under default ESPHome settings) update
+            # ``last_seen`` + ``running_version`` from the TXT record and do
+            # NOT spawn a fresh connection. The legacy "always poll" path
+            # is gated behind the ``device_native_api_poll`` setting (default
+            # False) for power users who explicitly want every-tick polling.
+            dev_now = self._devices.get(existing_key)
+            needs_backfill = (
+                dev_now is not None
+                and dev_now.compilation_time is None
+                and dev_now.mac_address is None
             )
-            if query_addr:
-                # C.8: create_task is the modern equivalent of ensure_future
-                # when we're scheduling a coroutine on the running loop.
-                asyncio.create_task(self._query_device(existing_key, query_addr))
+            if needs_backfill or self._legacy_native_poll():
+                query_addr = (
+                    self._address_override_for(existing_key)
+                    or self._address_override_for(device_name)
+                    or ip
+                )
+                if query_addr:
+                    # C.8: create_task is the modern equivalent of ensure_future
+                    # when we're scheduling a coroutine on the running loop.
+                    asyncio.create_task(self._query_device(existing_key, query_addr))
 
         except Exception:
             logger.exception("Error handling mDNS service change for %s", name)
@@ -394,21 +405,76 @@ class DevicePoller:
     # API polling
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _legacy_native_poll() -> bool:
+        """#238: read the ``device_native_api_poll`` opt-in.
+
+        Defaults to ``False`` — the device poller runs in mDNS-first mode
+        and skips the every-tick blanket API fan-out. ``True`` restores
+        the pre-1.7.1 behaviour where every device gets a fresh
+        ``aioesphomeapi`` connection on every ``device_poll_interval``
+        tick (and on every mDNS state change). Read fresh on every
+        decision so a Settings drawer flip takes effect without
+        restarting the poller.
+        """
+        try:
+            from settings import get_settings  # noqa: PLC0415
+            return bool(get_settings().device_native_api_poll)
+        except Exception:
+            return False
+
     async def _poll_loop(self) -> None:
-        """Periodically poll each known device via the native API."""
-        # Poll immediately on startup so cached devices (loaded from disk) get
-        # a live status check right away.  For fresh installs (empty cache) this
-        # is a no-op; mDNS will trigger _query_device as devices are discovered.
+        """Periodically reconcile known-device state.
+
+        #238: in steady state (``device_native_api_poll = False``,
+        the default), this loop does NOT open native-API connections to
+        devices on every tick. mDNS provides liveness + ``running_version``
+        via TXT records, and ``compilation_time`` / ``mac_address`` are
+        backfilled once on first sight (see ``_handle_service_change``).
+        The loop's remaining responsibilities are:
+
+          1. **Fallback poll for non-mDNS devices** — devices whose
+             ``last_seen`` is stale (older than 2 × poll interval) get a
+             single API connect attempt to confirm liveness. Covers
+             Ethernet boards, OpenThread devices, ``mdns: enabled: false``
+             configs, and devices on a network where the mDNS proxy is
+             flaky. Devices recently announced via mDNS are skipped.
+          2. **Stale → offline transition** — a device whose mDNS TTL
+             has elapsed AND whose API fallback failed flips to
+             ``online = False``.
+          3. **TTL purge** of stray mDNS-only neighbours.
+          4. **Settings refresh** so a Settings drawer change to
+             ``device_poll_interval`` takes effect on the next tick.
+
+        ``device_native_api_poll = True`` restores the pre-1.7.1
+        every-tick fan-out for users who want it.
+        """
         while self._running:
             async with self._lock:
                 snapshot = dict(self._devices)
 
-            # Query all devices concurrently for fast initial status
+            legacy = self._legacy_native_poll()
+            now = _utcnow()
+            mdns_trust_window = timedelta(seconds=2 * self._poll_interval)
+
             tasks = []
             for name, dev in snapshot.items():
-                addr = self._address_overrides.get(name) or dev.ip_address
-                if addr:
+                addr = self._address_override_for(name) or dev.ip_address
+                if not addr:
+                    continue
+                if legacy:
+                    # Pre-1.7.1 every-tick fan-out — opt-in.
                     tasks.append(self._query_device(name, addr))
+                    continue
+                # mDNS-first: only fall back to an API connect when we
+                # haven't heard from this device on mDNS in a while.
+                seen_recently = (
+                    dev.last_seen is not None
+                    and now - dev.last_seen <= mdns_trust_window
+                )
+                if seen_recently:
+                    continue
+                tasks.append(self._query_device(name, addr))
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -662,10 +728,37 @@ class DevicePoller:
         """
         return name.replace("-", "_")
 
+    def _address_override_for(self, device_name: str) -> Optional[str]:
+        """Bug #134: hyphen/underscore-tolerant lookup against
+        ``_address_overrides``.
+
+        ``build_name_to_target_map`` keys the override by the YAML's
+        ``esphome.name`` (typically with hyphens). mDNS announces a
+        normalized form (hyphens → underscores). If a device row
+        ended up keyed under the mDNS-normalized form before the
+        proactive-creation pass ran, ``_address_overrides.get(dev.name)``
+        would miss and consumers would fall back to ``dev.ip_address``
+        (often a stale ``{name}.local`` from the early-boot fallback).
+
+        Mirrors the normalization already in
+        :meth:`_find_existing_device_key` and the encryption-key
+        mirroring in :func:`scanner.build_name_to_target_map`.
+        """
+        if not device_name:
+            return None
+        override = self._address_overrides.get(device_name)
+        if override is not None:
+            return override
+        norm = self._normalize(device_name)
+        for key, value in self._address_overrides.items():
+            if self._normalize(key) == norm:
+                return value
+        return None
+
     def resolve_ota_address(self, device_name: str) -> Optional[str]:
-        """Bug #18 (1.6.1): best available address for OTA + native-API
-        calls, consolidating the ``_address_overrides.get(name) or
-        dev.ip_address`` pattern that was copy-pasted across main.py,
+        """Bug #18 (1.6.1) + #134 (1.7.2): best available address for OTA +
+        native-API calls, consolidating the ``_address_overrides.get(name)
+        or dev.ip_address`` pattern that was copy-pasted across main.py,
         scheduler.py, and ui_api.py.
 
         Precedence, strongest-signal first:
@@ -674,10 +767,12 @@ class DevicePoller:
            (user put a ``use_address`` / ``manual_ip.static_ip`` in
            the YAML — authoritative, always wins).
         2. ``dev.ip_address`` when it's a real IP (mDNS-resolved).
-        3. ``_address_overrides[name]`` even if it's a ``.local``
-           hostname — used to be the primary path, still a better
-           answer than nothing on a LAN where mDNS proxies work.
-        4. ``None`` — let the worker fall back to ESPHome's ``--device
+        3. ``_address_overrides[name]`` even if it's a ``.local`` or
+           FQDN hostname — used to be the primary path, still a
+           better answer than nothing on a LAN where mDNS proxies
+           or corporate DNS resolves the name (bug #134).
+        4. ``dev.ip_address`` as a last resort (``.local`` fallback).
+        5. ``None`` — let the worker fall back to ESPHome's ``--device
            OTA`` sentinel so ESPHome's own resolver runs.
 
         The bug (radiowave911 at issue #60) was that (1) fell through
@@ -686,6 +781,9 @@ class DevicePoller:
         override-takes-precedence shape then hid the real IP that
         mDNS had since discovered. With this helper, a real IP from
         mDNS beats a stale ``.local`` override every time.
+
+        Logs the resolution at INFO so a future bug report has the
+        full waterfall in the add-on log (DL.* discipline, #60).
         """
         dev = self._devices.get(device_name)
         if dev is None:
@@ -696,18 +794,33 @@ class DevicePoller:
                      if d.compile_target == mapped_target),
                     None,
                 )
-        override = self._address_overrides.get(device_name)
+        override = self._address_override_for(device_name)
         dev_ip = dev.ip_address if dev else None
         # Real IP in the override (static_ip / use_address) wins first.
         if override and _is_ip_literal(override):
-            return override
+            resolved = override
+            branch = "override_ip_literal"
         # mDNS-resolved real IP is next.
-        if dev_ip and _is_ip_literal(dev_ip):
-            return dev_ip
-        # Fall back to whatever override we have — probably a `.local`
-        # hostname — which is still better than ``None`` when the
-        # worker's network can resolve it.
-        return override or dev_ip or None
+        elif dev_ip and _is_ip_literal(dev_ip):
+            resolved = dev_ip
+            branch = "dev_ip_literal"
+        # Override hostname (use_address FQDN, .local fallback) over
+        # dev.ip_address (often a stale .local). Bug #134: corporate
+        # FQDNs in use_address must win over the .local fallback.
+        elif override:
+            resolved = override
+            branch = "override_hostname"
+        elif dev_ip:
+            resolved = dev_ip
+            branch = "dev_ip_hostname"
+        else:
+            resolved = None
+            branch = "none"
+        logger.debug(
+            "resolve_ota_address(%r): override=%r dev_ip=%r → %r (branch=%s)",
+            device_name, override, dev_ip, resolved, branch,
+        )
+        return resolved
 
     def _map_target(self, device_name: str) -> Optional[str]:
         """Return the YAML filename matching *device_name*, or None.
@@ -754,7 +867,46 @@ class DevicePoller:
             if target_dev is None or not target_dev.ip_address:
                 return False
             name = target_dev.name
-            ip = self._address_overrides.get(name) or target_dev.ip_address
+            ip = self._address_override_for(name) or target_dev.ip_address
         # Run the query OUTSIDE the lock — it does network I/O.
         await self._query_device(name, ip)
+        return True
+
+    async def note_target_flashed(self, compile_target: str) -> bool:
+        """#238: stamp ``compilation_time`` server-side after a successful OTA.
+
+        The post-OTA flow used to rely on ``refresh_target`` opening an
+        ``aioesphomeapi`` connection to ask the device for the new
+        compilation_time. That still works, but we also know the
+        compilation moment authoritatively — the firmware *we just
+        flashed* was built moments ago — so write it server-side
+        immediately. The UI gets a fresh "Last compiled" timestamp
+        without depending on the device being reachable in the
+        few-second post-reboot window.
+
+        ``running_version`` is left to mDNS / refresh_target — we don't
+        always know exactly which ESPHome version compiled the firmware
+        without inspecting the bundle, and mDNS TXT updates within
+        seconds of the device coming back up.
+
+        Returns True if a Device row was found and stamped.
+        """
+        # ESPHome reports compilation_time as ISO+offset, e.g.
+        # "2026-04-23 06:13:56 -0700". Match that shape so
+        # _parse_device_compile_epoch in ui_api.py parses cleanly via
+        # the existing "%Y-%m-%d %H:%M:%S %z" format.
+        now = datetime.now().astimezone()
+        stamped = now.strftime("%Y-%m-%d %H:%M:%S %z")
+        async with self._lock:
+            target_dev: Optional[Device] = None
+            for dev in self._devices.values():
+                if dev.compile_target == compile_target:
+                    target_dev = dev
+                    break
+            if target_dev is None:
+                return False
+            target_dev.compilation_time = stamped
+            target_dev.last_seen = _utcnow()
+            target_dev.online = True
+            self._save_cache()
         return True

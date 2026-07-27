@@ -1763,3 +1763,212 @@ async def test_submit_result_triggers_server_ota_push(tmp_path, monkeypatch):
         assert push_calls == [job.id]
     finally:
         await ta.close()
+
+
+# ---------------------------------------------------------------------------
+# SOTA.2 — _server_ota_push body (bundle extraction, esphome upload argv,
+# ping6 preflight, timeout, and failure branches). The tests above only
+# proved this gets *scheduled*; these drive the function itself.
+# ---------------------------------------------------------------------------
+
+
+class _FakeProc:
+    """Stand-in for the object asyncio.create_subprocess_exec returns."""
+
+    def __init__(self, returncode: int, stdout: bytes = b""):
+        self.returncode = returncode
+        self._stdout = stdout
+
+    async def communicate(self):
+        return self._stdout, b""
+
+
+@pytest.fixture
+def _fake_server_esphome(monkeypatch):
+    """Point scanner's server-esphome globals at a fake binary so
+    _server_ota_push doesn't bail out at its readiness check."""
+    import scanner as scanner_module
+    monkeypatch.setattr(scanner_module, "_server_esphome_bin", "/fake/esphome")
+    scanner_module._esphome_ready.set()
+    yield
+    scanner_module._esphome_ready.clear()
+
+
+async def _push_app(tmp_path, queue, device_poller=None):
+    """Minimal app dict — just what _server_ota_push reads."""
+    cfg = AppConfig(config_dir=str(tmp_path))
+    app: dict = {"queue": queue, "config": cfg}
+    if device_poller is not None:
+        app["device_poller"] = device_poller
+    return app
+
+
+async def test_server_ota_push_success_uploads_and_records_result(tmp_path, monkeypatch, _fake_server_esphome):
+    """Happy path: ping succeeds, esphome upload succeeds — ota_result=success,
+    the constructed argv matches --device/--file/<target.yaml>, and the log
+    carries both the ping preflight output and the upload output."""
+    import firmware_storage
+    firmware_dir = tmp_path / "firmware"
+    monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
+
+    queue = JobQueue(queue_file=tmp_path / "queue.json")
+    job = await queue.enqueue(
+        target="testdevice.yaml", esphome_version="2026.4.3", run_id="r",
+        timeout_seconds=300, server_ota=True, ota_address="fd00::1",
+    )
+    assert job is not None
+    firmware_storage.save_firmware(job.id, b"\xff" * 10, variant="ota", root=firmware_dir)
+
+    calls: list[list[str]] = []
+
+    async def _fake_subprocess_exec(*cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[0] == "ping6":
+            return _FakeProc(0, b"3 packets transmitted, 3 received")
+        return _FakeProc(0, b"Upload successful")
+
+    fake_poller = AsyncMock()
+    app = await _push_app(tmp_path, queue, device_poller=fake_poller)
+
+    with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())), \
+         patch("asyncio.create_subprocess_exec", new=_fake_subprocess_exec):
+        await api_module._server_ota_push(app, job)
+
+    updated = queue.get(job.id)
+    assert updated.ota_result == "success"
+    assert "3 packets transmitted" in (updated.log or "")
+    assert "Upload successful" in (updated.log or "")
+
+    assert len(calls) == 2
+    ping_cmd, upload_cmd = calls
+    assert ping_cmd[0] == "ping6"
+    assert ping_cmd[-1] == "fd00::1"
+    assert upload_cmd[0] == "/fake/esphome"
+    assert upload_cmd[1] == "upload"
+    assert upload_cmd[2] == "--device"
+    assert upload_cmd[3] == "fd00::1"
+    assert upload_cmd[4] == "--file"
+    assert upload_cmd[5].endswith("testdevice.ota.bin")
+    assert upload_cmd[6].endswith("testdevice.yaml")
+
+    fake_poller.refresh_target.assert_called_once_with("testdevice.yaml")
+
+
+async def test_server_ota_push_ping_failure_still_attempts_upload(tmp_path, monkeypatch, _fake_server_esphome):
+    """A failed preflight ping is logged but doesn't block the upload attempt —
+    some Thread devices don't answer ICMP even when OTA-reachable."""
+    import firmware_storage
+    firmware_dir = tmp_path / "firmware"
+    monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
+
+    queue = JobQueue(queue_file=tmp_path / "queue.json")
+    job = await queue.enqueue(
+        target="testdevice.yaml", esphome_version="2026.4.3", run_id="r",
+        timeout_seconds=300, server_ota=True, ota_address="fd00::1",
+    )
+    assert job is not None
+    firmware_storage.save_firmware(job.id, b"\xff" * 10, variant="ota", root=firmware_dir)
+
+    async def _fake_subprocess_exec(*cmd, **kwargs):
+        if cmd[0] == "ping6":
+            return _FakeProc(1, b"100% packet loss")
+        return _FakeProc(0, b"Upload successful")
+
+    app = await _push_app(tmp_path, queue)
+
+    with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())), \
+         patch("asyncio.create_subprocess_exec", new=_fake_subprocess_exec):
+        await api_module._server_ota_push(app, job)
+
+    updated = queue.get(job.id)
+    assert updated.ota_result == "success"
+    assert "100% packet loss" in (updated.log or "")
+
+
+async def test_server_ota_push_upload_timeout_marks_failed(tmp_path, monkeypatch, _fake_server_esphome):
+    """esphome upload exceeding the 300s bound is recorded as a failure, not
+    left hanging or raised out of the fire-and-forget task."""
+    import firmware_storage
+    firmware_dir = tmp_path / "firmware"
+    monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
+
+    queue = JobQueue(queue_file=tmp_path / "queue.json")
+    job = await queue.enqueue(
+        target="testdevice.yaml", esphome_version="2026.4.3", run_id="r",
+        timeout_seconds=300, server_ota=True, ota_address="fd00::1",
+    )
+    assert job is not None
+    firmware_storage.save_firmware(job.id, b"\xff" * 10, variant="ota", root=firmware_dir)
+
+    async def _fake_subprocess_exec(*cmd, **kwargs):
+        return _FakeProc(0, b"ok") if cmd[0] == "ping6" else _FakeProc(0, b"")
+
+    async def _fake_wait_for(coro, timeout=None):
+        if timeout == 300:
+            coro.close()
+            raise asyncio.TimeoutError()
+        return await coro
+
+    app = await _push_app(tmp_path, queue)
+
+    with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())), \
+         patch("asyncio.create_subprocess_exec", new=_fake_subprocess_exec), \
+         patch("asyncio.wait_for", new=_fake_wait_for):
+        await api_module._server_ota_push(app, job)
+
+    updated = queue.get(job.id)
+    assert updated.ota_result == "failed"
+    assert "timed out after 300s" in (updated.log or "")
+
+
+async def test_server_ota_push_missing_firmware_fails_without_bundling(tmp_path, monkeypatch, _fake_server_esphome):
+    """No firmware in storage for any variant: fail fast, never touch the
+    bundle creator or spawn a subprocess."""
+    import firmware_storage
+    firmware_dir = tmp_path / "firmware"
+    monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
+
+    queue = JobQueue(queue_file=tmp_path / "queue.json")
+    job = await queue.enqueue(
+        target="testdevice.yaml", esphome_version="2026.4.3", run_id="r",
+        timeout_seconds=300, server_ota=True, ota_address="fd00::1",
+    )
+    assert job is not None
+    # No firmware saved.
+
+    bundle_mock = AsyncMock(side_effect=AssertionError("must not bundle without firmware"))
+    app = await _push_app(tmp_path, queue)
+
+    with patch("api.create_bundle_async", new=bundle_mock):
+        await api_module._server_ota_push(app, job)
+
+    updated = queue.get(job.id)
+    assert updated.ota_result == "failed"
+    bundle_mock.assert_not_called()
+
+
+async def test_server_ota_push_target_missing_from_bundle_fails(tmp_path, monkeypatch, _fake_server_esphome):
+    """The bundle succeeded but doesn't contain the job's target YAML —
+    fail cleanly instead of crashing on a missing-file open()."""
+    import firmware_storage
+    firmware_dir = tmp_path / "firmware"
+    monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
+
+    queue = JobQueue(queue_file=tmp_path / "queue.json")
+    job = await queue.enqueue(
+        target="missing.yaml", esphome_version="2026.4.3", run_id="r",
+        timeout_seconds=300, server_ota=True, ota_address="fd00::1",
+    )
+    assert job is not None
+    firmware_storage.save_firmware(job.id, b"\xff" * 10, variant="ota", root=firmware_dir)
+
+    subprocess_mock = AsyncMock(side_effect=AssertionError("must not spawn a subprocess"))
+    app = await _push_app(tmp_path, queue)
+
+    with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())), \
+         patch("asyncio.create_subprocess_exec", new=subprocess_mock):
+        await api_module._server_ota_push(app, job)
+
+    updated = queue.get(job.id)
+    assert updated.ota_result == "failed"
+    subprocess_mock.assert_not_called()
