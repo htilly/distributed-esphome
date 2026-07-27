@@ -1,12 +1,16 @@
 # Changelog
 
-## Unreleased
+## 1.7.3
+
+A patch fast-follow to 1.7.2, closing the last two gaps left by ESPHome 2026.7's new ESP32 build toolchain.
 
 **Build workers no longer break permanently when a new ESPHome version arrives.** A worker that runs more than one build at a time could corrupt its own ESP32 build tools the first time it compiled with a newly-released ESPHome version — two builds starting at the same moment would both try to download and unpack the same toolchain into the same place, leaving it half-installed. From then on *every* compile on that worker failed within a second, and because the damage looked like a completed install to ESPHome, it never repaired itself. Reinstalling the worker actually made things worse: a fresh worker starts with an empty toolchain cache, so the next batch of builds simply re-triggered the same collision. Workers running a single build at a time were never affected.
 
 Two changes fix it. Workers now let just one build do the initial toolchain download after an ESPHome version change, with the others waiting a few minutes for it to finish — after that, parallel builds resume as normal, so ongoing speed is unchanged. And a worker that already has a damaged toolchain (including one damaged before this update) now detects it, clears it, and rebuilds automatically on the next compile instead of failing forever. If you have a worker stuck failing every job with an ESP-IDF or toolchain error, it will heal itself the next time it picks up work.
 
-**Firmware downloads work again for ESP32 devices on the newest ESPHome releases.** Starting with ESPHome 2026.7, ESP32 builds use a new toolchain that writes the finished firmware to a different folder than before. Compiling itself kept working, but the add-on still looked in the old location when saving a copy — so asking for a factory image from the Queue tab failed with "no firmware binary was found," even though the build had just succeeded moments earlier. Regular over-the-air upgrades were never affected. The add-on now checks both locations, so downloads work for ESP32 devices on the new toolchain as well as ESP8266 and LibreTiny devices, which still use the older one.
+**Firmware downloads work again for ESP32 devices on the newest ESPHome releases.** Starting with ESPHome 2026.7, ESP32 builds use a new toolchain that writes the finished firmware to a different folder than before. Compiling itself kept working, but the add-on still looked in the old location when saving a copy — so asking for a factory image from the Queue tab failed with "no firmware binary was found," even though the build had just succeeded moments earlier. Regular over-the-air upgrades were never affected. The add-on now checks both locations, so downloads work for ESP32 devices on the new toolchain as well as ESP8266 and LibreTiny devices, which still use the older one. (Community contribution.)
+
+**Under the hood.** Fourteen dependency updates across the server, build worker, and web UI — including newer `aiohttp`, `aioesphomeapi`, and `idna` — plus fixes to two build-and-release checks that had stopped doing their job: an unpinned code-linter that started failing on unmodified code the day a new version of it was published, and a test-deployment script that was writing to a directory Home Assistant had stopped reading, so its results described an install that never happened. Neither affected the shipped add-on.
 
 ## 1.7.2
 
