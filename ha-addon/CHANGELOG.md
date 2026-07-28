@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+*(1.8.0 development — nothing user-facing yet.)*
+
 ## 1.7.3
 
 A patch fast-follow to 1.7.2, closing the last two gaps left by ESPHome 2026.7's new ESP32 build toolchain.
