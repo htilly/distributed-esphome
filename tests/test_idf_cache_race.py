@@ -21,6 +21,10 @@ import time
 os.environ.setdefault("SERVER_URL", "http://127.0.0.1:1")
 os.environ.setdefault("SERVER_TOKEN", "test-token")
 
+# noqa: E402 — this import must stay below the os.environ setup above.
+# client.py reads SERVER_URL / SERVER_TOKEN at module scope, so hoisting
+# it to the top of the file (as E402 wants) would evaluate those reads
+# before the defaults are set and fail collection.
 import client  # noqa: E402
 
 
