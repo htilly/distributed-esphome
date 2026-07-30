@@ -1136,7 +1136,8 @@ def _full_validate_config(path: Path) -> dict:
     typos elsewhere in the file). Returns the validated config dict on
     success.
 
-    Serialized via ``_validator_lock`` and prefixed with ``CORE.reset()``:
+    Caller must hold ``_validator_lock`` for the duration of this call
+    (see ``_resolve_esphome_config``) and prefix with ``CORE.reset()``:
     ESPHome's CORE is process-global and non-reentrant; without the
     lock, concurrent executor threads interleave CORE mutations and
     produce phantom "Duplicate entity" errors on targets that validate
@@ -1151,22 +1152,21 @@ def _full_validate_config(path: Path) -> dict:
     from esphome.yaml_util import load_yaml  # noqa: PLC0415
     from esphome.config import validate_config  # noqa: PLC0415
 
-    with _validator_lock:
-        CORE.reset()
-        CORE.config_path = path
-        config = load_yaml(path)
-        if not isinstance(config, dict):
-            raise ValueError(f"YAML root of {path.name} is not a mapping")
-        # skip_external_update=True reuses any previously-cloned external
-        # component sources; the first validation per external-components
-        # entry still clones. Same caching shape we've always used for
-        # do_packages_pass.
-        result = validate_config(config, None, skip_external_update=True)
-        if result.errors:
-            first = result.errors[0]
-            msg = getattr(first, "msg", None) or str(first)
-            raise RuntimeError(f"validation errors ({len(result.errors)} total): {msg}")
-        return result
+    CORE.reset()
+    CORE.config_path = path
+    config = load_yaml(path)
+    if not isinstance(config, dict):
+        raise ValueError(f"YAML root of {path.name} is not a mapping")
+    # skip_external_update=True reuses any previously-cloned external
+    # component sources; the first validation per external-components
+    # entry still clones. Same caching shape we've always used for
+    # do_packages_pass.
+    result = validate_config(config, None, skip_external_update=True)
+    if result.errors:
+        first = result.errors[0]
+        msg = getattr(first, "msg", None) or str(first)
+        raise RuntimeError(f"validation errors ({len(result.errors)} total): {msg}")
+    return result
 
 
 def _resolve_esphome_config(config_dir: str, target: str) -> Optional[dict]:
@@ -1221,29 +1221,40 @@ def _resolve_esphome_config(config_dir: str, target: str) -> Optional[dict]:
         # Stage 1 — full validation. Catches domain-aware addressing and
         # every other schema-level field ESPHome injects.
         #
-        # Non-blocking lock check: _full_validate_config acquires
-        # _validator_lock which can be held for 60-120 s when resolving
-        # configs with external git components. If this function is called
-        # from the event loop thread (e.g. /ui/api/targets 1-Hz poll),
-        # blocking here freezes the entire server. Return None immediately
-        # if the lock is busy — the caller falls back to raw YAML metadata
-        # and the cache will be populated by the background executor task
-        # (build_name_to_target_map / reseed_device_poller_from_config).
+        # Non-blocking lock: _full_validate_config can hold this lock for
+        # 60-120 s when resolving configs with external git components. If
+        # this function is called from the event loop thread (e.g.
+        # /ui/api/targets 1-Hz poll), blocking here freezes the entire
+        # server. Return None immediately if the lock is busy — the caller
+        # falls back to raw YAML metadata and the cache will be populated
+        # by the background executor task (build_name_to_target_map /
+        # reseed_device_poller_from_config).
+        #
+        # The acquire is held for the ENTIRE validation call, not just
+        # checked-then-released: releasing before calling
+        # _full_validate_config (which used to acquire the same lock
+        # itself, blockingly) left a race window where another thread
+        # could grab the lock in between, and this caller would then block
+        # on _full_validate_config's own acquire anyway — defeating the
+        # whole point of checking non-blocking first. Holding it here for
+        # the duration closes that window.
         if not _validator_lock.acquire(blocking=False):
             return None
-        _validator_lock.release()
         try:
-            config = _full_validate_config(path)
-            _config_cache[target] = (mtime, config)
-            return config
-        except Exception as exc:
-            logger.warning(
-                "Full validation of %s failed (%s: %s) — falling back to "
-                "substitution-only pass. UI metadata will still populate "
-                "but domain-aware OTA addressing will not.",
-                target, type(exc).__name__, exc,
-            )
-            logger.debug("Full validation traceback for %s:", target, exc_info=True)
+            try:
+                config = _full_validate_config(path)
+                _config_cache[target] = (mtime, config)
+                return config
+            except Exception as exc:
+                logger.warning(
+                    "Full validation of %s failed (%s: %s) — falling back to "
+                    "substitution-only pass. UI metadata will still populate "
+                    "but domain-aware OTA addressing will not.",
+                    target, type(exc).__name__, exc,
+                )
+                logger.debug("Full validation traceback for %s:", target, exc_info=True)
+        finally:
+            _validator_lock.release()
 
         # Stage 2 — substitution-only fallback (legacy path). Preserves
         # behavior for configs that don't fully validate so device
