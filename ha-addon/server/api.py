@@ -689,9 +689,7 @@ async def _server_ota_push(app: web.Application, job: object) -> None:
                 logger.warning("Server OTA %s: ping error: %s", job_id, ping_exc)
 
             cmd = [
-                esphome_bin, "upload",
-                "--device", ota_addr,
-                "--file", str(ota_bin_path),
+                esphome_bin,
                 # --dashboard forces ESPHome's ProgressBar to emit periodic
                 # "Uploading: [====] NN%" frames even over a piped, non-tty
                 # stdout (it's a no-op otherwise). It's ESPHome's own
@@ -699,8 +697,14 @@ async def _server_ota_push(app: web.Application, job: object) -> None:
                 # progress out of a subprocess — same use case here: gives
                 # the idle-timeout loop below real progress to reset
                 # against during a slow transfer, and lets us surface
-                # upload % in the Queue tab via status_text.
+                # upload % in the Queue tab via status_text. This is a
+                # top-level flag (registered on the main argument parser,
+                # not the "upload" subcommand's) so it must come BEFORE
+                # the subcommand name, not after it.
                 "--dashboard",
+                "upload",
+                "--device", ota_addr,
+                "--file", str(ota_bin_path),
                 str(target_yaml),
             ]
             logger.info(
