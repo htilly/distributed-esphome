@@ -1772,16 +1772,48 @@ async def test_submit_result_triggers_server_ota_push(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+class _FakeStdout:
+    """Stand-in for proc.stdout (an asyncio.StreamReader)."""
+
+    def __init__(self, sequence: list):
+        # Each item is bytes (served whole on the next read()) or the
+        # string "HANG" (sleeps far longer than any test timeout, so a
+        # caller wrapping read() in asyncio.wait_for genuinely times out —
+        # simulates a stalled transfer). Exhausting the sequence yields
+        # EOF (b""), like a real closed stdout pipe.
+        self._sequence = list(sequence)
+
+    async def read(self, n: int = -1) -> bytes:
+        if not self._sequence:
+            return b""
+        item = self._sequence.pop(0)
+        if item == "HANG":
+            await asyncio.sleep(3600)
+            return b""
+        return item
+
+
 class _FakeProc:
     """Stand-in for the object asyncio.create_subprocess_exec returns."""
 
-    def __init__(self, returncode: int, stdout: bytes = b""):
+    def __init__(self, returncode: int, stdout: bytes = b"", stdout_sequence: list | None = None):
         self.returncode = returncode
-        self._stdout = stdout
+        sequence = stdout_sequence if stdout_sequence is not None else ([stdout] if stdout else [])
+        self.stdout = _FakeStdout(sequence)
         self.killed = False
 
     async def communicate(self):
-        return self._stdout, b""
+        # Used by the ping preflight, which still uses proc.communicate().
+        chunks = []
+        while True:
+            chunk = await self.stdout.read()
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks), b""
+
+    async def wait(self):
+        return self.returncode
 
     def kill(self):
         self.killed = True
@@ -1853,7 +1885,8 @@ async def test_server_ota_push_success_uploads_and_records_result(tmp_path, monk
     assert upload_cmd[3] == "fd00::1"
     assert upload_cmd[4] == "--file"
     assert upload_cmd[5].endswith("testdevice.ota.bin")
-    assert upload_cmd[6].endswith("testdevice.yaml")
+    assert upload_cmd[6] == "--dashboard"
+    assert upload_cmd[7].endswith("testdevice.yaml")
 
     fake_poller.refresh_target.assert_called_once_with("testdevice.yaml")
 
@@ -1889,11 +1922,97 @@ async def test_server_ota_push_ping_failure_still_attempts_upload(tmp_path, monk
     assert "100% packet loss" in (updated.log or "")
 
 
-async def test_server_ota_push_upload_timeout_marks_failed(tmp_path, monkeypatch, _fake_server_esphome):
-    """esphome upload exceeding the 300s bound is recorded as a failure, the
-    child process is killed (not left orphaned running in the background),
-    and whatever partial output it had produced before the timeout is
-    recovered into the job log rather than silently lost."""
+async def test_server_ota_push_idle_timeout_marks_failed(tmp_path, monkeypatch, _fake_server_esphome):
+    """esphome upload producing no further output for longer than the idle
+    timeout is recorded as a failure, the child process is killed (not
+    left orphaned running in the background), and whatever partial output
+    it had produced before stalling is recovered into the job log rather
+    than silently lost."""
+    import firmware_storage
+    firmware_dir = tmp_path / "firmware"
+    monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
+    # Shrink the thresholds so the idle path triggers almost instantly.
+    monkeypatch.setattr(api_module, "SERVER_OTA_IDLE_TIMEOUT", 0.05)
+    monkeypatch.setattr(api_module, "SERVER_OTA_ABSOLUTE_TIMEOUT", 5)
+
+    queue = JobQueue(queue_file=tmp_path / "queue.json")
+    job = await queue.enqueue(
+        target="testdevice.yaml", esphome_version="2026.4.3", run_id="r",
+        timeout_seconds=300, server_ota=True, ota_address="fd00::1",
+    )
+    assert job is not None
+    firmware_storage.save_firmware(job.id, b"\xff" * 10, variant="ota", root=firmware_dir)
+
+    upload_proc = _FakeProc(
+        0, stdout_sequence=[b"Connecting...\nWaiting for response...\n", "HANG"],
+    )
+
+    async def _fake_subprocess_exec(*cmd, **kwargs):
+        return _FakeProc(0, b"ok") if cmd[0] == "ping6" else upload_proc
+
+    app = await _push_app(tmp_path, queue)
+
+    with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())), \
+         patch("asyncio.create_subprocess_exec", new=_fake_subprocess_exec):
+        await api_module._server_ota_push(app, job)
+
+    assert upload_proc.killed is True, "stuck upload subprocess must be killed, not orphaned"
+
+    updated = queue.get(job.id)
+    assert updated.ota_result == "failed"
+    assert "no output for" in (updated.log or "")
+    assert "Connecting..." in (updated.log or ""), (
+        "partial output from before stalling must be recovered, not silently lost"
+    )
+
+
+async def test_server_ota_push_absolute_cap_kills_even_with_progress(tmp_path, monkeypatch, _fake_server_esphome):
+    """A transfer that keeps producing real progress indefinitely still
+    gets killed once the absolute safety ceiling is hit -- the idle timer
+    alone would never fire since new output keeps arriving."""
+    import firmware_storage
+    firmware_dir = tmp_path / "firmware"
+    monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
+    monkeypatch.setattr(api_module, "SERVER_OTA_IDLE_TIMEOUT", 10)  # generous vs. the cap below
+    monkeypatch.setattr(api_module, "SERVER_OTA_ABSOLUTE_TIMEOUT", 0.15)
+
+    queue = JobQueue(queue_file=tmp_path / "queue.json")
+    job = await queue.enqueue(
+        target="testdevice.yaml", esphome_version="2026.4.3", run_id="r",
+        timeout_seconds=300, server_ota=True, ota_address="fd00::1",
+    )
+    assert job is not None
+    firmware_storage.save_firmware(job.id, b"\xff" * 10, variant="ota", root=firmware_dir)
+
+    class _EndlessDrip:
+        """Never-ending trickle of real bytes -- simulates a transfer that
+        is genuinely still making progress, just very slowly, forever."""
+
+        async def read(self, n: int = -1) -> bytes:
+            await asyncio.sleep(0.02)
+            return b"."
+
+    upload_proc = _FakeProc(0)
+    upload_proc.stdout = _EndlessDrip()
+
+    async def _fake_subprocess_exec(*cmd, **kwargs):
+        return _FakeProc(0, b"ok") if cmd[0] == "ping6" else upload_proc
+
+    app = await _push_app(tmp_path, queue)
+
+    with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())), \
+         patch("asyncio.create_subprocess_exec", new=_fake_subprocess_exec):
+        await api_module._server_ota_push(app, job)
+
+    assert upload_proc.killed is True
+    updated = queue.get(job.id)
+    assert updated.ota_result == "failed"
+    assert "absolute cap" in (updated.log or "")
+
+
+async def test_server_ota_push_reports_upload_progress_via_status_text(tmp_path, monkeypatch, _fake_server_esphome):
+    """Progress frames parsed from --dashboard output update the job's
+    status_text so the Queue tab can show live upload percentage."""
     import firmware_storage
     firmware_dir = tmp_path / "firmware"
     monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
@@ -1906,32 +2025,34 @@ async def test_server_ota_push_upload_timeout_marks_failed(tmp_path, monkeypatch
     assert job is not None
     firmware_storage.save_firmware(job.id, b"\xff" * 10, variant="ota", root=firmware_dir)
 
-    upload_proc = _FakeProc(0, b"Connecting...\nWaiting for response...\n")
+    reported: list[str] = []
+    orig_update_status = queue.update_status
+
+    async def _spy_update_status(job_id, text):
+        reported.append(text)
+        return await orig_update_status(job_id, text)
+
+    monkeypatch.setattr(queue, "update_status", _spy_update_status)
+
+    upload_proc = _FakeProc(
+        0, stdout_sequence=[
+            b"\rUploading: [==========                                                  ] 16% ",
+            b"\rUploading: [====================                                        ] 33% ",
+            b"\rUploading: [======================================                      ] 63% ",
+            b"\rUploading: [============================================================] 100% Done...\r\n",
+        ],
+    )
 
     async def _fake_subprocess_exec(*cmd, **kwargs):
         return _FakeProc(0, b"ok") if cmd[0] == "ping6" else upload_proc
 
-    async def _fake_wait_for(coro, timeout=None):
-        if timeout == 300:
-            coro.close()
-            raise asyncio.TimeoutError()
-        return await coro
-
     app = await _push_app(tmp_path, queue)
 
     with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())), \
-         patch("asyncio.create_subprocess_exec", new=_fake_subprocess_exec), \
-         patch("asyncio.wait_for", new=_fake_wait_for):
+         patch("asyncio.create_subprocess_exec", new=_fake_subprocess_exec):
         await api_module._server_ota_push(app, job)
 
-    assert upload_proc.killed is True, "timed-out upload subprocess must be killed, not orphaned"
-
-    updated = queue.get(job.id)
-    assert updated.ota_result == "failed"
-    assert "timed out after 300s" in (updated.log or "")
-    assert "Connecting..." in (updated.log or ""), (
-        "partial output from before the timeout must be recovered, not silently lost"
-    )
+    assert reported == ["Uploading 16%", "Uploading 33%", "Uploading 63%", "Uploading 100%"]
 
 
 async def test_server_ota_push_missing_firmware_fails_without_bundling(tmp_path, monkeypatch, _fake_server_esphome):
