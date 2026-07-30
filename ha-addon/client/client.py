@@ -46,7 +46,7 @@ from sysinfo import collect_system_info
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.8.0-dev.14"
+CLIENT_VERSION = "1.8.0-dev.15"
 
 
 def _read_image_version() -> Optional[str]:
@@ -2053,20 +2053,26 @@ def _collect_firmware_variants(build_dir: str, target_stem: str) -> dict[str, Pa
       {build_dir}/.esphome/build/{device_name}/.pioenvs/{device_name}/firmware.bin
 
       {build_dir}/.esphome/build/{device_name}/build/firmware.factory.bin                   (native ESP-IDF — ESP32 since ESPHome 2026.7)
-      {build_dir}/.esphome/build/{device_name}/build/firmware.bin
+      {build_dir}/.esphome/build/{device_name}/build/firmware.bin      or  firmware.ota.bin
 
     ESPHome 2026.7 replaced PlatformIO with a native ESP-IDF installer
     for ESP32 targets; that toolchain drops the
     ``.pioenvs/{device_name}/`` staging directory entirely and writes
     binaries straight into ``build/``. Both shapes are checked so
     Arduino/LibreTiny targets (still PlatformIO) and ESP-IDF-native
-    ESP32 targets both resolve.
+    ESP32 targets both resolve. Within the native-ESP-IDF shape, the
+    OTA-safe filename itself has moved at least once — observed as
+    ``firmware.bin`` and, as of ESPHome 2026.7's esp32c6 native build,
+    ``firmware.ota.bin`` (both created alongside ``firmware.factory.bin``
+    and ``firmware.elf``) — so both are checked and either one satisfies
+    the ``ota`` variant.
 
     Returns a mapping of ``variant → path``:
       - ``factory``: full flash image (ESP32 only; used for first
         USB/serial flash).
-      - ``ota``: the ``firmware.bin`` shape (smaller, OTA-safe; ESP32
-        produces this alongside factory; ESP8266 produces only this).
+      - ``ota``: the smaller, OTA-safe shape — ``firmware.bin`` or
+        ``firmware.ota.bin`` depending on toolchain version; ESP32
+        produces this alongside factory, ESP8266 produces only this.
 
     The device name can differ from the target filename stem if the
     YAML uses substitutions, so we walk every device_dir under
@@ -2091,22 +2097,33 @@ def _collect_firmware_variants(build_dir: str, target_stem: str) -> dict[str, Pa
             device_dir / "build",                        # native ESP-IDF layout
         ]
         for root in candidate_roots:
+            # "ota" has two possible filenames: PlatformIO and older
+            # ESP-IDF-native builds emit firmware.bin; ESPHome's ESP32
+            # native-ESP-IDF toolchain (2026.7+) renamed it to
+            # firmware.ota.bin. Check both so neither toolchain silently
+            # loses its OTA-safe variant (bug: pool-pump build produced
+            # only firmware.ota.bin, so the old firmware.bin-only check
+            # found nothing, archived just "factory", and server-side OTA
+            # failed before it could even ping the device).
             candidates = {
-                "factory": root / "firmware.factory.bin",
-                "ota": root / "firmware.bin",
+                "factory": [root / "firmware.factory.bin"],
+                "ota": [root / "firmware.bin", root / "firmware.ota.bin"],
             }
-            for variant_name, path in candidates.items():
-                if not path.is_file():
-                    continue
+            for variant_name, paths in candidates.items():
                 # First-match wins when multiple device_dirs/roots exist
                 # (usually there's only one; substitutions don't spawn
                 # duplicates).
-                if variant_name not in variants:
+                if variant_name in variants:
+                    continue
+                for path in paths:
+                    if not path.is_file():
+                        continue
                     variants[variant_name] = path
                     logger.info(
                         "Located firmware variant %s for %s: %s (%d bytes)",
                         variant_name, target_stem, path, path.stat().st_size,
                     )
+                    break
 
     if not variants:
         logger.warning(
