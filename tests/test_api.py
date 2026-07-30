@@ -1880,12 +1880,12 @@ async def test_server_ota_push_success_uploads_and_records_result(tmp_path, monk
     assert ping_cmd[0] == "ping6"
     assert ping_cmd[-1] == "fd00::1"
     assert upload_cmd[0] == "/fake/esphome"
-    assert upload_cmd[1] == "upload"
-    assert upload_cmd[2] == "--device"
-    assert upload_cmd[3] == "fd00::1"
-    assert upload_cmd[4] == "--file"
-    assert upload_cmd[5].endswith("testdevice.ota.bin")
-    assert upload_cmd[6] == "--dashboard"
+    assert upload_cmd[1] == "--dashboard"
+    assert upload_cmd[2] == "upload"
+    assert upload_cmd[3] == "--device"
+    assert upload_cmd[4] == "fd00::1"
+    assert upload_cmd[5] == "--file"
+    assert upload_cmd[6].endswith("testdevice.ota.bin")
     assert upload_cmd[7].endswith("testdevice.yaml")
 
     fake_poller.refresh_target.assert_called_once_with("testdevice.yaml")
