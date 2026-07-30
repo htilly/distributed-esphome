@@ -1674,6 +1674,40 @@ def test_resolve_failure_logs_warning(tmp_path, caplog):
     )
 
 
+def test_resolve_esphome_config_holds_lock_for_entire_validation(tmp_path):
+    """Copilot review finding on PR #133: the non-blocking pre-check used to
+    acquire-then-immediately-release _validator_lock before calling
+    _full_validate_config, which itself acquired the same lock again,
+    blockingly. That left a race window where another thread could grab
+    the lock in between, and this caller would then block anyway --
+    defeating the whole point of checking non-blocking first. The lock
+    must now be held by the caller for the full duration of the call."""
+    from unittest.mock import patch
+    import scanner as scanner_module
+    from scanner import _resolve_esphome_config
+
+    good = tmp_path / "lock_duration_test_device.yaml"
+    good.write_text("esphome:\n  name: device\n")
+
+    lock_state_during_call = {}
+
+    def _fake_full_validate_config(path):
+        lock_state_during_call["locked"] = scanner_module._validator_lock.locked()
+        return {"esphome": {"name": "device"}}
+
+    with patch("scanner._full_validate_config", new=_fake_full_validate_config):
+        result = _resolve_esphome_config(str(tmp_path), "lock_duration_test_device.yaml")
+
+    assert result == {"esphome": {"name": "device"}}
+    assert lock_state_during_call["locked"] is True, (
+        "the lock must be held for the duration of _full_validate_config, "
+        "not released before calling it"
+    )
+    assert not scanner_module._validator_lock.locked(), (
+        "the lock must be released again once validation completes"
+    )
+
+
 # --- Bug #112 — bundle subprocess stderr is clean (no esphome logger noise) -
 
 def test_bundle_subprocess_stderr_does_not_leak_esphome_logger_chatter():

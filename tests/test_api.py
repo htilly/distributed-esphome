@@ -1724,6 +1724,39 @@ async def test_patch_ota_result_failed_leaves_job_success(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_patch_ota_result_upserts_job_history(tmp_path, monkeypatch):
+    """patch_ota_result must sync the persistent history row too, not just
+    the in-memory job — otherwise the History tab stays stuck showing the
+    NULL ota_result the initial compile-success snapshot wrote, even after
+    server OTA completes (Copilot review finding on PR #133)."""
+    ta = await _make_app(tmp_path)
+    try:
+        job = await ta.queue.enqueue(
+            target="x.yaml", esphome_version="2026.4.3", run_id="r",
+            timeout_seconds=300, server_ota=True, ota_address="fd00::1",
+        )
+        assert job is not None
+        await _register(ta, hostname="w")
+        await ta.queue.claim_next("any-client")
+        await ta.queue.submit_result(job.id, "success", log=None, ota_result=None)
+
+        recorded: list[str] = []
+        real_record_history = ta.queue._record_history
+
+        def _spy_record_history(recorded_job):
+            recorded.append(recorded_job.id)
+            return real_record_history(recorded_job)
+
+        monkeypatch.setattr(ta.queue, "_record_history", _spy_record_history)
+
+        await ta.queue.patch_ota_result(job.id, "success", log="OTA done")
+
+        assert recorded == [job.id]
+    finally:
+        await ta.close()
+
+
+@pytest.mark.asyncio
 async def test_submit_result_triggers_server_ota_push(tmp_path, monkeypatch):
     """submit_job_result fires _server_ota_push when server_ota=True and binary present."""
     import firmware_storage
@@ -2071,6 +2104,33 @@ async def test_server_ota_push_missing_firmware_fails_without_bundling(tmp_path,
     # No firmware saved.
 
     bundle_mock = AsyncMock(side_effect=AssertionError("must not bundle without firmware"))
+    app = await _push_app(tmp_path, queue)
+
+    with patch("api.create_bundle_async", new=bundle_mock):
+        await api_module._server_ota_push(app, job)
+
+    updated = queue.get(job.id)
+    assert updated.ota_result == "failed"
+    bundle_mock.assert_not_called()
+
+
+async def test_server_ota_push_factory_only_firmware_fails_without_bundling(tmp_path, monkeypatch, _fake_server_esphome):
+    """Only a "factory" variant is stored (no "ota"/"firmware") — that's the
+    full flash image, not OTA-safe, and must not be silently substituted.
+    Fail fast, never touch the bundle creator or spawn a subprocess."""
+    import firmware_storage
+    firmware_dir = tmp_path / "firmware"
+    monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
+
+    queue = JobQueue(queue_file=tmp_path / "queue.json")
+    job = await queue.enqueue(
+        target="testdevice.yaml", esphome_version="2026.4.3", run_id="r",
+        timeout_seconds=300, server_ota=True, ota_address="fd00::1",
+    )
+    assert job is not None
+    firmware_storage.save_firmware(job.id, b"\xff" * 10, variant="factory", root=firmware_dir)
+
+    bundle_mock = AsyncMock(side_effect=AssertionError("must not bundle a factory-only image for OTA"))
     app = await _push_app(tmp_path, queue)
 
     with patch("api.create_bundle_async", new=bundle_mock):
