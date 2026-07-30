@@ -251,3 +251,102 @@ def test_heartbeat_without_disk_used_pct_does_not_clear_block(reg):
     assert reg.get(client_id).health_blocked_reason == "disk_full"
     reg.heartbeat(client_id, system_info={"cpu_usage": 5})  # no disk_used_pct
     assert reg.get(client_id).health_blocked_reason == "disk_full"
+
+
+# ---------------------------------------------------------------------------
+# Absolute-free-space floor (bug: a many-TB worker volume at >=95% used still
+# has huge absolute headroom — a pure-percentage gate falsely blocks it).
+# ---------------------------------------------------------------------------
+
+_GIB = 1024 ** 3
+
+
+def test_heartbeat_huge_disk_high_pct_high_absolute_free_not_blocked(reg):
+    """The bug's exact repro: 25.8 TB disk at 96% used still has ~1176 GB
+    free — must NOT block despite crossing the percentage threshold."""
+    client_id = reg.register("host1", "linux/amd64")
+    reg.heartbeat(
+        client_id,
+        system_info={"disk_used_pct": 96, "disk_free_bytes": 1176 * _GIB},
+    )
+    assert reg.get(client_id).health_blocked_reason is None
+
+
+def test_heartbeat_small_disk_high_pct_low_absolute_free_still_blocked(reg):
+    """Regression guard: a small disk at high percentage with genuinely low
+    absolute free space must still block, exactly as before this fix."""
+    client_id = reg.register("host1", "linux/amd64")
+    reg.heartbeat(
+        client_id,
+        system_info={"disk_used_pct": 96, "disk_free_bytes": 2 * _GIB},
+    )
+    assert reg.get(client_id).health_blocked_reason == "disk_full"
+
+
+def test_heartbeat_combined_exit_via_absolute_free_while_in_hysteresis_band(reg):
+    """Percentage alone (93%, inside the 90-95 hysteresis band) would not
+    clear a block — but absolute free space recovering above the floor
+    clears it via the OR-to-exit path."""
+    client_id = reg.register("host1", "linux/amd64")
+    reg.heartbeat(
+        client_id,
+        system_info={"disk_used_pct": 96, "disk_free_bytes": 2 * _GIB},
+    )
+    assert reg.get(client_id).health_blocked_reason == "disk_full"
+    reg.heartbeat(
+        client_id,
+        system_info={"disk_used_pct": 93, "disk_free_bytes": 20 * _GIB},
+    )
+    assert reg.get(client_id).health_blocked_reason is None
+
+
+def test_heartbeat_combined_stays_blocked_in_hysteresis_band_when_free_still_low(reg):
+    """Complement of the above: inside the hysteresis band AND absolute
+    free space still below the floor — neither exit condition is met, so
+    it must stay blocked."""
+    client_id = reg.register("host1", "linux/amd64")
+    reg.heartbeat(
+        client_id,
+        system_info={"disk_used_pct": 96, "disk_free_bytes": 2 * _GIB},
+    )
+    assert reg.get(client_id).health_blocked_reason == "disk_full"
+    reg.heartbeat(
+        client_id,
+        system_info={"disk_used_pct": 93, "disk_free_bytes": 2 * _GIB},
+    )
+    assert reg.get(client_id).health_blocked_reason == "disk_full"
+
+
+def test_heartbeat_huge_disk_never_blocks_across_pct_oscillation(reg):
+    """A huge disk oscillating between 94% and 97% used, with absolute free
+    space always far above the floor, must never transition to blocked."""
+    client_id = reg.register("host1", "linux/amd64")
+    for pct in (94, 97, 95, 94, 97):
+        reg.heartbeat(
+            client_id,
+            system_info={"disk_used_pct": pct, "disk_free_bytes": 1176 * _GIB},
+        )
+        assert reg.get(client_id).health_blocked_reason is None
+
+
+def test_heartbeat_disk_free_bytes_absent_matches_legacy_percentage_only_behavior(reg):
+    """An old worker that hasn't upgraded to send disk_free_bytes gets the
+    exact pre-fix percentage-only hysteresis."""
+    client_id = reg.register("host1", "linux/amd64")
+    reg.heartbeat(client_id, system_info={"disk_used_pct": 96})
+    assert reg.get(client_id).health_blocked_reason == "disk_full"
+    reg.heartbeat(client_id, system_info={"disk_used_pct": 92})
+    assert reg.get(client_id).health_blocked_reason == "disk_full"  # hysteresis band
+    reg.heartbeat(client_id, system_info={"disk_used_pct": 89})
+    assert reg.get(client_id).health_blocked_reason is None
+
+
+def test_heartbeat_disk_free_bytes_non_numeric_falls_back_to_percentage_only(reg):
+    """A garbage disk_free_bytes value is treated as absent, not as a crash
+    or a silent "always low" — falls back to legacy percentage-only."""
+    client_id = reg.register("host1", "linux/amd64")
+    reg.heartbeat(
+        client_id,
+        system_info={"disk_used_pct": 96, "disk_free_bytes": "not-a-number"},
+    )
+    assert reg.get(client_id).health_blocked_reason == "disk_full"

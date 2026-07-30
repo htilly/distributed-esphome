@@ -79,6 +79,15 @@ class SystemInfo(_ProtocolMessage):
     disk_total: Optional[str] = None
     disk_free: Optional[str] = None
     disk_used_pct: Optional[int] = None
+    # Raw free-space byte count backing disk_free/disk_used_pct. Needed
+    # because a percentage alone is meaningless without knowing the disk's
+    # absolute scale — see registry.Worker.evaluate_health's absolute-floor
+    # check (bug: a many-TB worker volume at >=95% used still has huge
+    # absolute headroom, but a pure-percentage gate falsely blocks it).
+    # Optional/additive: an older worker that hasn't upgraded simply omits
+    # it, and evaluate_health falls back to pure percentage-based blocking
+    # (pre-fix behavior).
+    disk_free_bytes: Optional[int] = None
     # DQ.6: worker's view of the disk-quota engine's most recent state.
     # ``disk_usage_bytes`` is the engine's measured byte total under
     # ``/esphome-versions/`` (venvs + caches + slots + pio-slots).

@@ -179,6 +179,17 @@ class TestRoundTrip:
         assert msg.disk_quota_bytes is None
         assert msg.last_eviction_freed_bytes is None
 
+    def test_system_info_disk_free_bytes_roundtrip(self) -> None:
+        """Absolute-floor fix: raw free-space bytes backing disk_used_pct."""
+        msg = SystemInfo(disk_free_bytes=1176 * 1024 ** 3)
+        d = msg.model_dump()
+        assert d["disk_free_bytes"] == 1176 * 1024 ** 3
+        assert SystemInfo.model_validate(d) == msg
+
+    def test_system_info_disk_free_bytes_default_none(self) -> None:
+        msg = SystemInfo()
+        assert msg.disk_free_bytes is None
+
     def test_heartbeat_response_stream_logs_omitted_is_none(self) -> None:
         # No flag = no change from the worker's current state. Default must
         # be None so we can distinguish "unchanged" from "stop".

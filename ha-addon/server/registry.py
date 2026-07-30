@@ -84,13 +84,28 @@ class Worker:
         }
 
     def evaluate_health(self) -> bool:
-        """Recompute ``health_blocked_reason`` from ``system_info`` (#219).
+        """Recompute ``health_blocked_reason`` from ``system_info`` (#219, + absolute-floor fix).
 
-        Hysteresis: enter blocked at ``WORKER_DISK_BLOCK_ENTER_PCT``; exit
-        only when usage drops to or below ``WORKER_DISK_BLOCK_EXIT_PCT``.
+        Enter blocked only when BOTH signals are bad: ``disk_used_pct`` at/above
+        ``WORKER_DISK_BLOCK_ENTER_PCT`` AND absolute free space below
+        ``WORKER_DISK_FREE_FLOOR_BYTES``. A many-TB volume that's "95% full" but
+        has 1+ TB free must NOT trip this — the app only ever needs ~1.6 GB.
+        Exit (clear) on EITHER signal recovering: usage drops to/below
+        ``WORKER_DISK_BLOCK_EXIT_PCT``, OR absolute free rises back above the
+        floor. Deliberately asymmetric (AND to enter, OR to exit) so the gate
+        stays conservative about newly blocking but quick to unblock.
+
+        Backward compatibility: if the worker hasn't upgraded to send
+        ``disk_free_bytes`` (or sends a non-numeric value), falls back to the
+        original pure-percentage hysteresis unchanged.
+
         Returns True iff the state transitioned (caller can broadcast).
         """
-        from constants import WORKER_DISK_BLOCK_ENTER_PCT, WORKER_DISK_BLOCK_EXIT_PCT  # noqa: PLC0415
+        from constants import (  # noqa: PLC0415
+            WORKER_DISK_BLOCK_ENTER_PCT,
+            WORKER_DISK_BLOCK_EXIT_PCT,
+            WORKER_DISK_FREE_FLOOR_BYTES,
+        )
         info = self.system_info or {}
         pct = info.get("disk_used_pct")
         if pct is None:
@@ -99,11 +114,30 @@ class Worker:
             pct_int = int(pct)
         except (TypeError, ValueError):
             return False
+
+        free_bytes_raw = info.get("disk_free_bytes")
+        free_bytes: Optional[int] = None
+        if free_bytes_raw is not None:
+            try:
+                free_bytes = int(free_bytes_raw)
+            except (TypeError, ValueError):
+                free_bytes = None
+
         previous = self.health_blocked_reason
-        if previous is None and pct_int >= WORKER_DISK_BLOCK_ENTER_PCT:
-            self.health_blocked_reason = "disk_full"
-        elif previous == "disk_full" and pct_int <= WORKER_DISK_BLOCK_EXIT_PCT:
-            self.health_blocked_reason = None
+
+        if free_bytes is None:
+            # Old worker / missing field: percentage-only, exactly as before.
+            if previous is None and pct_int >= WORKER_DISK_BLOCK_ENTER_PCT:
+                self.health_blocked_reason = "disk_full"
+            elif previous == "disk_full" and pct_int <= WORKER_DISK_BLOCK_EXIT_PCT:
+                self.health_blocked_reason = None
+        else:
+            low_absolute_free = free_bytes < WORKER_DISK_FREE_FLOOR_BYTES
+            if previous is None and pct_int >= WORKER_DISK_BLOCK_ENTER_PCT and low_absolute_free:
+                self.health_blocked_reason = "disk_full"
+            elif previous == "disk_full" and (pct_int <= WORKER_DISK_BLOCK_EXIT_PCT or not low_absolute_free):
+                self.health_blocked_reason = None
+
         return self.health_blocked_reason != previous
 
 
