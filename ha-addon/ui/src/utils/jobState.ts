@@ -148,7 +148,9 @@ export function getJobBadge(job: {
     } else if (job.ota_result === 'failed') {
       return { label: 'OTA Failed', cls: BADGE_VARIANTS.timed_out };
     } else {
-      return { label: 'Server OTA', cls: BADGE_VARIANTS.working };
+      // status_text carries live "Uploading NN%" from _server_ota_push's
+      // progress-based idle-timeout loop once the compile phase is done.
+      return { label: job.status_text || 'Server OTA', cls: BADGE_VARIANTS.working };
     }
   } else if (job.state === 'success') {
     if (job.ota_result === 'success') {

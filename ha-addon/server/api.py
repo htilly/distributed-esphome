@@ -6,6 +6,7 @@ import asyncio
 import base64
 import io
 import logging
+import re
 import tarfile
 import tempfile
 from functools import lru_cache
@@ -20,6 +21,7 @@ from app_config import AppConfig
 from constants import (
     HEADER_X_CLIENT_ID, HEADER_X_WORKER_ID,
     MIN_IMAGE_VERSION,
+    SERVER_OTA_ABSOLUTE_TIMEOUT, SERVER_OTA_IDLE_TIMEOUT,
 )
 from job_queue import JobState
 from protocol import (
@@ -596,6 +598,12 @@ async def get_next_job(request: web.Request) -> web.Response:
     return web.json_response(assignment.model_dump(exclude_none=True))
 
 
+# Matches ESPHome ProgressBar's "Uploading: [====...] NN%" frames (emitted
+# via --dashboard, see _server_ota_push). Takes the last match in a chunk
+# since a single read() can contain more than one \r-redrawn frame.
+_UPLOAD_PROGRESS_RE = re.compile(r"(\d+)%")
+
+
 async def _server_ota_push(app: web.Application, job: object) -> None:
     """SOTA.2: perform server-side OTA after a server_ota compile job succeeds.
 
@@ -684,6 +692,15 @@ async def _server_ota_push(app: web.Application, job: object) -> None:
                 esphome_bin, "upload",
                 "--device", ota_addr,
                 "--file", str(ota_bin_path),
+                # --dashboard forces ESPHome's ProgressBar to emit periodic
+                # "Uploading: [====] NN%" frames even over a piped, non-tty
+                # stdout (it's a no-op otherwise). It's ESPHome's own
+                # dashboard that relies on this same flag to parse live
+                # progress out of a subprocess — same use case here: gives
+                # the idle-timeout loop below real progress to reset
+                # against during a slow transfer, and lets us surface
+                # upload % in the Queue tab via status_text.
+                "--dashboard",
                 str(target_yaml),
             ]
             logger.info(
@@ -697,30 +714,63 @@ async def _server_ota_push(app: web.Application, job: object) -> None:
                     stderr=asyncio.subprocess.STDOUT,
                     cwd=tmpdir,
                 )
-                stdout_bytes, _ = await asyncio.wait_for(
-                    proc.communicate(), timeout=300
-                )
-                ota_ok = proc.returncode == 0
-                ota_log += stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
-            except asyncio.TimeoutError:
-                ota_ok = False
-                # wait_for's timeout abandons the coroutine but does NOT kill
-                # the child process — it would otherwise keep running
-                # (and flashing the device) in the background, disconnected
-                # from this job, and any output it already produced would be
-                # lost. Kill it, then communicate() again (now that it's
-                # dead, this returns immediately) to both reap the process
-                # and recover whatever it had printed before the timeout.
-                proc.kill()
-                try:
-                    partial_stdout, _ = await proc.communicate()
-                    partial_log = (
-                        partial_stdout.decode("utf-8", errors="replace")
-                        if partial_stdout else ""
+                assert proc.stdout is not None  # guaranteed by stdout=PIPE above
+                proc_stdout = proc.stdout
+                # Progress-based timeout, not a flat total-duration bound:
+                # Thread OTA can legitimately take minutes for a sub-1MB
+                # image on a slow/lossy mesh. Read incrementally and reset
+                # the idle clock on every chunk received (including the
+                # --dashboard progress frames above) — only genuine
+                # silence for SERVER_OTA_IDLE_TIMEOUT counts as stuck, with
+                # SERVER_OTA_ABSOLUTE_TIMEOUT as a last-resort safety net.
+                chunks: list[bytes] = []
+                last_reported_pct: int | None = None
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + SERVER_OTA_ABSOLUTE_TIMEOUT
+                stuck_reason: str | None = None
+                while True:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        stuck_reason = f"exceeded the {SERVER_OTA_ABSOLUTE_TIMEOUT}s absolute cap"
+                        break
+                    read_timeout = min(SERVER_OTA_IDLE_TIMEOUT, remaining)
+                    try:
+                        chunk = await asyncio.wait_for(
+                            proc_stdout.read(4096), timeout=read_timeout
+                        )
+                    except asyncio.TimeoutError:
+                        if remaining <= SERVER_OTA_IDLE_TIMEOUT:
+                            stuck_reason = f"exceeded the {SERVER_OTA_ABSOLUTE_TIMEOUT}s absolute cap"
+                        else:
+                            stuck_reason = (
+                                f"no output for {SERVER_OTA_IDLE_TIMEOUT}s "
+                                "(transfer appears stuck, not just slow)"
+                            )
+                        break
+                    if not chunk:
+                        break  # EOF — process finished producing output
+                    chunks.append(chunk)
+
+                    match = _UPLOAD_PROGRESS_RE.findall(
+                        chunk.decode("utf-8", errors="replace")
                     )
-                except Exception:
-                    partial_log = ""
-                ota_log += f"Server OTA timed out after 300s\n{partial_log}"
+                    if match and int(match[-1]) != last_reported_pct:
+                        last_reported_pct = int(match[-1])
+                        try:
+                            await queue.update_status(job_id, f"Uploading {last_reported_pct}%")
+                        except Exception:
+                            logger.debug("Failed to update status_text for job %s", job_id, exc_info=True)
+
+                collected_log = b"".join(chunks).decode("utf-8", errors="replace")
+                if stuck_reason:
+                    ota_ok = False
+                    proc.kill()
+                    await proc.wait()
+                    ota_log += f"{collected_log}\nServer OTA {stuck_reason}"
+                else:
+                    await proc.wait()
+                    ota_ok = proc.returncode == 0
+                    ota_log += collected_log
             except Exception as exc:
                 ota_ok = False
                 ota_log += f"Server OTA subprocess error: {exc}"
