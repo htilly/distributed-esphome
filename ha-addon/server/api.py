@@ -704,7 +704,23 @@ async def _server_ota_push(app: web.Application, job: object) -> None:
                 ota_log += stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
             except asyncio.TimeoutError:
                 ota_ok = False
-                ota_log += "Server OTA timed out after 300s"
+                # wait_for's timeout abandons the coroutine but does NOT kill
+                # the child process — it would otherwise keep running
+                # (and flashing the device) in the background, disconnected
+                # from this job, and any output it already produced would be
+                # lost. Kill it, then communicate() again (now that it's
+                # dead, this returns immediately) to both reap the process
+                # and recover whatever it had printed before the timeout.
+                proc.kill()
+                try:
+                    partial_stdout, _ = await proc.communicate()
+                    partial_log = (
+                        partial_stdout.decode("utf-8", errors="replace")
+                        if partial_stdout else ""
+                    )
+                except Exception:
+                    partial_log = ""
+                ota_log += f"Server OTA timed out after 300s\n{partial_log}"
             except Exception as exc:
                 ota_ok = False
                 ota_log += f"Server OTA subprocess error: {exc}"
