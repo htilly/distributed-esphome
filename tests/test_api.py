@@ -1778,9 +1778,13 @@ class _FakeProc:
     def __init__(self, returncode: int, stdout: bytes = b""):
         self.returncode = returncode
         self._stdout = stdout
+        self.killed = False
 
     async def communicate(self):
         return self._stdout, b""
+
+    def kill(self):
+        self.killed = True
 
 
 @pytest.fixture
@@ -1886,8 +1890,10 @@ async def test_server_ota_push_ping_failure_still_attempts_upload(tmp_path, monk
 
 
 async def test_server_ota_push_upload_timeout_marks_failed(tmp_path, monkeypatch, _fake_server_esphome):
-    """esphome upload exceeding the 300s bound is recorded as a failure, not
-    left hanging or raised out of the fire-and-forget task."""
+    """esphome upload exceeding the 300s bound is recorded as a failure, the
+    child process is killed (not left orphaned running in the background),
+    and whatever partial output it had produced before the timeout is
+    recovered into the job log rather than silently lost."""
     import firmware_storage
     firmware_dir = tmp_path / "firmware"
     monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
@@ -1900,8 +1906,10 @@ async def test_server_ota_push_upload_timeout_marks_failed(tmp_path, monkeypatch
     assert job is not None
     firmware_storage.save_firmware(job.id, b"\xff" * 10, variant="ota", root=firmware_dir)
 
+    upload_proc = _FakeProc(0, b"Connecting...\nWaiting for response...\n")
+
     async def _fake_subprocess_exec(*cmd, **kwargs):
-        return _FakeProc(0, b"ok") if cmd[0] == "ping6" else _FakeProc(0, b"")
+        return _FakeProc(0, b"ok") if cmd[0] == "ping6" else upload_proc
 
     async def _fake_wait_for(coro, timeout=None):
         if timeout == 300:
@@ -1916,9 +1924,14 @@ async def test_server_ota_push_upload_timeout_marks_failed(tmp_path, monkeypatch
          patch("asyncio.wait_for", new=_fake_wait_for):
         await api_module._server_ota_push(app, job)
 
+    assert upload_proc.killed is True, "timed-out upload subprocess must be killed, not orphaned"
+
     updated = queue.get(job.id)
     assert updated.ota_result == "failed"
     assert "timed out after 300s" in (updated.log or "")
+    assert "Connecting..." in (updated.log or ""), (
+        "partial output from before the timeout must be recovered, not silently lost"
+    )
 
 
 async def test_server_ota_push_missing_firmware_fails_without_bundling(tmp_path, monkeypatch, _fake_server_esphome):
