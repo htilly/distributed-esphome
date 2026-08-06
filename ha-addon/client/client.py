@@ -124,13 +124,16 @@ POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "1"))
 HEARTBEAT_INTERVAL = int(os.environ.get("HEARTBEAT_INTERVAL", "10"))
 JOB_TIMEOUT = int(os.environ.get("JOB_TIMEOUT", "600"))
 OTA_TIMEOUT = int(os.environ.get("OTA_TIMEOUT", "120"))
-# SOTA.5: pre-flight TCP reachability probe against the device's OTA port,
-# run before a normal (non-Thread) job attempts `esphome run`. When the
-# probe fails, the worker falls back to compiling only and asking the
-# server to perform the OTA push centrally — the same mechanism already
-# used for Thread/Matter devices. Escape hatch for operators whose network
-# makes the probe unreliable (e.g. port-filtering that doesn't reflect
-# real OTA reachability).
+# SOTA.5: gates two related fallbacks to server-side OTA for a normal
+# (non-Thread) job — a pre-flight TCP reachability probe against the
+# device's OTA port run before `esphome run` even starts, and a
+# last-resort fallback if the probe passed but the actual local OTA
+# attempt still failed after its existing retry (e.g. a marginal/flaky
+# WiFi link where the TCP handshake succeeds but the OTA protocol
+# exchange itself times out — a bare TCP probe can't catch that). Either
+# way, the worker compiles and hands the OTA push to the server instead
+# of just failing the job. Escape hatch for operators whose network
+# makes the probe/fallback unreliable or undesired.
 OTA_REACHABILITY_CHECK = os.environ.get("OTA_REACHABILITY_CHECK", "1").strip().lower() not in ("0", "false", "no")
 OTA_REACHABILITY_TIMEOUT_SECONDS = 5
 MAX_ESPHOME_VERSIONS = int(os.environ.get("MAX_ESPHOME_VERSIONS", "3"))
@@ -1473,23 +1476,57 @@ def _apply_update(current_client_id: str) -> None:
 def _detect_ota_ports(target_path: str) -> list[int]:
     """Best-effort OTA port(s) to probe for ``target_path``.
 
-    Honors an explicit ``ota: port:`` YAML override; otherwise returns both
-    common ESPHome OTA ports (ESP32 3232, ESP8266 8266) so a caller can try
-    either. Shared by ``_ota_network_diagnostics`` (post-failure) and
-    ``_check_ota_reachable`` (SOTA.5 pre-flight probe) so the port-detection
-    regex lives in one place.
+    Parses the ``ota:`` YAML block specifically via a permissive
+    ``yaml.SafeLoader`` (ignores ``!secret``/``!lambda``/``!include`` etc.
+    rather than erroring — mirrors ``scanner.py``'s ``_load_raw_yaml`` on
+    the server side; PY-1) and honors an explicit ``port:`` override
+    scoped to that block. Bug fix: the previous implementation grabbed
+    the first ``port:`` key appearing *anywhere* in the file after the
+    literal substring "ota:" — which could match an unrelated component
+    (e.g. a ``web_server: port: 80`` block declared later in the file)
+    and silently probe the wrong port. Falls back to both common
+    ESPHome OTA ports (ESP32 3232, ESP8266 8266) when no override is
+    found or the YAML can't be parsed. Shared by
+    ``_ota_network_diagnostics`` (post-failure) and
+    ``_check_ota_reachable`` (SOTA.5 pre-flight probe).
     """
-    import re as _re  # noqa: PLC0415
+    import yaml as _yaml  # noqa: PLC0415
+
+    class _PermissiveLoader(_yaml.SafeLoader):
+        pass
+
+    def _passthrough(loader: _yaml.SafeLoader, node: _yaml.Node) -> object:
+        if isinstance(node, _yaml.ScalarNode):
+            return loader.construct_scalar(node)
+        if isinstance(node, _yaml.SequenceNode):
+            return loader.construct_sequence(node)
+        if isinstance(node, _yaml.MappingNode):
+            return loader.construct_mapping(node)
+        return None
+
+    _PermissiveLoader.add_constructor(None, _passthrough)  # type: ignore[arg-type]
 
     try:
         with open(target_path, encoding="utf-8", errors="replace") as f:
-            content = f.read()
-        port_match = _re.search(r"port:\s*(\d+)", content.split("ota:")[1] if "ota:" in content else "")
-        if port_match:
-            return [int(port_match.group(1))]
+            raw = _yaml.load(f, Loader=_PermissiveLoader)  # noqa: S506 — permissive SafeLoader subclass
     except Exception:
-        logger.debug("Could not parse OTA port override from YAML %s", target_path, exc_info=True)
-    return [3232, 8266]
+        logger.debug("Could not parse YAML for OTA port detection: %s", target_path, exc_info=True)
+        return [3232, 8266]
+
+    if not isinstance(raw, dict):
+        return [3232, 8266]
+
+    ota_block = raw.get("ota")
+    # `ota:` is a list of platform dicts on current ESPHome
+    # (`- platform: esphome`), a single dict on older configs.
+    if isinstance(ota_block, list):
+        blocks = ota_block
+    elif isinstance(ota_block, dict):
+        blocks = [ota_block]
+    else:
+        blocks = []
+    ports = [b["port"] for b in blocks if isinstance(b, dict) and isinstance(b.get("port"), int)]
+    return ports or [3232, 8266]
 
 
 def _check_ota_reachable(
@@ -2221,12 +2258,29 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
                 # OTA-retry outcome, archive the firmware on the server
                 # so the user can still flash it by hand (or re-OTA
                 # later) if the device is unreachable.
-                _archive_firmware_to_server(
+                archived = _archive_firmware_to_server(
                     job_id, build_dir, target_stem,
                     client_id=client_id, required=False,
                 )
                 if retry_ok:
                     _submit_result(job_id, "success", log=None, ota_result="success")
+                elif OTA_REACHABILITY_CHECK and archived and ota_address != "OTA":
+                    # SOTA.5 last-resort fallback: the pre-flight reachability
+                    # check passed (or was skipped because ota_address was
+                    # unknown at the time), but the actual local OTA attempt
+                    # still failed after a retry — e.g. a marginal/flaky WiFi
+                    # link where the TCP handshake succeeds but the OTA
+                    # protocol exchange itself times out (a class of failure
+                    # a bare TCP probe can't detect). The firmware is already
+                    # archived on the server, so ask the server to attempt
+                    # the push centrally instead of just failing the job —
+                    # same mechanism as a statically-flagged Thread job.
+                    _flush_log_text(
+                        job_id,
+                        "\n--- Local OTA failed again after retry — asking the "
+                        "server to attempt the push centrally instead. ---\n",
+                    )
+                    _submit_result(job_id, "success", log=None, ota_result=None, requires_server_ota=True)
                 else:
                     _submit_result(job_id, "success", log=None, ota_result="failed")
                     diag = _ota_network_diagnostics(target_path, build_dir, subprocess_env)
