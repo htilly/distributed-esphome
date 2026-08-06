@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-*(1.8.0 development — nothing user-facing yet.)*
+*(1.8.0 development.)*
+
+**Build workers that can't reach a device now fall back automatically instead of failing.** If a worker sits on a different network segment than a target device — a VLAN split, a firewall in the way — OTA upgrades used to fail outright after a few retries. Workers now check reachability before attempting the upload; if they can't reach the device, they compile the firmware and hand the OTA push to the add-on instead, the same way Thread/Matter devices are already handled.
 
 ## 1.7.3
 
