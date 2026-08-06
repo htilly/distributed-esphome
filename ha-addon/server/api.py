@@ -723,9 +723,26 @@ async def _server_ota_push(app: web.Application, job: Job) -> None:
 
             # Pre-flight ping to surface connectivity issues early in the log.
             # Runs on the server (HA host), not on the compile worker.
+            #
+            # SOTA.5: this path used to be Thread/Matter-only, where
+            # ota_addr is always a resolved IPv6 literal (fd00::...) — a
+            # hardcoded ping6 made sense. Now that ordinary WiFi/Ethernet
+            # devices can also land here (worker-unreachable fallback),
+            # ota_addr is just as often IPv4, and ping6 against an IPv4
+            # address fails immediately with "Address family for hostname
+            # not supported" rather than actually pinging. Pick the right
+            # binary based on the address itself; a hostname (not a
+            # literal IP — shouldn't normally happen since device_poller
+            # always resolves to a literal, but be defensive) falls back
+            # to plain ping.
+            import ipaddress as _ipaddress  # noqa: PLC0415
             import socket as _socket  # noqa: PLC0415
             server_hostname = _socket.gethostname()
-            ping_cmd = ["ping6", "-c", "3", "-W", "5", ota_addr]
+            try:
+                is_ipv6 = isinstance(_ipaddress.ip_address(ota_addr), _ipaddress.IPv6Address)
+            except ValueError:
+                is_ipv6 = False
+            ping_cmd = ["ping6" if is_ipv6 else "ping", "-c", "3", "-W", "5", ota_addr]
             logger.info(
                 "Server OTA %s: pinging %s from server (%s)",
                 job_id, ota_addr, server_hostname,

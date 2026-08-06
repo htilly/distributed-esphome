@@ -2060,6 +2060,46 @@ async def test_server_ota_push_success_uploads_and_records_result(tmp_path, monk
     fake_poller.refresh_target.assert_called_once_with("testdevice.yaml")
 
 
+async def test_server_ota_push_uses_plain_ping_for_ipv4_address(tmp_path, monkeypatch, _fake_server_esphome):
+    """SOTA.5: this path now also serves ordinary WiFi/Ethernet devices
+    (worker-unreachable fallback), where ota_address is IPv4, not the
+    IPv6-only literal Thread/Matter always resolves to. The pre-flight
+    ping must use plain `ping`, not `ping6` — the latter fails outright
+    against an IPv4 address with 'Address family for hostname not
+    supported' rather than actually probing it (live prod hit,
+    2026-08-06)."""
+    import firmware_storage
+    firmware_dir = tmp_path / "firmware"
+    monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
+
+    queue = JobQueue(queue_file=tmp_path / "queue.json")
+    job = await queue.enqueue(
+        target="testdevice.yaml", esphome_version="2026.4.3", run_id="r",
+        timeout_seconds=300, server_ota=True, ota_address="172.16.205.181",
+    )
+    assert job is not None
+    firmware_storage.save_firmware(job.id, b"\xff" * 10, variant="ota", root=firmware_dir)
+
+    calls: list[list[str]] = []
+
+    async def _fake_subprocess_exec(*cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[0] in ("ping", "ping6"):
+            return _FakeProc(0, b"3 packets transmitted, 3 received")
+        return _FakeProc(0, b"Upload successful")
+
+    fake_poller = AsyncMock()
+    app = await _push_app(tmp_path, queue, device_poller=fake_poller)
+
+    with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())), \
+         patch("asyncio.create_subprocess_exec", new=_fake_subprocess_exec):
+        await api_module._server_ota_push(app, job)
+
+    ping_cmd = calls[0]
+    assert ping_cmd[0] == "ping", f"expected plain ping for an IPv4 address, got {ping_cmd}"
+    assert ping_cmd[-1] == "172.16.205.181"
+
+
 async def test_server_ota_push_ping_failure_still_attempts_upload(tmp_path, monkeypatch, _fake_server_esphome):
     """A failed preflight ping is logged but doesn't block the upload attempt —
     some Thread devices don't answer ICMP even when OTA-reachable."""
