@@ -4,7 +4,7 @@
 
 *(1.8.0 development.)*
 
-**Server-side OTA push for devices a build worker can't reach.** Thread/Matter devices use an IPv6 mesh only reachable from the Home Assistant host, so a remote build worker can compile firmware for them but never flash it directly — every such upgrade used to fail. Build workers now compile the firmware and hand the OTA push to the add-on, which performs the flash itself. The same fallback now also covers ordinary WiFi/Ethernet devices: if a worker sits on a different network segment than the target device (a VLAN split, a firewall in the way), it detects that automatically and falls back to the same compile-and-handoff behavior instead of failing the job.
+**Server-side OTA push for devices a build worker can't reach.** Thread/Matter devices use an IPv6 mesh only reachable from the Home Assistant host, so a remote build worker can compile firmware for them but never flash it directly — every such upgrade used to fail. Build workers now compile the firmware and hand the OTA push to the add-on, which performs the flash itself. The same fallback now also covers ordinary WiFi/Ethernet devices: if a worker sits on a different network segment than the target device (a VLAN split, a firewall in the way), it detects that automatically and falls back to the same compile-and-handoff behavior instead of failing the job. It also catches the case where a device looks reachable but the actual upgrade still fails partway through (a flaky Wi-Fi link, for example) — one more retry attempt happens locally first, and only then does it hand off to the add-on.
 
 ## 1.7.3
 
