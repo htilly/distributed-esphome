@@ -831,8 +831,8 @@ def test_detect_ota_ports_honors_list_form_ota_block(tmp_path):
 
 def test_detect_ota_ports_tolerates_unresolved_secret_tags(tmp_path):
     """`!secret` (and other ESPHome custom tags) must not blow up the
-    parse — the permissive loader passes them through untouched, same
-    contract as scanner.py's `_load_raw_yaml`."""
+    scan — it's a plain line-based indentation scan, not a YAML parse,
+    so tags are never even looked at."""
     import client as client_module
 
     target = tmp_path / "dev.yaml"
@@ -842,6 +842,32 @@ def test_detect_ota_ports_tolerates_unresolved_secret_tags(tmp_path):
         "ota:\n  - platform: esphome\n    port: 5555\n"
     )
     assert client_module._detect_ota_ports(str(target)) == [5555]
+
+
+def test_detect_ota_ports_does_not_require_yaml_module(tmp_path, monkeypatch):
+    """Regression guard for the #248 hotfix: some worker Docker images
+    don't have PyYAML installed at all. A bare `import yaml` inside
+    `_detect_ota_ports` crashed the whole `run_job` call with
+    ModuleNotFoundError, abandoning the job mid-flight (live prod hit,
+    2026-08-06). Fixed by not depending on PyYAML at all — this test
+    proves it by making `import yaml` raise and confirming detection
+    still works correctly."""
+    import builtins
+
+    import client as client_module
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "yaml":
+            raise ModuleNotFoundError("No module named 'yaml'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    target = tmp_path / "dev.yaml"
+    target.write_text("esphome:\n  name: dev\nota:\n  - platform: esphome\n    port: 6666\n")
+    assert client_module._detect_ota_ports(str(target)) == [6666]
 
 
 def test_run_job_falls_back_to_server_ota_when_worker_cant_reach_device(tmp_path, monkeypatch):
