@@ -124,6 +124,15 @@ POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "1"))
 HEARTBEAT_INTERVAL = int(os.environ.get("HEARTBEAT_INTERVAL", "10"))
 JOB_TIMEOUT = int(os.environ.get("JOB_TIMEOUT", "600"))
 OTA_TIMEOUT = int(os.environ.get("OTA_TIMEOUT", "120"))
+# SOTA.5: pre-flight TCP reachability probe against the device's OTA port,
+# run before a normal (non-Thread) job attempts `esphome run`. When the
+# probe fails, the worker falls back to compiling only and asking the
+# server to perform the OTA push centrally — the same mechanism already
+# used for Thread/Matter devices. Escape hatch for operators whose network
+# makes the probe unreliable (e.g. port-filtering that doesn't reflect
+# real OTA reachability).
+OTA_REACHABILITY_CHECK = os.environ.get("OTA_REACHABILITY_CHECK", "1").strip().lower() not in ("0", "false", "no")
+OTA_REACHABILITY_TIMEOUT_SECONDS = 5
 MAX_ESPHOME_VERSIONS = int(os.environ.get("MAX_ESPHOME_VERSIONS", "3"))
 MAX_PARALLEL_JOBS = int(os.environ.get("MAX_PARALLEL_JOBS", "2"))
 HOSTNAME = os.environ.get("HOSTNAME", socket.gethostname())
@@ -1461,6 +1470,53 @@ def _apply_update(current_client_id: str) -> None:
         logger.warning("Worker update failed: %s", exc)
 
 
+def _detect_ota_ports(target_path: str) -> list[int]:
+    """Best-effort OTA port(s) to probe for ``target_path``.
+
+    Honors an explicit ``ota: port:`` YAML override; otherwise returns both
+    common ESPHome OTA ports (ESP32 3232, ESP8266 8266) so a caller can try
+    either. Shared by ``_ota_network_diagnostics`` (post-failure) and
+    ``_check_ota_reachable`` (SOTA.5 pre-flight probe) so the port-detection
+    regex lives in one place.
+    """
+    import re as _re  # noqa: PLC0415
+
+    try:
+        with open(target_path, encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        port_match = _re.search(r"port:\s*(\d+)", content.split("ota:")[1] if "ota:" in content else "")
+        if port_match:
+            return [int(port_match.group(1))]
+    except Exception:
+        logger.debug("Could not parse OTA port override from YAML %s", target_path, exc_info=True)
+    return [3232, 8266]
+
+
+def _check_ota_reachable(
+    device_addr: str, target_path: str, timeout: float = OTA_REACHABILITY_TIMEOUT_SECONDS,
+) -> tuple[bool, str]:
+    """SOTA.5 pre-flight probe: can *this worker* reach the device's OTA port?
+
+    Tries a plain TCP connect against every port ``_detect_ota_ports``
+    returns for ``target_path``, short-circuiting on the first success.
+    Returns ``(reachable, log_line)`` — the log line is always meaningful
+    (describes what was tried) so it can be flushed into the job log
+    regardless of outcome.
+    """
+    ports = _detect_ota_ports(target_path)
+    for port in ports:
+        try:
+            with socket.create_connection((device_addr, port), timeout=timeout):
+                return True, f"Connectivity check: {device_addr}:{port} reachable from this worker.\n"
+        except OSError:
+            continue
+    port_list = ", ".join(str(p) for p in ports)
+    return False, (
+        f"Connectivity check: {device_addr} not reachable on port(s) {port_list} from this "
+        "worker — falling back to server-side OTA.\n"
+    )
+
+
 def _ota_network_diagnostics(target_path: str, cwd: str, env: dict) -> str:
     """Run network diagnostics after an OTA failure.
 
@@ -1478,7 +1534,6 @@ def _ota_network_diagnostics(target_path: str, cwd: str, env: dict) -> str:
     #   2. wifi.manual_ip.static_ip
     #   3. DNS resolution of device name
     device_addr = None
-    ota_port = None
     try:
         with open(target_path, encoding="utf-8", errors="replace") as f:
             content = f.read()
@@ -1492,12 +1547,8 @@ def _ota_network_diagnostics(target_path: str, cwd: str, env: dict) -> str:
             ip_match = _re.search(r"static_ip:\s*['\"]?(\d+\.\d+\.\d+\.\d+)", content)
             if ip_match:
                 device_addr = ip_match.group(1)
-        # Check for OTA port override
-        port_match = _re.search(r"port:\s*(\d+)", content.split("ota:")[1] if "ota:" in content else "")
-        if port_match:
-            ota_port = int(port_match.group(1))
     except Exception:
-        logger.debug("Could not parse device address/port from YAML %s", target_path, exc_info=True)
+        logger.debug("Could not parse device address from YAML %s", target_path, exc_info=True)
 
     # Extract device name from the esphome: block (not any other component's name: key).
     # Parse with yaml.safe_load to avoid the regex pitfall of matching the wrong name:.
@@ -1563,12 +1614,10 @@ def _ota_network_diagnostics(target_path: str, cwd: str, env: dict) -> str:
         lines.append("Could not determine device IP for diagnostics")
         return "\n".join(lines)
 
-    # Determine OTA port: ESP8266 uses 8266, ESP32 uses 3232
-    if not ota_port:
-        # Check both common ports
-        ports_to_check = [3232, 8266]
-    else:
-        ports_to_check = [ota_port]
+    # Determine OTA port(s): explicit ``ota: port:`` override, else both
+    # common ESPHome ports (ESP8266 8266, ESP32 3232). Shared with the
+    # SOTA.5 pre-flight probe via _detect_ota_ports.
+    ports_to_check = _detect_ota_ports(target_path)
 
     lines.append(f"Device IP: {device_addr}")
 
@@ -1867,6 +1916,39 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
             _submit_result(job_id, "failed", log=f"Target file not found in bundle: {target}", ota_result=None)
             return
 
+        # Resolved once, used by both the SOTA.5 reachability pre-flight
+        # check below and the `esphome run --device` invocation further
+        # down. Server always sends its best-known address; "OTA" is the
+        # ESPHome self-resolve sentinel used when the server has none.
+        ota_address = job.get("ota_address") or "OTA"
+
+        # ---------------------------------------------------------------
+        # SOTA.5: pre-flight reachability check. Only for a "normal" job —
+        # not validate_only, not already download_only (which covers
+        # server_ota=True Thread/Matter jobs, forced above), and only when
+        # there's a real address to probe. If *this* worker can't reach
+        # the device's OTA port, fall back to the exact same compile-only
+        # + central-OTA-push mechanism already used for Thread/Matter
+        # devices instead of attempting (and likely failing) `esphome run`
+        # locally.
+        # ---------------------------------------------------------------
+        requires_server_ota = False
+        if (
+            OTA_REACHABILITY_CHECK
+            and not validate_only
+            and not download_only
+            and ota_address != "OTA"
+        ):
+            reachable, check_log = _check_ota_reachable(ota_address, target_path)
+            _flush_log_text(job_id, check_log)
+            if not reachable:
+                logger.info(
+                    "Job %s: device %s unreachable from this worker; falling back to server-side OTA",
+                    job_id, ota_address,
+                )
+                download_only = True
+                requires_server_ota = True
+
         # ---------------------------------------------------------------
         # Validation phase (validate_only=True) — runs esphome config and exits
         # ---------------------------------------------------------------
@@ -1970,7 +2052,11 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
             ):
                 _submit_result(job_id, "failed", log=None, ota_result=None)
                 return
-            _submit_result(job_id, "success", log=None, ota_result=None)
+            # SOTA.5: requires_server_ota is only True when this worker
+            # dynamically diverted here after a failed reachability check
+            # (genuine server_ota=True Thread jobs already carry that flag
+            # server-side from enqueue and don't need this signal).
+            _submit_result(job_id, "success", log=None, ota_result=None, requires_server_ota=requires_server_ota)
             return
 
         # ---------------------------------------------------------------
@@ -1988,9 +2074,10 @@ def run_job(client_id: str, job: dict, version_manager: VersionManager, worker_i
         #     target prompt (#176). Without this, ESPHome prompts when the
         #     worker has multiple possible targets (e.g. a USB serial dongle
         #     plus the OTA target), and the worker has no stdin.
+        #
+        # ota_address is already computed above (also used by the SOTA.5
+        # reachability pre-flight check).
         # ---------------------------------------------------------------
-        ota_address = job.get("ota_address") or "OTA"
-
         _report_status(job_id, "Compiling + OTA" + (" (retry)" if ota_only else ""))
         run_cmd = [
             esphome_bin, "run", target_path,
@@ -2324,14 +2411,26 @@ def _submit_result(
     status: str,
     log: Optional[str],
     ota_result: Optional[str],
+    requires_server_ota: bool = False,
 ) -> None:
-    """POST job result to server, retrying a few times on network errors."""
+    """POST job result to server, retrying a few times on network errors.
+
+    ``requires_server_ota`` (SOTA.5) signals a dynamic fallback: this
+    worker compiled successfully but determined at runtime it couldn't
+    reach the device, so the server should perform the OTA push centrally
+    (same mechanism as a statically-flagged Thread/Matter job).
+    """
     # Build + validate the submission via the typed model. ``status`` is a
     # Literal["success","failed"] on the wire — pydantic will reject anything
     # else before it is ever sent. The cast + model_validate path makes mypy
     # happy without silencing the check with a blanket ignore.
     submission = JobResultSubmission.model_validate(
-        {"status": status, "log": log, "ota_result": ota_result}
+        {
+            "status": status,
+            "log": log,
+            "ota_result": ota_result,
+            "requires_server_ota": requires_server_ota,
+        }
     )
     payload = submission.model_dump(exclude_none=True)
 

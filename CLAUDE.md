@@ -57,6 +57,7 @@ Key worker env vars:
 | `HEARTBEAT_INTERVAL` | `10` | Seconds between heartbeats |
 | `JOB_TIMEOUT` | `600` | Compile timeout in seconds |
 | `OTA_TIMEOUT` | `120` | OTA upload timeout in seconds |
+| `OTA_REACHABILITY_CHECK` | `1` (on) | SOTA.5: pre-flight TCP probe against the device's OTA port before attempting `esphome run`. On failure, falls back to compiling only and asking the server to push OTA centrally (same mechanism as Thread/Matter `server_ota`). Set to `0`/`false`/`no` to disable and always attempt OTA locally. |
 | `MAX_ESPHOME_VERSIONS` | `3` | Max cached ESPHome versions on disk |
 | `MAX_PARALLEL_JOBS` | `2` | Concurrent build jobs per worker (0 = paused). Server-spawned local worker defaults to `1` on fresh install unless the user has configured it via the UI (persisted in `/data/local_worker_slots`) — #99. |
 | `HOSTNAME` | system hostname | Worker name shown in UI |

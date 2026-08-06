@@ -225,6 +225,12 @@ class JobResultSubmission(_ProtocolMessage):
     status: Literal["success", "failed"]
     log: Optional[str] = None
     ota_result: Optional[str] = None
+    # SOTA.5: worker→server signal that it compiled but determined at runtime
+    # it can't reach the device itself (pre-flight TCP probe against the OTA
+    # port failed) — ask the server to perform the OTA push centrally, the
+    # same mechanism used for server_ota=True Thread/Matter jobs. Optional +
+    # False default keeps older workers forward-compatible.
+    requires_server_ota: bool = False
 
 
 class JobStatusUpdate(_ProtocolMessage):

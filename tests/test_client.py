@@ -510,6 +510,10 @@ def test_run_job_ota_retry_uses_upload_without_no_logs(tmp_path, monkeypatch):
     monkeypatch.setattr(client_module, "_report_status", lambda *a, **k: None)
     # Skip the OTA diagnostics network calls on failure path.
     monkeypatch.setattr(client_module, "_ota_network_diagnostics", lambda *a, **k: "")
+    # SOTA.5: this test is about the OTA-failure retry, not the pre-flight
+    # reachability gate — stub it reachable so run_job takes the normal
+    # `esphome run` path instead of doing a real TCP probe against 10.0.0.5.
+    monkeypatch.setattr(client_module, "_check_ota_reachable", lambda *a, **k: (True, ""))
     # Skip the 5-second sleep between compile and retry.
     monkeypatch.setattr(client_module.time, "sleep", lambda _s: None)
 
@@ -559,6 +563,182 @@ def test_run_job_ota_retry_uses_upload_without_no_logs(tmp_path, monkeypatch):
     # The result submission records the OTA retry succeeded.
     assert submitted[-1][0] == "success"
     assert submitted[-1][1] == "success"
+
+
+# ---------------------------------------------------------------------------
+# SOTA.5 — worker-side pre-flight reachability check + dynamic fallback to
+# server-side OTA when this worker can't reach the device.
+# ---------------------------------------------------------------------------
+
+def _make_bundle_b64(yaml_content: bytes = b"esphome:\n  name: dev\n", filename: str = "dev.yaml") -> str:
+    import base64
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo(name=filename)
+        info.size = len(yaml_content)
+        tar.addfile(info, io.BytesIO(yaml_content))
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def test_detect_ota_ports_honors_explicit_override(tmp_path):
+    import client as client_module
+
+    target = tmp_path / "dev.yaml"
+    target.write_text("esphome:\n  name: dev\nota:\n  platform: esphome\n  port: 4444\n")
+    assert client_module._detect_ota_ports(str(target)) == [4444]
+
+
+def test_detect_ota_ports_defaults_to_common_ports_without_override(tmp_path):
+    import client as client_module
+
+    target = tmp_path / "dev.yaml"
+    target.write_text("esphome:\n  name: dev\n")
+    assert client_module._detect_ota_ports(str(target)) == [3232, 8266]
+
+
+def test_check_ota_reachable_true_when_a_port_accepts_connection(tmp_path, monkeypatch):
+    import client as client_module
+
+    target = tmp_path / "dev.yaml"
+    target.write_text("esphome:\n  name: dev\n")
+
+    def fake_create_connection(addr, timeout):
+        assert addr == ("10.0.0.5", 3232)
+        return MagicMock(__enter__=MagicMock(), __exit__=MagicMock())
+
+    monkeypatch.setattr(client_module.socket, "create_connection", fake_create_connection)
+    reachable, log_line = client_module._check_ota_reachable("10.0.0.5", str(target))
+    assert reachable is True
+    assert "10.0.0.5:3232" in log_line
+
+
+def test_check_ota_reachable_false_when_every_port_refused(tmp_path, monkeypatch):
+    import client as client_module
+
+    target = tmp_path / "dev.yaml"
+    target.write_text("esphome:\n  name: dev\n")
+
+    def fake_create_connection(addr, timeout):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(client_module.socket, "create_connection", fake_create_connection)
+    reachable, log_line = client_module._check_ota_reachable("10.0.0.5", str(target))
+    assert reachable is False
+    assert "not reachable" in log_line
+    assert "falling back to server-side OTA" in log_line
+
+
+def test_run_job_falls_back_to_server_ota_when_worker_cant_reach_device(tmp_path, monkeypatch):
+    """SOTA.5: when the pre-flight reachability check fails, run_job must
+    take the compile-only path (not `esphome run`), archive firmware as
+    required, and submit the result with requires_server_ota=True."""
+    import client as client_module
+
+    _add_fake_version(tmp_path, "2024.3.1")
+    monkeypatch.setattr(client_module, "_ESPHOME_VERSIONS_DIR", str(tmp_path))
+
+    commands: list[list[str]] = []
+
+    def fake_run_subprocess(cmd, cwd, timeout, label, env=None, job_id=None):
+        commands.append(list(cmd))
+        return ("Successfully compiled program.", True)
+
+    monkeypatch.setattr(client_module, "_run_subprocess", fake_run_subprocess)
+    monkeypatch.setattr(client_module, "_flush_log_text", lambda *a, **k: None)
+    monkeypatch.setattr(client_module, "_log_invocation", lambda *a, **k: None)
+    monkeypatch.setattr(client_module, "_report_status", lambda *a, **k: None)
+    # Reachability check reports the device as unreachable from this worker.
+    monkeypatch.setattr(client_module, "_check_ota_reachable", lambda *a, **k: (False, "unreachable\n"))
+
+    archive_calls: list[dict] = []
+
+    def fake_archive(job_id, build_dir, target_stem, *, client_id=None, required):
+        archive_calls.append({"job_id": job_id, "required": required})
+        return True
+
+    monkeypatch.setattr(client_module, "_archive_firmware_to_server", fake_archive)
+
+    submitted: list[dict] = []
+
+    def fake_submit(job_id, status, log=None, ota_result=None, requires_server_ota=False):
+        submitted.append({
+            "status": status, "ota_result": ota_result,
+            "requires_server_ota": requires_server_ota,
+        })
+
+    monkeypatch.setattr(client_module, "_submit_result", fake_submit)
+
+    vm = VersionManager(versions_base=tmp_path, max_versions=3)
+    job = {
+        "job_id": "j1",
+        "target": "dev.yaml",
+        "esphome_version": "2024.3.1",
+        "bundle_b64": _make_bundle_b64(),
+        "timeout_seconds": 60,
+        "ota_only": False,
+        "validate_only": False,
+        "download_only": False,
+        "server_ota": False,
+        "ota_address": "10.0.0.5",
+    }
+
+    client_module.run_job("client-1", job, vm, worker_id=1)
+
+    # Only a compile, never `esphome run`.
+    assert len(commands) == 1, f"expected exactly one subprocess call, got {commands}"
+    assert "compile" in commands[0]
+    assert "run" not in commands[0]
+
+    assert archive_calls == [{"job_id": "j1", "required": True}]
+
+    assert submitted[-1]["status"] == "success"
+    assert submitted[-1]["ota_result"] is None
+    assert submitted[-1]["requires_server_ota"] is True
+
+
+def test_run_job_skips_reachability_check_when_no_known_address(tmp_path, monkeypatch):
+    """When the server has no resolved address (ota_address falls back to
+    the literal "OTA"), there's nothing meaningful to probe — the check
+    must be skipped and the normal `esphome run --device OTA` path used."""
+    import client as client_module
+
+    _add_fake_version(tmp_path, "2024.3.1")
+    monkeypatch.setattr(client_module, "_ESPHOME_VERSIONS_DIR", str(tmp_path))
+
+    commands: list[list[str]] = []
+
+    def fake_run_subprocess(cmd, cwd, timeout, label, env=None, job_id=None):
+        commands.append(list(cmd))
+        return ("Successful OTA", True)
+
+    check_calls: list = []
+    monkeypatch.setattr(client_module, "_check_ota_reachable", lambda *a, **k: check_calls.append(a) or (True, ""))
+    monkeypatch.setattr(client_module, "_run_subprocess", fake_run_subprocess)
+    monkeypatch.setattr(client_module, "_flush_log_text", lambda *a, **k: None)
+    monkeypatch.setattr(client_module, "_log_invocation", lambda *a, **k: None)
+    monkeypatch.setattr(client_module, "_report_status", lambda *a, **k: None)
+    monkeypatch.setattr(client_module, "_submit_result", lambda *a, **k: None)
+
+    vm = VersionManager(versions_base=tmp_path, max_versions=3)
+    job = {
+        "job_id": "j1",
+        "target": "dev.yaml",
+        "esphome_version": "2024.3.1",
+        "bundle_b64": _make_bundle_b64(),
+        "timeout_seconds": 60,
+        "ota_only": False,
+        "validate_only": False,
+        # ota_address deliberately omitted — job.get("ota_address") is None → "OTA"
+    }
+
+    client_module.run_job("client-1", job, vm, worker_id=1)
+
+    assert check_calls == []
+    assert len(commands) == 1
+    assert "run" in commands[0] and "--device" in commands[0] and "OTA" in commands[0]
 
 
 # ---------------------------------------------------------------------------
