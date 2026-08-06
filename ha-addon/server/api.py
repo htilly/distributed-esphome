@@ -842,7 +842,10 @@ async def submit_job_result(request: web.Request) -> web.Response:
     if job and job.assigned_client_id:
         registry.set_job(job.assigned_client_id, None)
 
-    ok = await queue.submit_result(job_id, msg.status, msg.log, msg.ota_result)
+    ok = await queue.submit_result(
+        job_id, msg.status, msg.log, msg.ota_result,
+        requires_server_ota=msg.requires_server_ota,
+    )
     if not ok:
         return _protocol_error("job_not_found_or_wrong_state", status=404)
 

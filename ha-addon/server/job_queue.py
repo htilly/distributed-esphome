@@ -716,11 +716,19 @@ class JobQueue:
         status: str,
         log: Optional[str] = None,
         ota_result: Optional[str] = None,
+        requires_server_ota: bool = False,
     ) -> bool:
         """Record the final result of a job.
 
         Also handles OTA-only updates: if the job is already SUCCESS/FAILED
         and only ota_result is provided (no log), just patch ota_result.
+
+        ``requires_server_ota`` (SOTA.5): the worker compiled successfully
+        but determined at runtime it couldn't reach the device itself, and
+        is asking the server to perform the OTA push centrally. Retroactively
+        flips ``job.server_ota`` so this job is indistinguishable downstream
+        from a statically-detected Thread/Matter job — same UI rendering,
+        same ``_server_ota_push`` trigger in api.py, same history column.
         """
         async with self._lock:
             job = self._jobs.get(job_id)
@@ -776,6 +784,13 @@ class JobQueue:
             job.status_text = None
             if ota_result is not None:
                 job.ota_result = ota_result
+            if requires_server_ota and status == "success":
+                job.server_ota = True
+                logger.info(
+                    "Job %s (%s): worker reported it can't reach the device; "
+                    "flipping to server-side OTA",
+                    job_id, job.target,
+                )
             job.finished_at = _utcnow()
             self._persist()
             # JH.2: snapshot this terminal transition. Inside the async
