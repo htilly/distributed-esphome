@@ -46,7 +46,7 @@ from sysinfo import collect_system_info
 # can detect the mismatch and self-update.
 # ---------------------------------------------------------------------------
 
-CLIENT_VERSION = "1.8.0-dev.17"
+CLIENT_VERSION = "1.8.0-dev.18"
 
 
 def _read_image_version() -> Optional[str]:
@@ -1241,57 +1241,53 @@ def _apply_update(current_client_id: str) -> None:
 def _detect_ota_ports(target_path: str) -> list[int]:
     """Best-effort OTA port(s) to probe for ``target_path``.
 
-    Parses the ``ota:`` YAML block specifically via a permissive
-    ``yaml.SafeLoader`` (ignores ``!secret``/``!lambda``/``!include`` etc.
-    rather than erroring — mirrors ``scanner.py``'s ``_load_raw_yaml`` on
-    the server side; PY-1) and honors an explicit ``port:`` override
-    scoped to that block. Bug fix: the previous implementation grabbed
-    the first ``port:`` key appearing *anywhere* in the file after the
-    literal substring "ota:" — which could match an unrelated component
-    (e.g. a ``web_server: port: 80`` block declared later in the file)
-    and silently probe the wrong port. Falls back to both common
-    ESPHome OTA ports (ESP32 3232, ESP8266 8266) when no override is
-    found or the YAML can't be parsed. Shared by
+    Honors an explicit ``port:`` override scoped to the ``ota:`` block
+    specifically: lines more indented than the top-level ``ota:`` key,
+    up to the next top-level key or EOF. Bug fix: the previous
+    implementation grabbed the first ``port:`` key appearing *anywhere*
+    in the file after the literal substring "ota:" — which could match
+    an unrelated component (e.g. a ``web_server: port: 80`` block
+    declared later in the file) and silently probe the wrong port.
+    Falls back to both common ESPHome OTA ports (ESP32 3232, ESP8266
+    8266) when no ``ota:`` block or port override is found. Shared by
     ``_ota_network_diagnostics`` (post-failure) and
     ``_check_ota_reachable`` (SOTA.5 pre-flight probe).
     """
-    import yaml as _yaml  # noqa: PLC0415
-
-    class _PermissiveLoader(_yaml.SafeLoader):
-        pass
-
-    def _passthrough(loader: _yaml.SafeLoader, node: _yaml.Node) -> object:
-        if isinstance(node, _yaml.ScalarNode):
-            return loader.construct_scalar(node)
-        if isinstance(node, _yaml.SequenceNode):
-            return loader.construct_sequence(node)
-        if isinstance(node, _yaml.MappingNode):
-            return loader.construct_mapping(node)
-        return None
-
-    _PermissiveLoader.add_constructor(None, _passthrough)  # type: ignore[arg-type]
+    # ALLOW_REGEX_YAML (PY-1): deliberately not a real YAML parse.
+    # PyYAML isn't a guaranteed client-side dependency — some worker
+    # images don't have it, and this runs inline in the job-execution
+    # path where an ImportError would abandon the job mid-flight
+    # rather than degrade gracefully (that happened: #248 hotfix).
+    # Also needs zero YAML semantics here (no !secret/!lambda
+    # resolution, no type coercion) — just "which lines belong to the
+    # ota: block" — so a line-based indentation scan is both simpler
+    # and more robust than a parse would be for this specific use.
+    import re as _re  # noqa: PLC0415
 
     try:
         with open(target_path, encoding="utf-8", errors="replace") as f:
-            raw = _yaml.load(f, Loader=_PermissiveLoader)  # noqa: S506 — permissive SafeLoader subclass
+            lines = f.readlines()
     except Exception:
-        logger.debug("Could not parse YAML for OTA port detection: %s", target_path, exc_info=True)
+        logger.debug("Could not read YAML for OTA port detection: %s", target_path, exc_info=True)
         return [3232, 8266]
 
-    if not isinstance(raw, dict):
-        return [3232, 8266]
+    ota_block_lines: list[str] = []
+    in_ota_block = False
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line[0].isspace():
+            # Top-level key — enter the block only for an exact `ota:` match
+            # (avoids `otavar:` or similar false positives).
+            in_ota_block = bool(_re.match(r"^ota\s*:", line))
+            continue
+        if in_ota_block:
+            ota_block_lines.append(line)
 
-    ota_block = raw.get("ota")
-    # `ota:` is a list of platform dicts on current ESPHome
-    # (`- platform: esphome`), a single dict on older configs.
-    if isinstance(ota_block, list):
-        blocks = ota_block
-    elif isinstance(ota_block, dict):
-        blocks = [ota_block]
-    else:
-        blocks = []
-    ports = [b["port"] for b in blocks if isinstance(b, dict) and isinstance(b.get("port"), int)]
-    return ports or [3232, 8266]
+    port_match = _re.search(r"port:\s*(\d+)", "".join(ota_block_lines))
+    if port_match:
+        return [int(port_match.group(1))]
+    return [3232, 8266]
 
 
 def _check_ota_reachable(
