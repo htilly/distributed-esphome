@@ -382,6 +382,32 @@ class JobQueue:
                 job.state = JobState.PENDING
                 job.assigned_client_id = None
                 job.assigned_at = None
+            # SOTA.2 restart recovery: a server_ota job whose compile
+            # succeeded but whose OTA push hadn't finished is stranded. The
+            # push runs as an in-process asyncio task (api._server_ota_push)
+            # with no persisted progress, so a restart loses it for good --
+            # and the job is already terminal (SUCCESS), so neither the
+            # WORKING reset above nor timeout_checker will ever revisit it.
+            # Left alone it renders as a permanently-spinning "Server OTA"
+            # row (isJobInProgress treats success + ota_result=None as
+            # in-flight). Mark the OTA as failed so the state is honest and
+            # the user gets the normal OTA-retry affordance.
+            elif (
+                job.state == JobState.SUCCESS
+                and job.server_ota
+                and job.ota_result is None
+            ):
+                job.ota_result = "failed"
+                job.status_text = None
+                logger.warning(
+                    "Job %s (%s): server-side OTA was still in flight at "
+                    "shutdown; marking it failed so it can be retried",
+                    job.id, job.target,
+                )
+                # Keep the History tab in step with the live queue, the
+                # same way patch_ota_result does. Best-effort by design:
+                # _record_history no-ops when the DAO isn't wired up yet.
+                self._record_history(job)
             # Bug #18: no longer prune terminal jobs by age on startup.
             # The user clears the queue explicitly from the UI; auto-
             # deleting history on restart meant that a user who scheduled
