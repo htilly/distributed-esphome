@@ -716,6 +716,60 @@ async def test_compile_address_too_long_returns_400(tmp_path, _enable_socket):
         await ta.close()
 
 
+@pytest.mark.parametrize(
+    "bad_address",
+    [
+        "-f",                  # ping flood flag
+        "--help",              # argparse would consume this as a flag
+        "-i0.001",             # ping interval flag, no space needed
+        "192.168.1.10 extra",  # embedded whitespace splits nothing (argv) but
+                               # is not a real address either
+        "not a hostname!",
+        "-",
+    ],
+)
+async def test_compile_address_rejects_non_address_values(tmp_path, _enable_socket, bad_address):
+    """The override lands as an argv entry for ``esphome upload --device``
+    and, on a server_ota job, for the server-side pre-flight ping. Neither
+    goes through a shell, so this is not command injection — but both parse
+    a leading dash as a flag, so a value like ``-f`` would be interpreted
+    instead of dialled. Only literal IPs and real hostnames get through."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "a.yaml", "a")
+        resp = await ta.post(
+            "/ui/api/compile",
+            json={"targets": ["a.yaml"], "address": bad_address},
+        )
+        assert resp.status == 400, f"{bad_address!r} should be rejected"
+        body = await resp.json()
+        assert "IP address or hostname" in body["error"]
+    finally:
+        await ta.close()
+
+
+@pytest.mark.parametrize(
+    "good_address",
+    ["192.168.1.10", "fd00::1", "device.local", "esp-node", "host.example.com."],
+)
+async def test_compile_address_accepts_ips_and_hostnames(tmp_path, _enable_socket, good_address):
+    """Complement: the shapes device_poller actually produces (IPv4/IPv6
+    literals) and the ones a user reasonably types (mDNS name, bare host,
+    FQDN with trailing root dot) must all still be accepted."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "a.yaml", "a")
+        resp = await ta.post(
+            "/ui/api/compile",
+            json={"targets": ["a.yaml"], "address": good_address},
+        )
+        assert resp.status == 200, f"{good_address!r} should be accepted"
+        jobs = ta.app["queue"].get_all()
+        assert jobs[0].ota_address == good_address
+    finally:
+        await ta.close()
+
+
 async def test_compile_address_empty_falls_through_to_auto_resolve(tmp_path, _enable_socket):
     """DM.3: an empty/whitespace address is treated as "no override" — the
     auto-resolved value (or none) is used as if the field was absent."""

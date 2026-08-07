@@ -13,7 +13,7 @@ import aiohttp
 from aiohttp import web
 
 from app_config import AppConfig
-from helpers import safe_resolve, json_error
+from helpers import safe_resolve, json_error, is_valid_ota_address
 from device_poller import Device
 from job_queue import JobState
 from scanner import (
@@ -2408,6 +2408,18 @@ async def start_compile(request: web.Request) -> web.Response:
             # be a real target.
             return web.json_response(
                 {"error": "address too long (max 253 chars)"}, status=400,
+            )
+        elif not is_valid_ota_address(address_override):
+            # This value ends up as an argv entry for `esphome upload
+            # --device <addr>` on the worker and, for a server_ota job,
+            # for the server-side pre-flight ping as well. No shell is
+            # involved, so this is not a command-injection guard — but
+            # both consumers parse a leading dash as a flag, so an
+            # "address" like "-f" would be interpreted rather than
+            # dialled. Require a literal IP or a real hostname.
+            return web.json_response(
+                {"error": "address must be an IP address or hostname"},
+                status=400,
             )
     cfg = _cfg(request)
     queue = request.app["queue"]

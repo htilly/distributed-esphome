@@ -23,7 +23,7 @@ from constants import (
     MIN_IMAGE_VERSION,
     SERVER_OTA_ABSOLUTE_TIMEOUT, SERVER_OTA_IDLE_TIMEOUT,
 )
-from job_queue import JobState
+from job_queue import Job, JobState
 from protocol import (
     PROTOCOL_VERSION,
     DeregisterRequest,
@@ -601,10 +601,21 @@ async def get_next_job(request: web.Request) -> web.Response:
 # Matches ESPHome ProgressBar's "Uploading: [====...] NN%" frames (emitted
 # via --dashboard, see _server_ota_push). Takes the last match in a chunk
 # since a single read() can contain more than one \r-redrawn frame.
-_UPLOAD_PROGRESS_RE = re.compile(r"(\d+)%")
+#
+# Anchored to the "Uploading" label rather than matching a bare ``NN%``:
+# esphome's output carries other percentages (RAM/flash usage summaries,
+# pip progress from a lazy component install), and a loose ``(\d+)%``
+# scrapes those into status_text as a bogus upload percentage.
+_UPLOAD_PROGRESS_RE = re.compile(r"Uploading[^\r\n]*?(\d+)%")
+
+# Strong references to in-flight _server_ota_push tasks. asyncio only holds
+# a weak reference to a running task, so without this the garbage collector
+# is free to cancel a push mid-transfer. Entries remove themselves via the
+# done callback at the scheduling site.
+_server_ota_tasks: set[asyncio.Task] = set()
 
 
-async def _server_ota_push(app: web.Application, job: object) -> None:
+async def _server_ota_push(app: web.Application, job: Job) -> None:
     """SOTA.2: perform server-side OTA after a server_ota compile job succeeds.
 
     Any worker can compile; this function runs on the server (HA host) which
@@ -616,9 +627,9 @@ async def _server_ota_push(app: web.Application, job: object) -> None:
     """
     queue = app["queue"]
     cfg: AppConfig = app["config"]
-    job_id: str = job.id  # type: ignore[attr-defined]
-    ota_addr: str = job.ota_address  # type: ignore[attr-defined]
-    target: str = job.target  # type: ignore[attr-defined]
+    job_id: str = job.id
+    ota_addr: str = job.ota_address or ""
+    target: str = job.target
 
     if not _scanner._esphome_ready.is_set() or not _scanner._server_esphome_bin:
         logger.error("Server OTA %s: ESPHome not ready on server", job_id)
@@ -850,7 +861,15 @@ async def submit_job_result(request: web.Request) -> web.Response:
         and refreshed_job.ota_address
     ):
         try:
-            asyncio.create_task(_server_ota_push(request.app, refreshed_job))
+            # Hold a strong reference until the push finishes. The event loop
+            # only keeps a weak one, so a bare create_task() can be garbage
+            # collected mid-flight -- and this task legitimately runs for up
+            # to SERVER_OTA_ABSOLUTE_TIMEOUT (30 min), which is a long time
+            # to be collectable. Same pattern git_versioning._pending and
+            # worker_log_broker use for their own long-lived tasks.
+            task = asyncio.create_task(_server_ota_push(request.app, refreshed_job))
+            _server_ota_tasks.add(task)
+            task.add_done_callback(_server_ota_tasks.discard)
         except Exception:
             logger.exception("Failed to schedule server OTA push for job %s", job_id)
 
