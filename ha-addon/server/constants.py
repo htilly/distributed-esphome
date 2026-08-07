@@ -55,7 +55,10 @@ WORKER_DISK_BLOCK_EXIT_PCT = 90
 # covers several concurrent build slots plus the fleet's own
 # default_worker_disk_quota_bytes (10 GiB, settings.py) headroom, with
 # margin for OS/logs/other containers sharing the host disk. On a typical
-# worker in the tens-of-GB range this floor is smaller than 5% of the
-# disk, so it's always satisfied whenever percentage crosses ENTER — i.e.
-# behavior on small/typical disks is unchanged from before this fix.
+# worker in the tens-of-GB range this floor is *larger* than the 5% left
+# free at the ENTER threshold (on a 50 GiB disk, 5% is 2.5 GiB — well
+# under 15 GiB), so the floor is always satisfied whenever percentage
+# crosses ENTER, i.e. behavior on small/typical disks is unchanged from
+# before this fix. The floor only starts gating above ~300 GiB, which is
+# exactly where a percentage-only rule stops being meaningful.
 WORKER_DISK_FREE_FLOOR_BYTES = 15 * 1024 ** 3
