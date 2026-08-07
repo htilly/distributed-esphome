@@ -1116,7 +1116,7 @@ def test_collect_firmware_variants_espidf_native_ota_bin_layout(tmp_path):
     was silently dropped — only factory got archived, and server-side
     OTA (_server_ota_push) failed before it could even ping the device
     since it requires an ota/firmware variant to exist in storage."""
-    import client as client_mod  # noqa: PLC0415
+    import client as client_mod  # noqa: PLC0415 — see section note above
 
     device_dir = tmp_path / ".esphome" / "build" / "testdevice" / "build"
     device_dir.mkdir(parents=True)
