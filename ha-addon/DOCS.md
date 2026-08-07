@@ -86,6 +86,18 @@ docker compose up -d
 
 **Automating refreshes.** We deliberately don't ship an auto-update mechanism — every option adds a dependency (Watchtower, What's Up Docker, Compose + cron, Kubernetes controllers…) we'd then have to support. Pick whatever scheduler you already use on the host and have it run the refresh command on a cadence you're comfortable with. We don't endorse a specific tool.
 
+### When a worker can't reach a device
+
+Before starting an upgrade, a worker makes a quick connection test against the device it's about to flash. If the device doesn't answer, the worker compiles the firmware anyway and hands the upload to the add-on, which is usually on a network with a clearer path to your devices. The same handoff happens if the connection test passes but the upload itself fails partway through — a weak Wi-Fi link, for example. Either way you get a finished upgrade instead of a failed job, and the Queue tab shows **Server OTA** while the add-on takes over.
+
+This is on by default and there's nothing to configure. If it gets in the way — a network where the test is unreliable, or you'd rather a worker always did its own uploads — set `OTA_REACHABILITY_CHECK=0` on the worker container:
+
+```bash
+docker run -e OTA_REACHABILITY_CHECK=0 … ghcr.io/weirded/esphome-dist-client:latest
+```
+
+Turning it off means a worker that genuinely can't reach a device will fail the job rather than hand it over. Thread/Matter devices are unaffected either way — those are always uploaded by the add-on.
+
 ## Verifying what you're running
 
 Every server and client image on GHCR is signed with [cosign](https://docs.sigstore.dev/) using GitHub's keyless OIDC flow (no long-lived keys anywhere). You can verify that the image you pulled is the one this repo built:
