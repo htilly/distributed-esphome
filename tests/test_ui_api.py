@@ -1435,7 +1435,7 @@ async def test_compile_non_thread_target_not_auto_server_ota(tmp_path):
         await ta.close()
 
 
-async def test_compile_thread_target_honors_explicit_server_ota_too(tmp_path):
+async def test_compile_non_thread_target_honors_explicit_server_ota(tmp_path):
     """A non-Thread target with server_ota explicitly requested in the body
     still gets server_ota=True — auto-detection ORs with, not replaces, the
     caller's explicit flag."""
@@ -1454,6 +1454,58 @@ async def test_compile_thread_target_honors_explicit_server_ota_too(tmp_path):
         jobs = ta.queue.get_all()
         assert len(jobs) == 1
         assert jobs[0].server_ota is True
+    finally:
+        await ta.close()
+
+
+async def test_compile_download_only_beats_thread_auto_detection(tmp_path):
+    """download_only means "compile and hand me the binary, don't touch the
+    device". Thread auto-detection must not override that — otherwise the
+    server pushes OTA once the compile lands and flashes a device the user
+    explicitly asked us not to flash."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "thread-dev.yaml", "thread-dev")
+        with patch(
+            "ui_api.get_device_metadata",
+            return_value={"network_type": "thread"},
+        ):
+            resp = await ta.post(
+                "/ui/api/compile",
+                json={"targets": ["thread-dev.yaml"], "download_only": True},
+            )
+        assert resp.status == 200
+        jobs = ta.queue.get_all()
+        assert len(jobs) == 1
+        assert jobs[0].download_only is True
+        assert jobs[0].server_ota is False, (
+            "a download-only job must never be flagged for a server-side OTA push"
+        )
+    finally:
+        await ta.close()
+
+
+async def test_compile_download_only_beats_explicit_server_ota(tmp_path):
+    """Same precedence when the caller asks for both explicitly: the
+    no-touch request wins over the flash request."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "wifi-dev.yaml", "wifi-dev")
+        with patch(
+            "ui_api.get_device_metadata",
+            return_value={"network_type": "wifi"},
+        ):
+            resp = await ta.post(
+                "/ui/api/compile",
+                json={
+                    "targets": ["wifi-dev.yaml"],
+                    "download_only": True,
+                    "server_ota": True,
+                },
+            )
+        assert resp.status == 200
+        jobs = ta.queue.get_all()
+        assert jobs[0].server_ota is False
     finally:
         await ta.close()
 

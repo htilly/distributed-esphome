@@ -852,10 +852,18 @@ async def submit_job_result(request: web.Request) -> web.Response:
     # below (note_target_flashed / refresh_target) does not fire for this
     # submission since msg.ota_result is None here — _server_ota_push fires
     # its own refresh_target once the real OTA completes.
+    #
+    # download_only is checked again here even though start_compile already
+    # refuses to set server_ota on such a job. This is the last gate before
+    # a device actually gets written to, and the two flags arriving together
+    # -- from a queue.json written by an older build, or a future caller of
+    # enqueue() that doesn't replicate the rule -- must never be resolved in
+    # favour of flashing.
     refreshed_job = queue.get(job_id)
     if (
         refreshed_job is not None
         and getattr(refreshed_job, "server_ota", False)
+        and not getattr(refreshed_job, "download_only", False)
         and msg.status == "success"
         and refreshed_job.has_firmware
         and refreshed_job.ota_address

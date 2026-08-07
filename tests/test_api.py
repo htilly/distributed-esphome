@@ -1798,6 +1798,57 @@ async def test_submit_result_triggers_server_ota_push(tmp_path, monkeypatch):
         await ta.close()
 
 
+async def test_submit_result_download_only_never_triggers_server_ota_push(tmp_path, monkeypatch):
+    """Defence in depth for the last gate before a device gets written to.
+
+    start_compile already refuses to set server_ota on a download_only job,
+    but a job carrying both flags can still reach here — a queue.json written
+    by an older build, or some future caller of enqueue() that doesn't
+    replicate the rule. Resolving that combination in favour of flashing
+    would write to a device the user explicitly asked us not to touch, so
+    the push must stay unscheduled.
+    """
+    import firmware_storage
+    firmware_dir = tmp_path / "firmware"
+    monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
+
+    push_calls: list = []
+
+    async def _fake_push(app, job):
+        push_calls.append(job.id)
+
+    monkeypatch.setattr(api_module, "_server_ota_push", _fake_push)
+
+    ta = await _make_app(tmp_path)
+    try:
+        job = await ta.queue.enqueue(
+            target="x.yaml", esphome_version="2026.4.3", run_id="r",
+            timeout_seconds=300, server_ota=True, download_only=True,
+            ota_address="fd00::1",
+        )
+        assert job is not None
+        await _register(ta, hostname="w")
+        await ta.queue.claim_next("any-client")
+
+        firmware_storage.save_firmware(job.id, b"\xff" * 10, variant="ota", root=firmware_dir)
+        await ta.queue.mark_firmware_stored(job.id)
+
+        resp = await ta.post(
+            f"/api/v1/jobs/{job.id}/result",
+            json={"status": "success", "ota_result": None},
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status == 200
+
+        await asyncio.sleep(0)
+        assert push_calls == [], (
+            "download_only must suppress the server-side OTA push even when "
+            "server_ota is somehow also set"
+        )
+    finally:
+        await ta.close()
+
+
 # ---------------------------------------------------------------------------
 # SOTA.2 — _server_ota_push body (bundle extraction, esphome upload argv,
 # ping6 preflight, timeout, and failure branches). The tests above only

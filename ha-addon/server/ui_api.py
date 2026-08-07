@@ -2502,9 +2502,18 @@ async def start_compile(request: web.Request) -> web.Response:
         # SOTA.3: auto-detect Thread targets. Thread devices use IPv6 mesh
         # only reachable from the HA host, so any OTA must be server-side.
         # Any worker can compile; the server performs the actual flash.
+        #
+        # download_only wins over both the auto-detection and an explicit
+        # server_ota request: it means "compile and hand me the binary, do
+        # not touch the device". Letting server_ota through here would run
+        # _server_ota_push once the compile lands and flash a device the
+        # user explicitly asked us not to flash.
         _target_meta = get_device_metadata(cfg.config_dir, target)
         _is_thread = _target_meta.get("network_type") == "thread"
-        effective_server_ota = _is_thread or bool(body.get("server_ota", False))
+        effective_server_ota = (
+            not download_only
+            and (_is_thread or bool(body.get("server_ota", False)))
+        )
 
         from settings import get_settings as _gs  # noqa: PLC0415
         from git_versioning import get_head as _get_head  # noqa: PLC0415
