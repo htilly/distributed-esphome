@@ -626,13 +626,21 @@ async def _server_ota_push(app: web.Application, job: object) -> None:
         return
     esphome_bin: str = _scanner._server_esphome_bin
 
+    # Only the OTA-safe shapes are valid here. "factory" is the full flash
+    # image (bootloader + partition table + app at absolute offsets, meant
+    # for a first flash via serial/esptool) — pushing it through the OTA
+    # protocol writes the wrong bytes into the OTA partition and can fail
+    # verification at the device's finalize step. "firmware" is the
+    # pre-#69 legacy synthetic name for the same OTA-safe shape as "ota".
     ota_binary = (
         firmware_storage.read_firmware(job_id, variant="ota")
         or firmware_storage.read_firmware(job_id, variant="firmware")
-        or firmware_storage.read_firmware(job_id, variant="factory")
     )
     if not ota_binary:
-        logger.error("Server OTA %s: no firmware binary found in storage", job_id)
+        logger.error(
+            "Server OTA %s: no OTA-safe firmware binary found in storage "
+            "(a factory-only image can't be safely pushed via OTA)", job_id,
+        )
         await queue.patch_ota_result(job_id, "failed")
         return
 
@@ -648,7 +656,13 @@ async def _server_ota_push(app: web.Application, job: object) -> None:
     try:
         with tempfile.TemporaryDirectory(prefix=f"sota-{job_id[:8]}-") as tmpdir:
             with tarfile.open(fileobj=io.BytesIO(bundle_bytes), mode="r:gz") as tf:
-                tf.extractall(tmpdir)
+                # Same safer extraction as the worker's extract_bundle()
+                # (client.py) — filter="data" strips path-traversal/symlink
+                # tricks a malicious or corrupted bundle could otherwise use.
+                try:
+                    tf.extractall(tmpdir, filter="data")
+                except TypeError:
+                    tf.extractall(tmpdir)  # Python < 3.12
 
             target_yaml = Path(tmpdir) / target
             if not target_yaml.exists():

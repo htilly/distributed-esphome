@@ -1047,6 +1047,12 @@ class JobQueue:
             if log:
                 job.log = (job.log or "") + "\n--- Server OTA ---\n" + log
             self._persist()
+            # JH.2: upsert history row so the new ota_result lands there too
+            # (mirrors the OTA-patch branch in submit_result) — without
+            # this, the History tab stayed stuck on the NULL ota_result the
+            # initial compile-success call wrote, even after server OTA
+            # completed.
+            self._record_history(job)
 
     async def update_status(self, job_id: str, status_text: str) -> bool:
         """Update the in-progress status text for a running job (not persisted)."""
