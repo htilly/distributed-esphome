@@ -30,3 +30,14 @@ icmplib>=3.0.4
 
 # Transitive of requests/aiohttp; floor bumped to clear PYSEC-2026-215 (fix in 3.15).
 idna>=3.19
+
+# Transitive of aioesphomeapi / noiseprotocol / chacha20poly1305-reuseable
+# (the Noise-encrypted ESPHome API path). Floor bumped to clear
+# PYSEC-2026-3552 / CVE-2026-69247 — a Bleichenbacher oracle in PKCS#7
+# EnvelopedData decryption (pkcs7_decrypt_der/_pem/_smime), introduced in
+# 44.0.0 and fixed in 50.0.0. Fleet never calls those APIs; the only reason
+# cryptography is in the image is the Noise handshake, so this was never
+# exploitable here. Bumped rather than PY-7-ignored because 50.0.0 resolves
+# cleanly against our pins — an ignore would have to be re-justified on
+# every future audit run, and a real fix does not.
+cryptography>=50
