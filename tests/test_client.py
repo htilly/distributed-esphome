@@ -1109,6 +1109,27 @@ def test_collect_firmware_variants_espidf_native_layout(tmp_path):
     assert variants["ota"].read_bytes() == b"ota"
 
 
+def test_collect_firmware_variants_espidf_native_ota_bin_layout(tmp_path):
+    """Regression: ESPHome 2026.7's esp32c6 native ESP-IDF build emits
+    firmware.ota.bin instead of firmware.bin for the OTA-safe shape.
+    Before this fix, only firmware.bin was checked, so the ota variant
+    was silently dropped — only factory got archived, and server-side
+    OTA (_server_ota_push) failed before it could even ping the device
+    since it requires an ota/firmware variant to exist in storage."""
+    import client as client_mod  # noqa: PLC0415 — see section note above
+
+    device_dir = tmp_path / ".esphome" / "build" / "testdevice" / "build"
+    device_dir.mkdir(parents=True)
+    (device_dir / "firmware.factory.bin").write_bytes(b"factory")
+    (device_dir / "firmware.ota.bin").write_bytes(b"ota")
+
+    variants = client_mod._collect_firmware_variants(str(tmp_path), "testdevice")
+
+    assert variants.keys() == {"factory", "ota"}
+    assert variants["factory"].read_bytes() == b"factory"
+    assert variants["ota"].read_bytes() == b"ota"
+
+
 def test_collect_firmware_variants_missing_returns_empty(tmp_path, caplog):
     """Neither layout present: returns {} and logs a warning, doesn't raise."""
     import client as client_mod  # noqa: PLC0415 — see section note above
