@@ -62,3 +62,22 @@ WORKER_DISK_BLOCK_EXIT_PCT = 90
 # before this fix. The floor only starts gating above ~300 GiB, which is
 # exactly where a percentage-only rule stops being meaningful.
 WORKER_DISK_FREE_FLOOR_BYTES = 15 * 1024 ** 3
+# Server-side OTA push (api._server_ota_push) timeout thresholds. Thread OTA
+# can legitimately take minutes for a sub-1MB image on a slow/lossy mesh
+# (observed live: a 900KB image took 195s over a link with 0.9-2.4s ping
+# RTT) — a flat total-duration timeout kills a transfer that's still
+# actively progressing, just slowly. Progress-based instead: read the
+# subprocess's output incrementally and reset the idle clock on every
+# chunk received (including --dashboard's periodic "Uploading: NN%"
+# frames — ESPHome's ProgressBar is otherwise a no-op over a piped,
+# non-tty stdout). Only genuine silence for SERVER_OTA_IDLE_TIMEOUT
+# seconds counts as stuck.
+SERVER_OTA_IDLE_TIMEOUT = 90  # seconds — matches espota2.py's own 90s
+                              # per-operation socket timeout during
+                              # transfer, so waiting longer than that with
+                              # zero bytes back is a reasonable "it's dead"
+                              # signal, not just a slow link.
+# Absolute safety ceiling even while progress keeps happening — a
+# pathological case (a device dribbling output forever) shouldn't tie up
+# the job indefinitely.
+SERVER_OTA_ABSOLUTE_TIMEOUT = 1800  # seconds (30 minutes)

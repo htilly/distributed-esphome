@@ -716,6 +716,60 @@ async def test_compile_address_too_long_returns_400(tmp_path, _enable_socket):
         await ta.close()
 
 
+@pytest.mark.parametrize(
+    "bad_address",
+    [
+        "-f",                  # ping flood flag
+        "--help",              # argparse would consume this as a flag
+        "-i0.001",             # ping interval flag, no space needed
+        "192.168.1.10 extra",  # embedded whitespace splits nothing (argv) but
+                               # is not a real address either
+        "not a hostname!",
+        "-",
+    ],
+)
+async def test_compile_address_rejects_non_address_values(tmp_path, _enable_socket, bad_address):
+    """The override lands as an argv entry for ``esphome upload --device``
+    and, on a server_ota job, for the server-side pre-flight ping. Neither
+    goes through a shell, so this is not command injection — but both parse
+    a leading dash as a flag, so a value like ``-f`` would be interpreted
+    instead of dialled. Only literal IPs and real hostnames get through."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "a.yaml", "a")
+        resp = await ta.post(
+            "/ui/api/compile",
+            json={"targets": ["a.yaml"], "address": bad_address},
+        )
+        assert resp.status == 400, f"{bad_address!r} should be rejected"
+        body = await resp.json()
+        assert "IP address or hostname" in body["error"]
+    finally:
+        await ta.close()
+
+
+@pytest.mark.parametrize(
+    "good_address",
+    ["192.168.1.10", "fd00::1", "device.local", "esp-node", "host.example.com."],
+)
+async def test_compile_address_accepts_ips_and_hostnames(tmp_path, _enable_socket, good_address):
+    """Complement: the shapes device_poller actually produces (IPv4/IPv6
+    literals) and the ones a user reasonably types (mDNS name, bare host,
+    FQDN with trailing root dot) must all still be accepted."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "a.yaml", "a")
+        resp = await ta.post(
+            "/ui/api/compile",
+            json={"targets": ["a.yaml"], "address": good_address},
+        )
+        assert resp.status == 200, f"{good_address!r} should be accepted"
+        jobs = ta.app["queue"].get_all()
+        assert jobs[0].ota_address == good_address
+    finally:
+        await ta.close()
+
+
 async def test_compile_address_empty_falls_through_to_auto_resolve(tmp_path, _enable_socket):
     """DM.3: an empty/whitespace address is treated as "no override" — the
     auto-resolved value (or none) is used as if the field was absent."""
@@ -1334,6 +1388,124 @@ async def test_compile_defaults_download_only_to_false(tmp_path):
         assert resp.status == 200
         job = ta.queue.get_all()[0]
         assert job.download_only is False
+    finally:
+        await ta.close()
+
+
+# ---------------------------------------------------------------------------
+# SOTA.3 — auto-detect Thread targets as server_ota at enqueue time
+# ---------------------------------------------------------------------------
+
+async def test_compile_auto_detects_thread_target_as_server_ota(tmp_path):
+    """A target whose metadata reports network_type=='thread' is enqueued
+    with server_ota=True even though the caller never asked for it —
+    Thread devices are only OTA-reachable from the HA host."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "thread-dev.yaml", "thread-dev")
+        with patch(
+            "ui_api.get_device_metadata",
+            return_value={"network_type": "thread"},
+        ):
+            resp = await ta.post("/ui/api/compile", json={"targets": ["thread-dev.yaml"]})
+        assert resp.status == 200
+        jobs = ta.queue.get_all()
+        assert len(jobs) == 1
+        assert jobs[0].server_ota is True
+    finally:
+        await ta.close()
+
+
+async def test_compile_non_thread_target_not_auto_server_ota(tmp_path):
+    """A wifi/ethernet target is not force-flagged server_ota — the normal
+    worker-performs-OTA flow is unaffected by SOTA.3's auto-detection."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "wifi-dev.yaml", "wifi-dev")
+        with patch(
+            "ui_api.get_device_metadata",
+            return_value={"network_type": "wifi"},
+        ):
+            resp = await ta.post("/ui/api/compile", json={"targets": ["wifi-dev.yaml"]})
+        assert resp.status == 200
+        jobs = ta.queue.get_all()
+        assert len(jobs) == 1
+        assert jobs[0].server_ota is False
+    finally:
+        await ta.close()
+
+
+async def test_compile_non_thread_target_honors_explicit_server_ota(tmp_path):
+    """A non-Thread target with server_ota explicitly requested in the body
+    still gets server_ota=True — auto-detection ORs with, not replaces, the
+    caller's explicit flag."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "wifi-dev.yaml", "wifi-dev")
+        with patch(
+            "ui_api.get_device_metadata",
+            return_value={"network_type": "wifi"},
+        ):
+            resp = await ta.post(
+                "/ui/api/compile",
+                json={"targets": ["wifi-dev.yaml"], "server_ota": True},
+            )
+        assert resp.status == 200
+        jobs = ta.queue.get_all()
+        assert len(jobs) == 1
+        assert jobs[0].server_ota is True
+    finally:
+        await ta.close()
+
+
+async def test_compile_download_only_beats_thread_auto_detection(tmp_path):
+    """download_only means "compile and hand me the binary, don't touch the
+    device". Thread auto-detection must not override that — otherwise the
+    server pushes OTA once the compile lands and flashes a device the user
+    explicitly asked us not to flash."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "thread-dev.yaml", "thread-dev")
+        with patch(
+            "ui_api.get_device_metadata",
+            return_value={"network_type": "thread"},
+        ):
+            resp = await ta.post(
+                "/ui/api/compile",
+                json={"targets": ["thread-dev.yaml"], "download_only": True},
+            )
+        assert resp.status == 200
+        jobs = ta.queue.get_all()
+        assert len(jobs) == 1
+        assert jobs[0].download_only is True
+        assert jobs[0].server_ota is False, (
+            "a download-only job must never be flagged for a server-side OTA push"
+        )
+    finally:
+        await ta.close()
+
+
+async def test_compile_download_only_beats_explicit_server_ota(tmp_path):
+    """Same precedence when the caller asks for both explicitly: the
+    no-touch request wins over the flash request."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "wifi-dev.yaml", "wifi-dev")
+        with patch(
+            "ui_api.get_device_metadata",
+            return_value={"network_type": "wifi"},
+        ):
+            resp = await ta.post(
+                "/ui/api/compile",
+                json={
+                    "targets": ["wifi-dev.yaml"],
+                    "download_only": True,
+                    "server_ota": True,
+                },
+            )
+        assert resp.status == 200
+        jobs = ta.queue.get_all()
+        assert jobs[0].server_ota is False
     finally:
         await ta.close()
 

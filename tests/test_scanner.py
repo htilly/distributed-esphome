@@ -11,6 +11,7 @@ import pytest
 
 from scanner import (
     _extract_metadata,
+    _fill_missing_metadata,
     build_name_to_target_map,
     create_bundle,
     create_stub_yaml,
@@ -1983,3 +1984,72 @@ def test_ensure_esphome_installed_no_longer_refuses_old_versions(monkeypatch):
     _scanner._esphome_install_failed = False
     _scanner.ensure_esphome_installed("2026.3.3", versions_base=Path("/tmp/test_esphome_versions"))
     assert reached["vm"] is True, "ensure_esphome_installed bailed before reaching VersionManager"
+
+
+# ---------------------------------------------------------------------------
+# SOTA.3 — _fill_missing_metadata network_type fallback (d6bc650)
+#
+# get_device_metadata's raw-YAML fallback runs when full ESPHome resolution
+# fails or hasn't finished yet at enqueue time. Without this, a Thread device
+# hitting the fallback path got network_type=None -> server_ota=False -> the
+# worker attempted a direct OTA over an IPv6 mesh it can't reach. Precedence
+# mirrors _extract_metadata: openthread > ethernet > wifi.
+# ---------------------------------------------------------------------------
+
+
+def _blank_fill_meta() -> dict:
+    return {
+        "friendly_name": None,
+        "device_name": None,
+        "device_name_raw": None,
+        "comment": None,
+        "area": None,
+        "project_name": None,
+        "project_version": None,
+        "has_web_server": False,
+        "network_type": None,
+    }
+
+
+def test_fill_missing_metadata_detects_openthread_as_thread():
+    result = _blank_fill_meta()
+    _fill_missing_metadata({"openthread": {}}, result)
+    assert result["network_type"] == "thread"
+
+
+def test_fill_missing_metadata_detects_ethernet():
+    result = _blank_fill_meta()
+    _fill_missing_metadata({"ethernet": {}}, result)
+    assert result["network_type"] == "ethernet"
+
+
+def test_fill_missing_metadata_detects_wifi():
+    result = _blank_fill_meta()
+    _fill_missing_metadata({"wifi": {}}, result)
+    assert result["network_type"] == "wifi"
+
+
+def test_fill_missing_metadata_openthread_takes_precedence():
+    result = _blank_fill_meta()
+    _fill_missing_metadata({"openthread": {}, "ethernet": {}, "wifi": {}}, result)
+    assert result["network_type"] == "thread"
+
+
+def test_fill_missing_metadata_ethernet_takes_precedence_over_wifi():
+    result = _blank_fill_meta()
+    _fill_missing_metadata({"ethernet": {}, "wifi": {}}, result)
+    assert result["network_type"] == "ethernet"
+
+
+def test_fill_missing_metadata_does_not_overwrite_already_resolved_network_type():
+    """Never overwrites a value the full ESPHome resolution already set."""
+    result = _blank_fill_meta()
+    result["network_type"] = "wifi"
+    _fill_missing_metadata({"openthread": {}}, result)
+    assert result["network_type"] == "wifi"
+
+
+def test_fill_missing_metadata_no_network_block_leaves_none():
+    result = _blank_fill_meta()
+    _fill_missing_metadata({}, result)
+    assert result["network_type"] is None
