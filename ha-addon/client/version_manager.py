@@ -37,6 +37,97 @@ if (
 # Minimum free disk percentage before we start evicting versions
 MIN_FREE_DISK_PCT = int(os.environ.get("MIN_FREE_DISK_PCT", "10"))
 
+
+def _install_timeout_from_env() -> int:
+    """Seconds to allow one ``pip install esphome==X`` attempt (#193).
+
+    The 300 s default is sized for "slow ARM host" (see
+    ``VersionManager._PIP_INSTALL_TIMEOUT``), but slow has no upper bound:
+    the reporter of #193 measured ~14 minutes for a full ESPHome install on
+    a Zimaboard, where every attempt hit the wall and the version could
+    never finish installing at all. There is nothing the user can do about
+    that from the UI, so make the ceiling an env var like every other
+    worker knob (``MIN_FREE_DISK_PCT``, ``JOB_TIMEOUT``, …).
+
+    Floor of 60 s: below that even a warm-cache install on a fast host
+    starts flaking, and a too-low value fails in a way that looks like a
+    network problem rather than a misconfiguration. A bad value warns and
+    falls back rather than crashing the worker at import time — this runs
+    before any of the worker's own error handling exists.
+    """
+    raw = os.environ.get("ESPHOME_INSTALL_TIMEOUT")
+    if raw is None or not raw.strip():
+        return 300
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "ESPHOME_INSTALL_TIMEOUT=%r is not an integer — using 300s", raw,
+        )
+        return 300
+    if value < 60:
+        logger.warning(
+            "ESPHOME_INSTALL_TIMEOUT=%ds is below the 60s floor — using 60s", value,
+        )
+        return 60
+    return value
+
+
+ESPHOME_INSTALL_TIMEOUT = _install_timeout_from_env()
+
+
+# pip reports a Python-floor mismatch in two places, and neither one says
+# "your image is too old" — which is what the user actually needs to hear.
+_PY_FLOOR_MARKER = "require a different python version"
+_NO_DIST_MARKER = "no matching distribution found"
+
+
+def diagnose_pip_failure(version: str, stdout: str, stderr: str) -> str | None:
+    """Turn a pip install failure into one actionable sentence, or None (#240).
+
+    #240 was reported as "Latest version not available": the UI offered
+    ESPHome 2026.7.3, every job pinned to it died, and the log was a
+    200-version wall ending in ``No matching distribution found for
+    esphome==2026.7.3``. Read literally that says the release doesn't exist.
+    It does — pip had silently filtered it out because ESPHome 2026.7 raised
+    its Python floor to 3.12 and the shipped worker image was still on 3.11,
+    so every 2026.7.x candidate was excluded before the version match ran
+    and the list simply stopped at 2026.6.5.
+
+    The underlying incompatibility was fixed in 1.7.2 (images moved to
+    Python 3.13), but the *message* is what made it take a round-trip to
+    diagnose, and the failure mode recurs on its own schedule: ESPHome will
+    raise its floor again, and a worker running a stale image will hit this
+    exact wall each time. Name the cause and the fix instead of pasting the
+    version list. Same reasoning as #114's bind-conflict message.
+
+    Returns None for ordinary failures (typo'd version, unreachable index),
+    which keep the existing generic error — a wrong guess here would be
+    worse than no guess.
+    """
+    blob = f"{stdout}\n{stderr}".lower()
+    if _NO_DIST_MARKER not in blob:
+        return None
+    running = f"{sys.version_info.major}.{sys.version_info.minor}"
+    if _PY_FLOOR_MARKER in blob:
+        return (
+            f"ESPHome {version} cannot be installed: it requires a newer "
+            f"Python than this worker's {running}. pip excluded every "
+            f"matching release before looking at the version number, which "
+            f"is why the log says 'no matching distribution' for a release "
+            f"that does exist. Update the worker's Docker image (or the "
+            f"add-on, for the built-in worker) — the Python version is "
+            f"baked into the image and cannot be changed at runtime. "
+            f"Pinning an older ESPHome version is the workaround (#240)."
+        )
+    return (
+        f"ESPHome {version} was not found on the package index. Check the "
+        f"version exists on PyPI and that this worker can reach the index "
+        f"(running Python {running}); if the release is recent, an outdated "
+        f"worker image whose Python is below ESPHome's floor produces this "
+        f"same message (#240)."
+    )
+
 # #119 (round 2): the in-container local worker shares
 # ``/data/esphome-versions/`` with the server's lazy-installed bundling
 # venv (see ``main.py``'s ``ESPHOME_VERSIONS_DIR=/data/esphome-versions``
@@ -191,7 +282,9 @@ class VersionManager:
     # Bug #127: default (None / unbounded) caused "uv installation via pip
     # timed out" reports on HAOS 2026.4.4 — pip's own socket-level timeout is
     # separate from this subprocess timeout, so this bounds the whole install.
-    _PIP_INSTALL_TIMEOUT = 300  # seconds
+    # #193: raise it with ``ESPHOME_INSTALL_TIMEOUT`` when 300 s isn't enough
+    # (slow single-board hosts have been measured at ~14 min).
+    _PIP_INSTALL_TIMEOUT = ESPHOME_INSTALL_TIMEOUT  # seconds
 
     def _install(self, version: str) -> None:
         """Create a venv and install esphome==version into it.
@@ -282,6 +375,12 @@ class VersionManager:
             # Non-zero exit is a hard failure (bad version, bad index, etc.) —
             # don't retry, it won't help.
             shutil.rmtree(str(venv_dir), ignore_errors=True)
+            diagnosis = diagnose_pip_failure(
+                version, result.stdout or "", result.stderr or "",
+            )
+            if diagnosis:
+                logger.error("%s", diagnosis)
+                raise RuntimeError(f"{diagnosis}\n\n{stderr_excerpt}")
             raise RuntimeError(
                 f"pip install esphome=={version} failed (exit {result.returncode}):\n"
                 f"{stderr_excerpt}"

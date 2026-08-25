@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import os
 import re
@@ -1809,7 +1810,49 @@ def create_app() -> web.Application:
 # Entrypoint
 # ---------------------------------------------------------------------------
 
+def bind_conflict_message(port: int) -> str:
+    """Explain an ``EADDRINUSE`` on *port* in terms a user can act on (#114).
+
+    The bind failure is raised out of ``web.run_app`` *after* aiohttp has
+    already run the ``on_shutdown`` handlers, so the log ends with a
+    tidy-looking shutdown sequence (scheduler stopped, mDNS unregistered,
+    poller stopped) and only then the traceback. Reporters read that as
+    "something told the add-on to stop" and go looking in the wrong place
+    — #114 took four rounds of back-and-forth to land on the real cause.
+
+    The port is not user-changeable under Supervisor: ``ingress_port`` in
+    ``config.yaml`` is read once at add-on install and the server has to
+    bind exactly it or Ingress breaks. The port field in the add-on's
+    Configuration tab only relabels the host-side mapping, which does
+    nothing here because the add-on runs with ``host_network: true``.
+    Saying so up front stops the next reporter from "fixing" it there.
+    """
+    return (
+        f"Cannot bind to port {port} — address already in use. Fleet for ESPHome "
+        f"runs on the host network, so any other process holding {port} blocks it. "
+        "The most common culprit is the OpenThread Border Router add-on, which is "
+        "also host-networked and binds this port "
+        "(`ha addons stop core_openthread_border_router` to check). "
+        "Changing the port in this add-on's Configuration tab will NOT help — "
+        "Home Assistant Ingress pins the port the server binds inside the "
+        "container. Free the port on the host instead. "
+        "Note: the shutdown messages logged just above are this process cleaning "
+        "up after the failed bind, not a stop request."
+    )
+
+
+def run_server(app: web.Application, port: int) -> None:
+    """Serve *app* on *port*, turning a port clash into a readable error (#114)."""
+    try:
+        web.run_app(app, host="0.0.0.0", port=port)
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE:
+            logger.critical("%s", bind_conflict_message(port))
+            sys.exit(1)
+        raise
+
+
 if __name__ == "__main__":
     cfg = AppConfig.load()
     app = create_app()
-    web.run_app(app, host="0.0.0.0", port=cfg.port)
+    run_server(app, cfg.port)

@@ -143,6 +143,26 @@ Home Assistant's add-on store shows each add-on's "stars" — a score based on h
 
 Everything else stays at Supervisor's defaults. The `options` / `schema` blocks are intentionally empty because every user-facing setting lives in the in-app Settings drawer (editable without an add-on restart); see the Add-on configuration section above.
 
+## Troubleshooting
+
+### The add-on won't start: "address already in use"
+
+Fleet needs port **8765** free on the host. It runs on the host network and
+Home Assistant Ingress pins the port it listens on, so the port field in the
+Configuration tab can't move it — the port has to be free.
+
+The usual cause is the **OpenThread Border Router** add-on, which is also
+host-networked and binds the same port. Stopping it releases the port:
+
+```
+ha addons stop core_openthread_border_router
+```
+
+If the log ends with what looks like a clean shutdown (scheduler stopped, mDNS
+unregistered) followed by a traceback, that's Fleet cleaning up after the
+failed bind — not something asking it to stop. Look for the line beginning
+*"Cannot bind to port 8765"* just below it.
+
 ## Support
 
 If this add-on has saved you time or frustration, you can support continued development:

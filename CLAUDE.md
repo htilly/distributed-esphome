@@ -61,6 +61,7 @@ Key worker env vars:
 | `MAX_PARALLEL_JOBS` | `2` | Concurrent build jobs per worker (0 = paused). Server-spawned local worker defaults to `1` on fresh install unless the user has configured it via the UI (persisted in `/data/local_worker_slots`) — #99. |
 | `HOSTNAME` | system hostname | Worker name shown in UI |
 | `ESPHOME_SEED_VERSION` | — | Pre-install this ESPHome version at startup |
+| `ESPHOME_INSTALL_TIMEOUT` | `300` | Seconds per `pip install esphome==X` attempt. Raise on slow single-board hosts (#193); floored at 60 |
 | `ESPHOME_BIN` | — | Use this binary instead of the version-manager venvs |
 | `HOST_PLATFORM` | — | Override detected OS in UI (e.g. `macOS 15.3 (Apple M1 Pro)`) |
 
