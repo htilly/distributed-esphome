@@ -1849,6 +1849,91 @@ async def test_submit_result_download_only_never_triggers_server_ota_push(tmp_pa
         await ta.close()
 
 
+@pytest.mark.asyncio
+async def test_submit_result_requires_server_ota_flips_flag_and_triggers_push(tmp_path, monkeypatch):
+    """SOTA.5: a job enqueued with server_ota=False (a normal WiFi/Ethernet
+    target) still triggers _server_ota_push if the worker's result says
+    requires_server_ota=True — i.e. the worker determined at runtime it
+    couldn't reach the device and asked the server to push centrally. The
+    job's server_ota flag must also flip to True so downstream UI/history
+    treat it identically to a statically-detected Thread job."""
+    import firmware_storage
+    firmware_dir = tmp_path / "firmware"
+    monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
+
+    push_calls: list = []
+
+    async def _fake_push(app, job):
+        push_calls.append(job.id)
+
+    monkeypatch.setattr(api_module, "_server_ota_push", _fake_push)
+
+    ta = await _make_app(tmp_path)
+    try:
+        job = await ta.queue.enqueue(
+            target="wifi-dev.yaml", esphome_version="2026.4.3", run_id="r",
+            timeout_seconds=300, server_ota=False, ota_address="192.0.2.5",
+        )
+        assert job is not None
+        assert job.server_ota is False
+        await _register(ta, hostname="w")
+        await ta.queue.claim_next("any-client")
+
+        # Upload firmware (needed for trigger condition)
+        firmware_storage.save_firmware(job.id, b"\xff" * 10, variant="ota", root=firmware_dir)
+        await ta.queue.mark_firmware_stored(job.id)
+
+        resp = await ta.post(
+            f"/api/v1/jobs/{job.id}/result",
+            json={"status": "success", "ota_result": None, "requires_server_ota": True},
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status == 200
+
+        # Allow the async task to run
+        await asyncio.sleep(0)
+        assert push_calls == [job.id]
+        assert ta.queue.get(job.id).server_ota is True
+    finally:
+        await ta.close()
+
+
+@pytest.mark.asyncio
+async def test_submit_result_requires_server_ota_false_on_failed_status_does_not_flip(tmp_path, monkeypatch):
+    """A failed compile with requires_server_ota=True (shouldn't normally
+    happen — the worker only sets it on success) must not flip server_ota
+    or schedule a push; there's no firmware to push anyway."""
+    push_calls: list = []
+
+    async def _fake_push(app, job):
+        push_calls.append(job.id)
+
+    monkeypatch.setattr(api_module, "_server_ota_push", _fake_push)
+
+    ta = await _make_app(tmp_path)
+    try:
+        job = await ta.queue.enqueue(
+            target="wifi-dev.yaml", esphome_version="2026.4.3", run_id="r",
+            timeout_seconds=300, server_ota=False, ota_address="192.0.2.5",
+        )
+        assert job is not None
+        await _register(ta, hostname="w")
+        await ta.queue.claim_next("any-client")
+
+        resp = await ta.post(
+            f"/api/v1/jobs/{job.id}/result",
+            json={"status": "failed", "requires_server_ota": True},
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status == 200
+
+        await asyncio.sleep(0)
+        assert push_calls == []
+        assert ta.queue.get(job.id).server_ota is False
+    finally:
+        await ta.close()
+
+
 # ---------------------------------------------------------------------------
 # SOTA.2 — _server_ota_push body (bundle extraction, esphome upload argv,
 # ping6 preflight, timeout, and failure branches). The tests above only
@@ -1860,11 +1945,13 @@ class _FakeStdout:
     """Stand-in for proc.stdout (an asyncio.StreamReader)."""
 
     def __init__(self, sequence: list):
-        # Each item is bytes (served whole on the next read()) or the
-        # string "HANG" (sleeps far longer than any test timeout, so a
-        # caller wrapping read() in asyncio.wait_for genuinely times out —
-        # simulates a stalled transfer). Exhausting the sequence yields
-        # EOF (b""), like a real closed stdout pipe.
+        # Each item is bytes (served whole on the next read()), the string
+        # "HANG" (sleeps far longer than any test timeout, so a caller
+        # wrapping read() in asyncio.wait_for genuinely times out —
+        # simulates a stalled transfer), or the string "RAISE" (raises a
+        # generic error, simulating an unexpected stream failure that
+        # isn't a timeout). Exhausting the sequence yields EOF (b""), like
+        # a real closed stdout pipe.
         self._sequence = list(sequence)
 
     async def read(self, n: int = -1) -> bytes:
@@ -1874,6 +1961,8 @@ class _FakeStdout:
         if item == "HANG":
             await asyncio.sleep(3600)
             return b""
+        if item == "RAISE":
+            raise ConnectionError("stream reset")
         return item
 
 
@@ -1973,6 +2062,46 @@ async def test_server_ota_push_success_uploads_and_records_result(tmp_path, monk
     assert upload_cmd[7].endswith("testdevice.yaml")
 
     fake_poller.refresh_target.assert_called_once_with("testdevice.yaml")
+
+
+async def test_server_ota_push_uses_plain_ping_for_ipv4_address(tmp_path, monkeypatch, _fake_server_esphome):
+    """SOTA.5: this path now also serves ordinary WiFi/Ethernet devices
+    (worker-unreachable fallback), where ota_address is IPv4, not the
+    IPv6-only literal Thread/Matter always resolves to. The pre-flight
+    ping must use plain `ping`, not `ping6` — the latter fails outright
+    against an IPv4 address with 'Address family for hostname not
+    supported' rather than actually probing it (live prod hit,
+    2026-08-06)."""
+    import firmware_storage
+    firmware_dir = tmp_path / "firmware"
+    monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
+
+    queue = JobQueue(queue_file=tmp_path / "queue.json")
+    job = await queue.enqueue(
+        target="testdevice.yaml", esphome_version="2026.4.3", run_id="r",
+        timeout_seconds=300, server_ota=True, ota_address="172.16.205.181",
+    )
+    assert job is not None
+    firmware_storage.save_firmware(job.id, b"\xff" * 10, variant="ota", root=firmware_dir)
+
+    calls: list[list[str]] = []
+
+    async def _fake_subprocess_exec(*cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[0] in ("ping", "ping6"):
+            return _FakeProc(0, b"3 packets transmitted, 3 received")
+        return _FakeProc(0, b"Upload successful")
+
+    fake_poller = AsyncMock()
+    app = await _push_app(tmp_path, queue, device_poller=fake_poller)
+
+    with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())), \
+         patch("asyncio.create_subprocess_exec", new=_fake_subprocess_exec):
+        await api_module._server_ota_push(app, job)
+
+    ping_cmd = calls[0]
+    assert ping_cmd[0] == "ping", f"expected plain ping for an IPv4 address, got {ping_cmd}"
+    assert ping_cmd[-1] == "172.16.205.181"
 
 
 async def test_server_ota_push_ping_failure_still_attempts_upload(tmp_path, monkeypatch, _fake_server_esphome):
@@ -2092,6 +2221,45 @@ async def test_server_ota_push_absolute_cap_kills_even_with_progress(tmp_path, m
     updated = queue.get(job.id)
     assert updated.ota_result == "failed"
     assert "absolute cap" in (updated.log or "")
+
+
+async def test_server_ota_push_kills_upload_on_unexpected_stream_error(
+    tmp_path, monkeypatch, _fake_server_esphome,
+):
+    """A read() failure that isn't a timeout (e.g. a reset stream) hits the
+    generic `except Exception` handler, not the stuck-reason path. The
+    upload subprocess must still be killed there too -- otherwise it can
+    outlive the `TemporaryDirectory` it's reading the OTA binary from."""
+    import firmware_storage
+    firmware_dir = tmp_path / "firmware"
+    monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
+
+    queue = JobQueue(queue_file=tmp_path / "queue.json")
+    job = await queue.enqueue(
+        target="testdevice.yaml", esphome_version="2026.4.3", run_id="r",
+        timeout_seconds=300, server_ota=True, ota_address="fd00::1",
+    )
+    assert job is not None
+    firmware_storage.save_firmware(job.id, b"\xff" * 10, variant="ota", root=firmware_dir)
+
+    # returncode=None simulates a process that's still running when the
+    # unexpected exception hits -- a real subprocess wouldn't yet have a
+    # returncode at that point.
+    upload_proc = _FakeProc(None, stdout_sequence=[b"Connecting...\n", "RAISE"])
+
+    async def _fake_subprocess_exec(*cmd, **kwargs):
+        return _FakeProc(0, b"ok") if cmd[0] == "ping6" else upload_proc
+
+    app = await _push_app(tmp_path, queue)
+
+    with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())), \
+         patch("asyncio.create_subprocess_exec", new=_fake_subprocess_exec):
+        await api_module._server_ota_push(app, job)
+
+    assert upload_proc.killed is True, "subprocess must be killed on the generic exception path too"
+    updated = queue.get(job.id)
+    assert updated.ota_result == "failed"
+    assert "subprocess error" in (updated.log or "")
 
 
 async def test_server_ota_push_reports_upload_progress_via_status_text(tmp_path, monkeypatch, _fake_server_esphome):

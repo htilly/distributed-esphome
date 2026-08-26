@@ -20,7 +20,7 @@ From 1.6.2, installing this add-on pulls a prebuilt image from GitHub Container 
 
 1. Your existing ESPHome configs in `/config/esphome/` are picked up automatically — you should see them on the **Devices** tab.
 2. The add-on includes a **built-in local worker** that runs inside the HA host. It starts with one build slot — enough to compile any target sequentially. On a fast host you can raise it to 2–4+ via the `+`/`-` buttons next to `local-worker` on the **Workers** tab. Setting slots to 0 pauses the local worker entirely (useful if you've connected remote workers and want the HA host out of the build loop).
-3. To offload compilation to a faster machine, click **+ Connect Worker** in the Workers tab. Pick **Bash**, **PowerShell**, or **Docker Compose**, copy the generated snippet, and run it on whatever machine you want to compile on. The snippet includes your actual server URL and token, so there's nothing to edit. Workers poll the add-on over HTTP for jobs (bearer token auth) and push firmware directly to ESP devices; no inbound ports need to be open on the worker machine, but it does need network reach to the ESP devices it'll flash. **Thread/Matter devices are an exception** — their IPv6 mesh is only reachable from the HA host, so the add-on performs the OTA push for those targets automatically; any worker can still do the compile.
+3. To offload compilation to a faster machine, click **+ Connect Worker** in the Workers tab. Pick **Bash**, **PowerShell**, or **Docker Compose**, copy the generated snippet, and run it on whatever machine you want to compile on. The snippet includes your actual server URL and token, so there's nothing to edit. Workers poll the add-on over HTTP for jobs (bearer token auth) and push firmware directly to ESP devices; no inbound ports need to be open on the worker machine, but it does need network reach to the ESP devices it'll flash. **Thread/Matter devices are an exception** — their IPv6 mesh is only reachable from the HA host, so the add-on performs the OTA push for those targets automatically; any worker can still do the compile. If a worker can't reach a device at all — a different VLAN, a firewall in the way — it now detects that automatically and falls back to the same behavior: it compiles the firmware and hands the OTA push to the add-on instead of failing the job.
 4. **Restart Home Assistant** once after the first install. The add-on ships a custom HA integration (`esphome_fleet`) that it auto-installs to `/config/custom_components/` on startup — but Home Assistant only loads integrations at Core startup, so the integration stays dormant until you restart HA. Go to **Settings → System → Restart** and pick *Restart Home Assistant*.
 5. After the restart, Home Assistant will pop a "Fleet for ESPHome discovered" notification within a few seconds. Accept it to get all the devices, workers, and the add-on itself as real HA devices with entities.
 
@@ -85,6 +85,18 @@ docker compose up -d
 **Full re-install** (needed when upgrading across a `MIN_IMAGE_VERSION` bump, or when changing host platform, max-parallel-jobs, or token): remove the old container and re-run the snippet from **+ Connect Worker**. The built-in Connect Worker modal always emits a snippet that matches the currently-deployed server.
 
 **Automating refreshes.** We deliberately don't ship an auto-update mechanism — every option adds a dependency (Watchtower, What's Up Docker, Compose + cron, Kubernetes controllers…) we'd then have to support. Pick whatever scheduler you already use on the host and have it run the refresh command on a cadence you're comfortable with. We don't endorse a specific tool.
+
+### When a worker can't reach a device
+
+Before starting an upgrade, a worker makes a quick connection test against the device it's about to flash. If the device doesn't answer, the worker compiles the firmware anyway and hands the upload to the add-on, which is usually on a network with a clearer path to your devices. The same handoff happens if the connection test passes but the upload itself fails partway through — a weak Wi-Fi link, for example. Either way you get a finished upgrade instead of a failed job, and the Queue tab shows **Server OTA** while the add-on takes over.
+
+This is on by default and there's nothing to configure. If it gets in the way — a network where the test is unreliable, or you'd rather a worker always did its own uploads — set `OTA_REACHABILITY_CHECK=0` on the worker container:
+
+```bash
+docker run -e OTA_REACHABILITY_CHECK=0 … ghcr.io/weirded/esphome-dist-client:latest
+```
+
+Turning it off means a worker that genuinely can't reach a device will fail the job rather than hand it over. Thread/Matter devices are unaffected either way — those are always uploaded by the add-on.
 
 ## Verifying what you're running
 

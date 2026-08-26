@@ -723,9 +723,29 @@ async def _server_ota_push(app: web.Application, job: Job) -> None:
 
             # Pre-flight ping to surface connectivity issues early in the log.
             # Runs on the server (HA host), not on the compile worker.
+            #
+            # SOTA.5: this path used to be Thread/Matter-only, where
+            # ota_addr is always a resolved IPv6 literal (fd00::...) — a
+            # hardcoded ping6 made sense. Now that ordinary WiFi/Ethernet
+            # devices can also land here (worker-unreachable fallback),
+            # ota_addr is just as often IPv4, and ping6 against an IPv4
+            # address fails immediately with "Address family for hostname
+            # not supported" rather than actually pinging. Pick the right
+            # binary based on the address itself; a hostname (not a
+            # literal IP — shouldn't normally happen since device_poller
+            # always resolves to a literal, but be defensive) falls back
+            # to plain ping.
+            # Lazy imports — neither is module-level in api.py, and both are
+            # only needed on this server-side OTA push path, not the common
+            # compile-only job path most jobs take.
+            import ipaddress as _ipaddress  # noqa: PLC0415
             import socket as _socket  # noqa: PLC0415
             server_hostname = _socket.gethostname()
-            ping_cmd = ["ping6", "-c", "3", "-W", "5", ota_addr]
+            try:
+                is_ipv6 = isinstance(_ipaddress.ip_address(ota_addr), _ipaddress.IPv6Address)
+            except ValueError:
+                is_ipv6 = False
+            ping_cmd = ["ping6" if is_ipv6 else "ping", "-c", "3", "-W", "5", ota_addr]
             logger.info(
                 "Server OTA %s: pinging %s from server (%s)",
                 job_id, ota_addr, server_hostname,
@@ -771,6 +791,7 @@ async def _server_ota_push(app: web.Application, job: Job) -> None:
                 "Server OTA %s (%s): %s", job_id, target, " ".join(cmd)
             )
             ota_log = f"--- ping {ota_addr} from server ({server_hostname}) ---\n{ping_log}\n"
+            proc: asyncio.subprocess.Process | None = None
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
@@ -838,6 +859,15 @@ async def _server_ota_push(app: web.Application, job: Job) -> None:
             except Exception as exc:
                 ota_ok = False
                 ota_log += f"Server OTA subprocess error: {exc}"
+                # An exception here (a bad read, a queue.update_status
+                # failure propagating unexpectedly, etc.) can leave `proc`
+                # still running while the surrounding `TemporaryDirectory`
+                # is about to be cleaned up out from under it — it's
+                # reading the OTA binary from that directory. Kill it
+                # rather than let an `esphome upload` outlive its tmpdir.
+                if proc is not None and proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
     except Exception:
         logger.exception("Server OTA %s: unexpected error during OTA push", job_id)
         await queue.patch_ota_result(job_id, "failed")
@@ -877,7 +907,10 @@ async def submit_job_result(request: web.Request) -> web.Response:
     if job and job.assigned_client_id:
         registry.set_job(job.assigned_client_id, None)
 
-    ok = await queue.submit_result(job_id, msg.status, msg.log, msg.ota_result)
+    ok = await queue.submit_result(
+        job_id, msg.status, msg.log, msg.ota_result,
+        requires_server_ota=msg.requires_server_ota,
+    )
     if not ok:
         return _protocol_error("job_not_found_or_wrong_state", status=404)
 
