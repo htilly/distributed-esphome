@@ -1493,11 +1493,16 @@ def _detect_ota_ports(target_path: str) -> list[int]:
     # images don't have it, and this runs inline in the job-execution
     # path where an ImportError would abandon the job mid-flight
     # rather than degrade gracefully (that happened: #248 hotfix).
-    # Also needs zero YAML semantics here (no !secret/!lambda
-    # resolution, no type coercion) — just "which lines belong to the
-    # ota: block" — so a line-based indentation scan is both simpler
-    # and more robust than a parse would be for this specific use.
-    import re as _re  # noqa: PLC0415
+    # But this isn't just an availability problem: `!secret` is
+    # ubiquitous in real `ota:`-adjacent config, and `yaml.safe_load`
+    # has no constructor for it — it would raise even on a worker where
+    # PyYAML *is* installed. So don't "fix" this by reaching for
+    # `try: import yaml / except ImportError` — that still breaks on
+    # any config using `!secret`. Also needs zero YAML semantics here
+    # (no !secret/!lambda resolution, no type coercion) — just "which
+    # lines belong to the ota: block" — so a line-based indentation
+    # scan is both simpler and more robust than a parse would be for
+    # this specific use.
 
     try:
         with open(target_path, encoding="utf-8", errors="replace") as f:
@@ -1514,7 +1519,7 @@ def _detect_ota_ports(target_path: str) -> list[int]:
         if not line[0].isspace():
             # Top-level key — enter the block only for an exact `ota:` match
             # (avoids `otavar:` or similar false positives).
-            in_ota_block = bool(_re.match(r"^ota\s*:", line))
+            in_ota_block = bool(re.match(r"^ota\s*:", line))
             continue
         if in_ota_block:
             ota_block_lines.append(line)
@@ -1532,7 +1537,7 @@ def _detect_ota_ports(target_path: str) -> list[int]:
     # dict.fromkeys rather than set() so the declared order is preserved —
     # the first-declared port is tried first, and the probe timeout is
     # per-port.
-    ports = [int(p) for p in _re.findall(r"port:\s*(\d+)", "".join(ota_block_lines))]
+    ports = [int(p) for p in re.findall(r"port:\s*(\d+)", "".join(ota_block_lines))]
     if ports:
         return list(dict.fromkeys(ports))
     return [3232, 8266]

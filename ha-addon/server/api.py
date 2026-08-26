@@ -735,6 +735,9 @@ async def _server_ota_push(app: web.Application, job: Job) -> None:
             # literal IP — shouldn't normally happen since device_poller
             # always resolves to a literal, but be defensive) falls back
             # to plain ping.
+            # Lazy imports — neither is module-level in api.py, and both are
+            # only needed on this server-side OTA push path, not the common
+            # compile-only job path most jobs take.
             import ipaddress as _ipaddress  # noqa: PLC0415
             import socket as _socket  # noqa: PLC0415
             server_hostname = _socket.gethostname()
@@ -788,6 +791,7 @@ async def _server_ota_push(app: web.Application, job: Job) -> None:
                 "Server OTA %s (%s): %s", job_id, target, " ".join(cmd)
             )
             ota_log = f"--- ping {ota_addr} from server ({server_hostname}) ---\n{ping_log}\n"
+            proc: asyncio.subprocess.Process | None = None
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
@@ -855,6 +859,15 @@ async def _server_ota_push(app: web.Application, job: Job) -> None:
             except Exception as exc:
                 ota_ok = False
                 ota_log += f"Server OTA subprocess error: {exc}"
+                # An exception here (a bad read, a queue.update_status
+                # failure propagating unexpectedly, etc.) can leave `proc`
+                # still running while the surrounding `TemporaryDirectory`
+                # is about to be cleaned up out from under it — it's
+                # reading the OTA binary from that directory. Kill it
+                # rather than let an `esphome upload` outlive its tmpdir.
+                if proc is not None and proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
     except Exception:
         logger.exception("Server OTA %s: unexpected error during OTA push", job_id)
         await queue.patch_ota_result(job_id, "failed")

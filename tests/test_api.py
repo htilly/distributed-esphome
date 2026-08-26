@@ -1945,11 +1945,13 @@ class _FakeStdout:
     """Stand-in for proc.stdout (an asyncio.StreamReader)."""
 
     def __init__(self, sequence: list):
-        # Each item is bytes (served whole on the next read()) or the
-        # string "HANG" (sleeps far longer than any test timeout, so a
-        # caller wrapping read() in asyncio.wait_for genuinely times out —
-        # simulates a stalled transfer). Exhausting the sequence yields
-        # EOF (b""), like a real closed stdout pipe.
+        # Each item is bytes (served whole on the next read()), the string
+        # "HANG" (sleeps far longer than any test timeout, so a caller
+        # wrapping read() in asyncio.wait_for genuinely times out —
+        # simulates a stalled transfer), or the string "RAISE" (raises a
+        # generic error, simulating an unexpected stream failure that
+        # isn't a timeout). Exhausting the sequence yields EOF (b""), like
+        # a real closed stdout pipe.
         self._sequence = list(sequence)
 
     async def read(self, n: int = -1) -> bytes:
@@ -1959,6 +1961,8 @@ class _FakeStdout:
         if item == "HANG":
             await asyncio.sleep(3600)
             return b""
+        if item == "RAISE":
+            raise ConnectionError("stream reset")
         return item
 
 
@@ -2217,6 +2221,45 @@ async def test_server_ota_push_absolute_cap_kills_even_with_progress(tmp_path, m
     updated = queue.get(job.id)
     assert updated.ota_result == "failed"
     assert "absolute cap" in (updated.log or "")
+
+
+async def test_server_ota_push_kills_upload_on_unexpected_stream_error(
+    tmp_path, monkeypatch, _fake_server_esphome,
+):
+    """A read() failure that isn't a timeout (e.g. a reset stream) hits the
+    generic `except Exception` handler, not the stuck-reason path. The
+    upload subprocess must still be killed there too -- otherwise it can
+    outlive the `TemporaryDirectory` it's reading the OTA binary from."""
+    import firmware_storage
+    firmware_dir = tmp_path / "firmware"
+    monkeypatch.setattr(firmware_storage, "DEFAULT_FIRMWARE_DIR", firmware_dir)
+
+    queue = JobQueue(queue_file=tmp_path / "queue.json")
+    job = await queue.enqueue(
+        target="testdevice.yaml", esphome_version="2026.4.3", run_id="r",
+        timeout_seconds=300, server_ota=True, ota_address="fd00::1",
+    )
+    assert job is not None
+    firmware_storage.save_firmware(job.id, b"\xff" * 10, variant="ota", root=firmware_dir)
+
+    # returncode=None simulates a process that's still running when the
+    # unexpected exception hits -- a real subprocess wouldn't yet have a
+    # returncode at that point.
+    upload_proc = _FakeProc(None, stdout_sequence=[b"Connecting...\n", "RAISE"])
+
+    async def _fake_subprocess_exec(*cmd, **kwargs):
+        return _FakeProc(0, b"ok") if cmd[0] == "ping6" else upload_proc
+
+    app = await _push_app(tmp_path, queue)
+
+    with patch("api.create_bundle_async", new=AsyncMock(return_value=_make_test_bundle())), \
+         patch("asyncio.create_subprocess_exec", new=_fake_subprocess_exec):
+        await api_module._server_ota_push(app, job)
+
+    assert upload_proc.killed is True, "subprocess must be killed on the generic exception path too"
+    updated = queue.get(job.id)
+    assert updated.ota_result == "failed"
+    assert "subprocess error" in (updated.log or "")
 
 
 async def test_server_ota_push_reports_upload_progress_via_status_text(tmp_path, monkeypatch, _fake_server_esphome):
