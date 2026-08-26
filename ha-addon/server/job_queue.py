@@ -987,6 +987,49 @@ class JobQueue:
                         self._record_history(j)
             return affected
 
+    async def release_for_retry(self, job_id: str, reason: str) -> bool:
+        """Put a claimed job back to PENDING without burning a real failure (#247).
+
+        Used when the *server* couldn't hand the job over for a reason that
+        has nothing to do with the job — specifically, a compile dispatched
+        during the 1–3 minute window where the server's ESPHome venv is still
+        lazy-installing. That failure is transient by construction: the same
+        job succeeds on the next poll a few seconds later.
+
+        Before this existed the job was failed outright with "Fix the YAML
+        error above", pointing the user at a config that was never wrong. It
+        is not an exotic path — it is what you hit immediately after changing
+        your pinned ESPHome version, and it recurs every time upstream
+        ESPHome publishes a release (twice in the 1.7.3 → 1.8 cycle alone).
+
+        Bounded by the same ``MAX_RETRIES`` as the timeout path so a genuinely
+        stuck install can't spin forever: past the cap the caller is told to
+        fail the job for real, with an honest message. Returns True if the job
+        went back to PENDING, False if the cap is reached (or the job is gone
+        / not WORKING, which means something else already moved it).
+        """
+        async with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job.state != JobState.WORKING:
+                return False
+            job.retry_count += 1
+            if job.retry_count >= MAX_RETRIES:
+                logger.warning(
+                    "Job %s: %s — retry cap %d reached, failing for real",
+                    job_id, reason, MAX_RETRIES,
+                )
+                return False
+            job.state = JobState.PENDING
+            job.assigned_client_id = None
+            job.assigned_hostname = None
+            job.assigned_at = None
+            logger.info(
+                "Job %s released back to PENDING: %s (retry %d/%d)",
+                job_id, reason, job.retry_count, MAX_RETRIES,
+            )
+            self._persist()
+            return True
+
     async def retry(
         self,
         job_ids: list[str],

@@ -143,7 +143,176 @@ Home Assistant's add-on store shows each add-on's "stars" — a score based on h
 
 Everything else stays at Supervisor's defaults. The `options` / `schema` blocks are intentionally empty because every user-facing setting lives in the in-app Settings drawer (editable without an add-on restart); see the Add-on configuration section above.
 
+## The Home Assistant integration
+
+The add-on installs a companion integration (`esphome_fleet`) into
+`/config/custom_components/` and registers itself for discovery, so Home
+Assistant offers to set it up on its own. It gives you entities for the fleet
+as a whole, for each managed device, and for each build worker.
+
+### How data updates
+
+The integration **polls** the add-on every **30 seconds**. There is no push
+channel — the add-on and Home Assistant are separate processes, and a poll on
+a local socket is cheap enough that a persistent connection would add failure
+modes without buying much.
+
+That means:
+
+- Entity values can be **up to 30 seconds behind** what the Fleet Web UI shows.
+  The Web UI refreshes once a second, so the two disagreeing briefly during a
+  compile is expected, not a fault.
+- **Compile events are derived from the poll, not streamed.** Each poll
+  compares the job queue against the previous one and fires an
+  `esphome_fleet_compile_complete` event for any job that has just reached a
+  terminal state. A compile that starts *and* finishes inside one 30-second
+  window still fires exactly one event when the poll catches it, so automations
+  will not miss it — but the event arrives when the poll runs, not the instant
+  the build ends.
+- **To force a refresh**, use the *Reload* action on the integration card
+  (**Settings → Devices & services → Fleet for ESPHome → ⋮ → Reload**). This
+  re-polls immediately rather than waiting out the interval.
+
+If every entity goes `unavailable`, the add-on is the thing to check first —
+the integration reports unavailable when it cannot reach it.
+
+### Examples
+
+Three automations to copy and adapt. Replace the entity IDs with your own —
+device entities are named after the device, so a device called `porch-sensor`
+gets `update.porch_sensor_firmware`.
+
+**1. Notify when any device has a firmware update pending**
+
+```yaml
+automation:
+  - alias: "ESPHome firmware update available"
+    trigger:
+      - trigger: state
+        entity_id: update.porch_sensor_firmware
+        attribute: latest_version
+    condition:
+      - condition: state
+        entity_id: update.porch_sensor_firmware
+        state: "on"
+    action:
+      - action: notify.persistent_notification
+        data:
+          title: "ESPHome update available"
+          message: >-
+            {{ state_attr('update.porch_sensor_firmware', 'title') }} can move to
+            {{ state_attr('update.porch_sensor_firmware', 'latest_version') }}.
+```
+
+**2. Compile a device on a schedule**
+
+Useful for rebuilding against a newer ESPHome without doing it by hand. The
+`target` is the YAML filename as it appears in `/config/esphome/`.
+
+```yaml
+automation:
+  - alias: "Weekly rebuild of the porch sensor"
+    trigger:
+      - trigger: time
+        at: "03:30:00"
+    condition:
+      - condition: time
+        weekday:
+          - sun
+    action:
+      - action: esphome_fleet.compile
+        data:
+          target: porch-sensor.yaml
+```
+
+**3. Warn when a build worker drops off**
+
+```yaml
+automation:
+  - alias: "Fleet worker went offline"
+    trigger:
+      - trigger: state
+        entity_id: binary_sensor.workshop_pc_online
+        from: "on"
+        to: "off"
+        for: "00:02:00"
+    action:
+      - action: notify.persistent_notification
+        data:
+          title: "Fleet worker offline"
+          message: "workshop-pc has been offline for two minutes."
+```
+
+The `for: "00:02:00"` matters — see the heartbeat note under Known limitations.
+
+The other services are `esphome_fleet.cancel` (stop a queued or running job)
+and `esphome_fleet.validate` (check a config without building it). Blueprint
+contributions are welcome; there are none published yet.
+
+### Known limitations
+
+- **Home Assistant must be restarted after an upgrade that changes the
+  integration.** HA Core only loads integration Python at boot, so restarting
+  the *add-on* alone is not enough. The changelog flags releases where this
+  applies.
+- **Entity data can lag the Web UI by up to 30 seconds** — see How data updates.
+- **Worker-offline detection has a 30-second heartbeat window.** A worker that
+  blips for less than that is never marked offline; one that pauses for around
+  45 seconds registers as offline and then online again. Put a `for:` on
+  automations that react to it rather than firing on the first transition.
+- **The Update entity does not distinguish factory from OTA images.** It
+  performs the ordinary OTA upgrade. If you need a factory image — a first
+  flash over serial, or recovering a device that will not accept OTA — use the
+  Web UI, which lets you pick the variant.
+- **Requires Home Assistant Core 2024.11 or newer.** This is not declared in
+  `manifest.json` because custom-integration manifests reject the
+  `homeassistant` key; it is enforced at runtime instead. On an older Core you
+  will get a traceback rather than a clean "unsupported version" message.
+- **The add-on image is not pinned by digest.** Supervisor's schema does not
+  currently allow `@sha256:` pinning for add-ons, so the image is referenced by
+  tag.
+- **The AppArmor profile is first-pass confinement.** It denies the obvious
+  things — reading other add-ons' secrets, `/proc/*/mem`, writes to
+  `/sys/kernel` — but file and network access is otherwise unrestricted. See
+  `SECURITY.md` for the threat model this does and does not cover.
+
+
 ## Troubleshooting
+
+### The integration card says "Reconfigure"
+
+The add-on's token was rotated, or its URL changed. Run the Reconfigure flow on
+the integration card (**Settings → Devices & services → Fleet for ESPHome → ⋮ →
+Reconfigure**) and enter the current URL; the token is picked up automatically
+when Fleet is running as an add-on on the same machine.
+
+### Entities are stuck at "unavailable"
+
+The integration cannot reach the add-on. Check, in order: the add-on is
+actually running (**Settings → Add-ons → Fleet for ESPHome**); its log has no
+startup error; and the URL on the integration card matches where the add-on is
+listening. After a Home Assistant restart, give it one 30-second poll before
+concluding anything.
+
+### Home Assistant never discovers the add-on
+
+Discovery uses mDNS. If Home Assistant and the add-on are on different subnets,
+or the router does not reflect mDNS between VLANs, the discovery card never
+appears. Add the integration manually instead — **Add integration → Fleet for
+ESPHome** — and type the add-on's URL.
+
+### The Reauth prompt keeps coming back
+
+Rare, and usually an entry whose stored credentials no longer match a rotated
+token. Delete the integration entry and add it again; nothing is lost, because
+device and worker entities are recreated from the add-on on the next poll.
+
+### A compile failed with "Fix the YAML error above" right after I changed the ESPHome version
+
+This should no longer happen. Fleet used to blame the config when a build was
+dispatched while it was still installing a newly-selected ESPHome version; it
+now waits and retries the job by itself. If you still see it, the message is
+about a genuine problem in that config.
 
 ### The add-on won't start: "address already in use"
 

@@ -25,12 +25,21 @@ def vm(tmp_path):
 
 
 def _add_fake_version(tmp_path: Path, version: str) -> None:
-    """Create a fake installed version directory with a stub esphome binary."""
+    """Create a fake installed version directory with a stub esphome binary.
+
+    Includes ``lib/python{M.N}/site-packages`` for the *running* interpreter.
+    A real venv always has it — it is what ``scanner._activate_esphome_venv``
+    prepends to ``sys.path`` — and since #243 ``_is_installed`` verifies the
+    venv was built by this Python, so a fixture without it represents a venv
+    that could not actually work.
+    """
     venv = tmp_path / version / "bin"
     venv.mkdir(parents=True, exist_ok=True)
     esphome = venv / "esphome"
     esphome.write_text("#!/bin/sh\necho fake esphome\n")
     esphome.chmod(0o755)
+    running = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    (tmp_path / version / "lib" / running / "site-packages").mkdir(parents=True, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------

@@ -226,7 +226,59 @@ class VersionManager:
         return self._venv_path(version) / "bin" / "esphome"
 
     def _is_installed(self, version: str) -> bool:
-        return self._esphome_bin(version).exists()
+        """True if *version*'s venv exists **and** was built by this interpreter.
+
+        #243: checking only that ``bin/esphome`` exists reports a venv built
+        by a *different* Python as installed. That happens in normal
+        operation — the add-on image's Python moves (3.11 → 3.13 in 1.7.2 for
+        ESPHome 2026.7's floor), or a rollback/stale-tag deploy puts an older
+        image on top of a `/data` a newer one wrote. The venv is then
+        unusable: ``scanner._activate_esphome_venv`` looks for
+        ``lib/python{running}/site-packages``, finds only the other version's,
+        logs "venv site-packages missing", and the UI says *"ESPHome X install
+        failed"* — with no reinstall ever attempted, because this function
+        kept insisting it was installed.
+
+        Treating a mismatch as not-installed lets the existing wipe-and-
+        rebuild path in ``_install`` self-heal it, which is the same theme as
+        the partial-venv recovery in PR #251.
+        """
+        if not self._esphome_bin(version).exists():
+            return False
+        return self._venv_matches_running_python(version)
+
+    def _venv_matches_running_python(self, version: str) -> bool:
+        """True if *version*'s venv holds a ``lib/python{M.N}/`` for us.
+
+        ``pyvenv.cfg`` also carries a ``version`` key, but it records the
+        *full* patch version of the interpreter that created the venv
+        (``3.13.1``), while what actually has to match is the ``M.N`` in the
+        ``site-packages`` path — a 3.13.1 → 3.13.2 base-image bump keeps the
+        same ``lib/python3.13/`` and must not force a needless rebuild. So
+        check the directory that gets imported from, not the cfg string.
+
+        Unreadable/absent ``lib/`` is treated as a mismatch: a venv we can't
+        verify is one we should rebuild rather than trust.
+        """
+        want = f"python{sys.version_info.major}.{sys.version_info.minor}"
+        lib_dir = self._venv_path(version) / "lib"
+        try:
+            names = [d.name for d in lib_dir.iterdir() if d.is_dir()]
+        except OSError:
+            logger.warning(
+                "ESPHome %s: cannot read %s to verify the venv interpreter — "
+                "treating as not installed so it gets rebuilt", version, lib_dir,
+            )
+            return False
+        if want in names:
+            return True
+        logger.warning(
+            "ESPHome %s venv was built by a different Python (found %s, this "
+            "image runs %s) — rebuilding. This is expected after an add-on "
+            "image update that changed the Python version (#243).",
+            version, ", ".join(sorted(names)) or "nothing", want,
+        )
+        return False
 
     def _evict_lru(self, keep_version: str | None = None) -> bool:
         """Remove the least-recently-used version from disk and LRU cache.

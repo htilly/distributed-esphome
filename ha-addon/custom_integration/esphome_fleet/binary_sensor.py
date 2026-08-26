@@ -98,7 +98,7 @@ class WorkerOnlineBinarySensor(_WorkerBinarySensorBase):
     # CR.7: promote worker-online to a primary state sensor. Users
     # build automations like "when all build workers are offline, alert
     # me"; DIAGNOSTIC hid it from the default entity picker.
-    _attr_name = "Online"
+    _attr_translation_key = "online"
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
 
     def __init__(
@@ -129,7 +129,7 @@ class WorkerWorkingBinarySensor(_WorkerBinarySensorBase):
     key (device-class names are HA-side translations).
     """
 
-    _attr_name = "Working"
+    _attr_translation_key = "working"
     _attr_device_class = BinarySensorDeviceClass.RUNNING
 
     def __init__(

@@ -554,6 +554,41 @@ async def get_next_job(request: web.Request) -> web.Response:
         # would leave the user staring at a greyed-out row with no
         # explanation.
         logger.exception("Failed to create bundle for job %s", job.id)
+
+        # #247: not every failure here is the user's YAML. Bundling imports
+        # the server's own lazy-installed ESPHome, so a compile dispatched
+        # during the 1-3 minute install window dies with
+        # `ModuleNotFoundError: No module named 'esphome'` — and then got
+        # told to go fix a config that was never wrong. That window opens
+        # every time the pinned ESPHome version changes, which the UI makes
+        # one click away, and every time upstream publishes a release; it
+        # hit the release smoke twice in the 1.7.3 -> 1.8 cycle.
+        #
+        # The server already knows the install is in flight, so don't just
+        # reword the message — put the job back and let the next poll pick
+        # it up, which is what a human would do. release_for_retry is
+        # bounded by MAX_RETRIES so a genuinely stuck install still lands on
+        # a real failure rather than spinning.
+        installing = _scanner.esphome_install_in_flight()
+        if _scanner.esphome_import_error(exc) or installing:
+            released = await queue.release_for_retry(
+                job.id, "server ESPHome still installing (#247)"
+            )
+            if released:
+                # 204 = "nothing for you right now". The worker polls again
+                # on its normal interval and the job is PENDING again.
+                return web.Response(status=204)
+            err_msg = (
+                f"Bundle creation failed for {job.target}: "
+                f"{type(exc).__name__}: {exc}\n\n"
+                "The server's ESPHome install did not become ready after "
+                "several retries. This is a server-side problem, not a "
+                "problem with this config — check the add-on log for "
+                "ESPHome install errors."
+            )
+            await queue.submit_result(job.id, "failed", log=err_msg)
+            return web.json_response({"error": "Bundle creation failed"}, status=500)
+
         err_msg = (
             f"Bundle creation failed for {job.target}: "
             f"{type(exc).__name__}: {exc}\n\n"

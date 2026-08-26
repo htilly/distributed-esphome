@@ -227,6 +227,32 @@ def get_esphome_version() -> str:
     return _get_installed_esphome_version()
 
 
+def esphome_install_in_flight() -> bool:
+    """True while the server's ESPHome venv is still being lazy-installed (#247).
+
+    Distinguishes "not ready yet" from "tried and failed": ``_esphome_ready``
+    is unset during the 1–3 minute first-boot install *and* after a failed
+    one, so the failure flag has to be consulted to tell them apart. Callers
+    use this to decide whether a downstream error is transient (retry will
+    succeed once the install lands) or a real problem to surface.
+    """
+    return not _esphome_ready.is_set() and not _esphome_install_failed
+
+
+def esphome_import_error(exc: BaseException) -> bool:
+    """True if *exc* is the server's own ESPHome venv not being importable (#247).
+
+    The bundle subprocess surfaces this as a ``RuntimeError`` wrapping the
+    child's stderr, so the ``ModuleNotFoundError`` arrives as text rather
+    than as an exception type we can catch. Matching the message is
+    deliberate: the alternative is treating every bundle failure during the
+    install window as transient, which would swallow real YAML errors a user
+    happened to hit at the wrong moment.
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    return "No module named 'esphome'" in text or "No module named \"esphome\"" in text
+
+
 def _get_installed_esphome_version() -> str:
     """Return the installed ESPHome version, or a diagnostic sentinel.
 

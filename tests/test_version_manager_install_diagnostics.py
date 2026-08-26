@@ -152,3 +152,78 @@ def test_diagnosis_is_case_insensitive():
     msg = _diagnose("2026.7.3", "", _PY_FLOOR_STDERR.upper())
     assert msg is not None
     assert "python" in msg.lower()
+
+
+# ---------------------------------------------------------------------------
+# #243 — a venv built by a different Python must not count as installed
+# ---------------------------------------------------------------------------
+#
+# `_is_installed` used to check only that `bin/esphome` existed. A venv built
+# by another interpreter therefore reported as installed, no reinstall was
+# attempted, and `scanner._activate_esphome_venv` then failed to find
+# `lib/python{running}/site-packages` — surfacing as "ESPHome X install
+# failed" with no path to recovery. Live repro: a stale 1.8.0-dev.2 image
+# (Python 3.11) deployed on top of a `/data` that a correct 3.13 image had
+# already populated.
+
+def _make_venv(tmp_path, version: str, pythons: list[str]):
+    """Build a fake version venv containing `lib/python*/` for each entry."""
+    from version_manager import VersionManager
+
+    base = tmp_path / "versions"
+    vm = VersionManager.__new__(VersionManager)
+    vm._base = base  # type: ignore[attr-defined]
+    venv = base / version
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "esphome").write_text("#!/bin/sh\n")
+    for py in pythons:
+        (venv / "lib" / py / "site-packages").mkdir(parents=True)
+    return vm
+
+
+def test_venv_from_this_interpreter_counts_as_installed(tmp_path):
+    running = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    vm = _make_venv(tmp_path, "2026.8.1", [running])
+    assert vm._is_installed("2026.8.1") is True
+
+
+def test_venv_from_another_interpreter_is_not_installed(tmp_path):
+    """The #243 case: 3.13-built venv, 3.11 image. Must rebuild, not claim OK."""
+    vm = _make_venv(tmp_path, "2026.8.1", ["python3.11", "python3.13"])
+    running = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    if running in ("python3.11", "python3.13"):
+        pytest.skip("running interpreter collides with the fixture versions")
+    assert vm._is_installed("2026.8.1") is False
+
+
+def test_patch_level_bump_does_not_force_a_rebuild(tmp_path):
+    """3.13.1 -> 3.13.2 keeps the same lib/python3.13/, so the venv is fine.
+    Checking pyvenv.cfg's full version string instead would churn a rebuild
+    on every base-image patch bump."""
+    running = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    vm = _make_venv(tmp_path, "2026.8.1", [running])
+    (tmp_path / "versions" / "2026.8.1" / "pyvenv.cfg").write_text(
+        "version = 9.9.9\nhome = /usr/local/bin\n"
+    )
+    assert vm._is_installed("2026.8.1") is True
+
+
+def test_missing_binary_is_still_not_installed(tmp_path):
+    running = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    vm = _make_venv(tmp_path, "2026.8.1", [running])
+    (tmp_path / "versions" / "2026.8.1" / "bin" / "esphome").unlink()
+    assert vm._is_installed("2026.8.1") is False
+
+
+def test_unreadable_lib_dir_is_treated_as_not_installed(tmp_path):
+    """A venv we can't verify is one to rebuild, not one to trust."""
+    from version_manager import VersionManager
+
+    base = tmp_path / "versions"
+    vm = VersionManager.__new__(VersionManager)
+    vm._base = base  # type: ignore[attr-defined]
+    venv = base / "2026.8.1"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "esphome").write_text("#!/bin/sh\n")
+    # No lib/ at all — a half-built venv.
+    assert vm._is_installed("2026.8.1") is False
