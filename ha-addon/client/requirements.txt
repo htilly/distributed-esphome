@@ -1,6 +1,12 @@
 requests>=2.34.2
 psutil>=7.2.2
 pydantic>=2.13.4
+# Security review 2026-08-27 (finding O-001): Ed25519 signature
+# verification for the worker self-update payload. Floor matches the
+# server's requirements.txt pin (cryptography>=50) so both sides speak the
+# same library version for this — no protocol-level version skew risk,
+# but keeping the pins identical avoids ever having to reason about it.
+cryptography>=50
 # #108 briefly added py-spy here. #189 replaced it with an in-process
 # frame walk (``client.py::_in_process_thread_dump``) — see the same
 # note in ``ha-addon/server/requirements.txt``.

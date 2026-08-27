@@ -1184,9 +1184,27 @@ async def get_client_code(request: web.Request) -> web.Response:
             files[path.name] = path.read_text(encoding="utf-8")
         except Exception:
             logger.exception("Failed to read worker file %s", path.name)
+
+    # Security review 2026-08-27 (finding O-001): sign the payload so a
+    # worker holding WORKER_TRUSTED_UPDATE_KEY (pinned via Connect Worker)
+    # can refuse to write+exec code from anyone who merely has the shared
+    # server_token — including an on-path attacker on the plaintext-HTTP
+    # default transport. See update_signing.py for the key-distribution
+    # rationale. Workers without the env var set still accept unsigned
+    # updates (see client._apply_update) — this is additive, not a default
+    # flip, so existing installs upgrade with zero behavior change until
+    # the operator opts in via Connect Worker.
+    import update_signing  # noqa: PLC0415
+    try:
+        signature = update_signing.sign_payload(files)
+    except Exception:
+        logger.exception("Failed to sign worker update payload — serving unsigned")
+        signature = None
+
     return web.json_response({
         "version": _get_server_client_version(),
         "files": files,
+        "signature": signature,
     })
 
 

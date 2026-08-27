@@ -545,6 +545,19 @@ async def get_server_info(request: web.Request) -> web.Response:
         esphome_install_status = "installing"
     from settings import get_settings as _gs  # noqa: PLC0415
     settings = _gs()
+    # Security review 2026-08-27 (finding O-001): the update-signing public
+    # key is not a secret (only the matching private key, held server-side
+    # only, authenticates anything) — it's handed to ConnectWorkerModal so
+    # a newly-enrolled worker can pin it as WORKER_TRUSTED_UPDATE_KEY. A
+    # failure here must never break server-info itself (workers/UI depend
+    # on this endpoint for basic status), so it degrades to null.
+    import update_signing  # noqa: PLC0415
+    try:
+        update_signing_public_key = update_signing.get_public_key_b64()
+    except Exception:
+        logger.exception("Failed to load/generate update-signing key")
+        update_signing_public_key = None
+
     return web.json_response({
         "token": settings.server_token,
         "port": cfg.port,
@@ -553,6 +566,7 @@ async def get_server_info(request: web.Request) -> web.Response:
         "server_client_version": addon_version,
         "addon_version": addon_version,
         "min_image_version": MIN_IMAGE_VERSION,
+        "update_signing_public_key": update_signing_public_key,
         # SE.8: ESPHome install lifecycle fields for the UI banner.
         "esphome_install_status": esphome_install_status,
         "esphome_server_version": _scanner.get_esphome_version(),
@@ -1701,6 +1715,23 @@ async def set_esphome_version_handler(request: web.Request) -> web.Response:
     if not version:
         return web.json_response({"error": "version is required"}, status=400)
 
+    # Security review 2026-08-27 (finding O-002): reject malformed version
+    # strings here too, not just at VersionManager._venv_path — this
+    # handler was previously the widest-open entrypoint into the path-
+    # traversal-to-rmtree chain (only the empty string was rejected).
+    # Validating at the ingress point turns a rejected request into an
+    # immediate, clear 400 instead of a silently-swallowed background
+    # executor failure (set_esphome_version() below still runs before the
+    # install; validate first so a bad value never gets that far).
+    import sys as _sys  # noqa: PLC0415
+    if "/app/client" not in _sys.path:
+        _sys.path.insert(0, "/app/client")
+    from version_manager import _validate_version  # noqa: PLC0415
+    try:
+        _validate_version(version)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
     set_esphome_version(version)
     _scanner._esphome_install_failed = False
     _scanner._esphome_ready.clear()
@@ -2101,6 +2132,22 @@ async def pin_target_version(request: web.Request) -> web.Response:
     version = body.get("version", "").strip()
     if not version:
         return web.json_response({"error": "version required"}, status=400)
+
+    # Security review 2026-08-27 (finding O-002): a pinned version isn't
+    # installed until a later compile job resolves it via
+    # ensure_version() → VersionManager._venv_path(), which is where the
+    # actual rmtree sink lives — but rejecting a malformed value here
+    # instead of accepting it into stored YAML metadata means the bad
+    # value never gets a chance to reach that sink later, on a worker,
+    # possibly hours after this request.
+    import sys as _sys  # noqa: PLC0415
+    if "/app/client" not in _sys.path:
+        _sys.path.insert(0, "/app/client")
+    from version_manager import _validate_version  # noqa: PLC0415
+    try:
+        _validate_version(version)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
 
     meta = read_device_meta(cfg.config_dir, filename)
     meta["pin_version"] = version

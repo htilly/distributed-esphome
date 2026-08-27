@@ -91,6 +91,48 @@ async def test_diagnostics_redacts_target_macs_and_worker_ids(_mock_hass, _mock_
     assert "build-pi" in flat
 
 
+async def test_diagnostics_redacts_server_info_token(_mock_hass, _mock_entry) -> None:
+    """Regression test for finding O-006 (2026-08-27 security review).
+
+    Attacker chain this closes: coordinator.data["server_info"] is the raw
+    JSON body of GET /ui/api/server-info, whose first field is the
+    fleet-wide worker bearer token — the same credential that authenticates
+    every /api/v1/* request and doubles as a system bearer on /ui/api/*.
+    Before this fix, that token was NOT in `_REDACT_COORDINATOR_DATA`, so a
+    user following Home Assistant's standard "Download diagnostics" support
+    workflow and attaching the result to a public GitHub issue (as the
+    project's own bug-report template invites) leaked the token in
+    plaintext to every reader — full worker-tier and system-bearer
+    compromise from reading a public issue, no exploit required.
+    """
+    from esphome_fleet.const import DOMAIN
+    from esphome_fleet.diagnostics import async_get_config_entry_diagnostics
+
+    coordinator = SimpleNamespace(
+        data={
+            "server_info": {
+                "token": "fleet-wide-bearer-do-not-leak",
+                "port": 8765,
+                "server_ip": "192.168.1.50",
+            },
+            "targets": [],
+            "workers": [],
+            "queue": [],
+        },
+        last_update_success=True,
+        update_interval=SimpleNamespace(total_seconds=lambda: 30.0),
+    )
+    _mock_hass.data[DOMAIN] = {_mock_entry.entry_id: coordinator}
+
+    diag = await async_get_config_entry_diagnostics(_mock_hass, _mock_entry)
+    flat = repr(diag)
+
+    assert "fleet-wide-bearer-do-not-leak" not in flat
+    # Non-sensitive sibling fields survive — this is a targeted redaction,
+    # not a wholesale drop of server_info (server_ip stays for support use).
+    assert "8765" in flat
+
+
 async def test_diagnostics_surfaces_coordinator_absent(_mock_hass, _mock_entry) -> None:
     """Setup failure or mid-unload: the coordinator isn't in ``hass.data``,
     but the diagnostics call must still return a shape the support

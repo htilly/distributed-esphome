@@ -46,10 +46,20 @@ function buildDockerCmd(params: {
   restartPolicy: string;
   clientTag: string;
   format: Format;
+  /**
+   * Security review 2026-08-27 (finding O-001): server's Ed25519 public
+   * key, base64. Pinning it here lets the worker verify future
+   * self-update payloads instead of trusting anything the shared
+   * SERVER_TOKEN alone can fetch. Omitted from the snippet when the
+   * server couldn't generate/load a key — the worker just falls back to
+   * accepting unsigned updates like it always has.
+   */
+  updateSigningPublicKey: string | null;
 }): string {
   const {
     serverUrl, token, containerName, hostname, maxJobs,
     seedVersion, hostPlatform, tags, diskQuotaGb, restartPolicy, clientTag, format,
+    updateSigningPublicKey,
   } = params;
 
   if (format === 'compose') {
@@ -58,6 +68,9 @@ function buildDockerCmd(params: {
       `      - SERVER_TOKEN=${token}`,
       `      - MAX_PARALLEL_JOBS=${maxJobs}`,
     ];
+    if (updateSigningPublicKey) {
+      envLines.push(`      - WORKER_TRUSTED_UPDATE_KEY=${updateSigningPublicKey}`);
+    }
     if (hostname) envLines.push(`      - HOSTNAME=${hostname}`);
     if (seedVersion) envLines.push(`      - ESPHOME_SEED_VERSION=${seedVersion}`);
     if (hostPlatform) envLines.push(`      - HOST_PLATFORM=${hostPlatform}`);
@@ -107,6 +120,9 @@ function buildDockerCmd(params: {
   lines.push(`  --hostname ${hostname || hostnameVar} ${cont}`);
   lines.push(`  -e SERVER_URL=${serverUrl} ${cont}`);
   lines.push(`  -e SERVER_TOKEN=${token} ${cont}`);
+  if (updateSigningPublicKey) {
+    lines.push(`  -e WORKER_TRUSTED_UPDATE_KEY=${updateSigningPublicKey} ${cont}`);
+  }
   lines.push(`  -e MAX_PARALLEL_JOBS=${maxJobs} ${cont}`);
   if (seedVersion) {
     lines.push(`  -e ESPHOME_SEED_VERSION=${seedVersion} ${cont}`);
@@ -235,6 +251,7 @@ export function ConnectWorkerModal({ serverInfo, esphomeVersion, onClose, preset
     restartPolicy,
     clientTag,
     format,
+    updateSigningPublicKey: serverInfo.update_signing_public_key ?? null,
   });
 
   function handleCopy() {
