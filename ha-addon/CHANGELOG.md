@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-*(1.8.0 development — nothing user-facing yet.)*
+**Build worker self-updates are now cryptographically signed.** When a remote worker fetches updated source code from the server, it now verifies a signature before applying it — closing a gap where anyone holding your fleet's worker token, or someone intercepting worker traffic, could have pushed unauthorized code to your build workers. Protection turns on automatically: the first time each worker updates after this release, it silently records the server's signing key, and every update after that must match it. No action needed for most installs.
+
+**⚠️ Remote build workers need one manual refresh to get this protection.** Verifying a signature requires a small new library that isn't present in worker images built before this release — so, similar to the Python-version bump in 1.7.2, a worker running an older image is now flagged **Image stale** in the Workers tab and pauses its automatic source-code updates until refreshed (it keeps compiling and flashing firmware normally in the meantime — this does not stop your fleet from working). Hover the badge for the exact `docker pull && docker restart` command, or use **+ Connect Worker** for a fresh setup snippet. The built-in worker updates automatically with the add-on — this only affects workers running on separate machines.
 
 ## 1.7.3
 
