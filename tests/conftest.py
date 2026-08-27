@@ -63,3 +63,20 @@ def _reset_auto_versioning_state():
             _main._auth_fail_suppressed.clear()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_update_signing_key(tmp_path, monkeypatch):
+    """O-001 (2026-08-27): update_signing.get_signing_key() lazily
+    generates+persists an Ed25519 key at update_signing._KEY_PATH, which
+    defaults to /data/update_signing_key.pem. Any test that touches
+    GET /api/v1/client/code or GET /ui/api/server-info (both call this)
+    would otherwise try to read/write that real path — redirect every
+    test to a throwaway location instead, same isolation
+    test_update_signing.py already applies for its own tests, just
+    globalized so no other test file has to remember to do it.
+    """
+    import update_signing
+
+    monkeypatch.setattr(update_signing, "_KEY_PATH", tmp_path / "update_signing_key.pem")
+    monkeypatch.setattr(update_signing, "_cached_key", None)
+
+

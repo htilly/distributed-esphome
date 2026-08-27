@@ -1,4 +1,5 @@
-"""Regression tests for finding O-001 (2026-08-27 security review).
+"""Regression tests for finding O-001 (2026-08-27 security review) and its
+same-day trust-on-first-update (TOFU) follow-up.
 
 Attacker chain this closes: the worker self-update channel
 (``GET /api/v1/client/code`` → ``client._apply_update``) wrote and
@@ -6,11 +7,18 @@ Attacker chain this closes: the worker self-update channel
 shared ``server_token`` — anyone holding that token, or an on-path
 attacker against the plaintext-HTTP default, could serve attacker-authored
 code and get it executed as root on every worker on the next heartbeat.
+
+The initial fix made verification opt-in via ``WORKER_TRUSTED_UPDATE_KEY``,
+which meant no existing worker was ever protected unless an operator
+manually reconnected it. The follow-up covered here makes protection
+automatic: a worker with no key pinned yet trusts its next update once
+(identical to pre-fix behavior — no regression) and pins the key it was
+given, so every update after that is verified with no operator action.
+
 These tests cover the server-side signing half (``update_signing.py``);
 ``test_update_signing_canonical_payload_matches.py`` covers the
-server/client encoding-agreement invariant, and the client-side
-verification behavior is covered directly in ``test_client.py``-adjacent
-tests below.
+server/client encoding-agreement invariant; the client-side verification
+and TOFU-pinning behavior is covered directly below.
 """
 
 from __future__ import annotations
@@ -100,7 +108,7 @@ def test_canonical_payload_is_order_independent():
 
 
 # ---------------------------------------------------------------------------
-# Client-side verification (client._verify_update_signature)
+# Client-side verification (client._verify_update_signature — pure verifier)
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
@@ -109,7 +117,19 @@ def _client_env(monkeypatch):
     monkeypatch.setenv("SERVER_TOKEN", "test-token")
 
 
-def test_verify_update_signature_accepts_valid_signature(monkeypatch):
+@pytest.fixture(autouse=True)
+def _isolated_trusted_key_file(tmp_path, monkeypatch):
+    """_trusted_update_key_path() resolves next to client.py's real
+    __file__ by default — never let a test touch the actual
+    ha-addon/client/.trusted_update_key on disk."""
+    import client as client_module  # noqa: PLC0415
+
+    fake_path = tmp_path / ".trusted_update_key"
+    monkeypatch.setattr(client_module, "_trusted_update_key_path", lambda: fake_path)
+    return fake_path
+
+
+def test_verify_update_signature_accepts_valid_signature():
     import update_signing
     import client as client_module  # noqa: PLC0415
 
@@ -117,11 +137,10 @@ def test_verify_update_signature_accepts_valid_signature(monkeypatch):
     signature_b64 = update_signing.sign_payload(files)
     pub_key_b64 = update_signing.get_public_key_b64()
 
-    monkeypatch.setattr(client_module, "WORKER_TRUSTED_UPDATE_KEY", pub_key_b64)
-    assert client_module._verify_update_signature(files, signature_b64) is True
+    assert client_module._verify_update_signature(files, signature_b64, pub_key_b64) is True
 
 
-def test_verify_update_signature_rejects_tampered_files(monkeypatch):
+def test_verify_update_signature_rejects_tampered_files():
     import update_signing
     import client as client_module  # noqa: PLC0415
 
@@ -130,11 +149,10 @@ def test_verify_update_signature_rejects_tampered_files(monkeypatch):
     pub_key_b64 = update_signing.get_public_key_b64()
 
     tampered = {"client.py": "os.system('rm -rf /')\n"}
-    monkeypatch.setattr(client_module, "WORKER_TRUSTED_UPDATE_KEY", pub_key_b64)
-    assert client_module._verify_update_signature(tampered, signature_b64) is False
+    assert client_module._verify_update_signature(tampered, signature_b64, pub_key_b64) is False
 
 
-def test_verify_update_signature_rejects_wrong_key(monkeypatch):
+def test_verify_update_signature_rejects_wrong_key():
     """Signed correctly, but by a DIFFERENT server's key — must not verify
     against a worker pinned to a different install's key."""
     import update_signing
@@ -155,44 +173,86 @@ def test_verify_update_signature_rejects_wrong_key(monkeypatch):
         )
     ).decode("ascii")
 
-    monkeypatch.setattr(client_module, "WORKER_TRUSTED_UPDATE_KEY", other_pub_b64)
-    assert client_module._verify_update_signature(files, signature_b64) is False
+    assert client_module._verify_update_signature(files, signature_b64, other_pub_b64) is False
 
 
-def test_verify_update_signature_rejects_missing_signature(monkeypatch):
+def test_verify_update_signature_rejects_missing_signature():
     import update_signing
     import client as client_module  # noqa: PLC0415
 
     pub_key_b64 = update_signing.get_public_key_b64()
-    monkeypatch.setattr(client_module, "WORKER_TRUSTED_UPDATE_KEY", pub_key_b64)
-    assert client_module._verify_update_signature({"client.py": "x"}, None) is False
+    assert client_module._verify_update_signature({"client.py": "x"}, None, pub_key_b64) is False
 
 
-def test_verify_update_signature_false_when_no_key_pinned(monkeypatch):
-    """No WORKER_TRUSTED_UPDATE_KEY set → verification is never even
-    attempted (caller decides what to do — see _apply_update's warn-and-
-    proceed fallback for unmigrated workers)."""
+def test_verify_update_signature_false_when_no_key_given():
     import client as client_module  # noqa: PLC0415
 
-    monkeypatch.setattr(client_module, "WORKER_TRUSTED_UPDATE_KEY", None)
-    assert client_module._verify_update_signature({"client.py": "x"}, "irrelevant") is False
+    assert client_module._verify_update_signature({"client.py": "x"}, "irrelevant", None) is False
 
 
-def test_apply_update_refuses_to_write_on_bad_signature(monkeypatch, tmp_path):
-    """End-to-end: a worker with a pinned key must return before it ever
-    reaches the file-write loop or os.execv when the signature check
-    fails — the actual sink the whole fix protects. Verification runs
-    before ``client_dir`` is even computed, so a failed check can't reach
-    disk regardless of where the real client files live."""
-    import update_signing
+# ---------------------------------------------------------------------------
+# Key resolution + TOFU persistence (client._load_pinned_update_key /
+# client._persist_pinned_update_key)
+# ---------------------------------------------------------------------------
+
+def test_load_pinned_update_key_returns_none_when_nothing_pinned():
     import client as client_module  # noqa: PLC0415
 
-    pub_key_b64 = update_signing.get_public_key_b64()
-    monkeypatch.setattr(client_module, "WORKER_TRUSTED_UPDATE_KEY", pub_key_b64)
-    # _update_attempts is process-global state in client.py; reset it so
-    # this test's outcome never depends on how many other tests in this
-    # session already called _apply_update.
+    assert client_module._load_pinned_update_key() is None
+
+
+def test_load_pinned_update_key_env_var_wins_when_set(monkeypatch):
+    import client as client_module  # noqa: PLC0415
+
+    monkeypatch.setattr(client_module, "WORKER_TRUSTED_UPDATE_KEY", "env-key-value")
+    # Even with a persisted file present, the env var must win.
+    client_module._trusted_update_key_path().write_text("file-key-value")
+    assert client_module._load_pinned_update_key() == "env-key-value"
+
+
+def test_persist_then_load_pinned_update_key(_isolated_trusted_key_file):
+    import client as client_module  # noqa: PLC0415
+
+    client_module._persist_pinned_update_key("some-b64-key")
+    assert _isolated_trusted_key_file.read_text() == "some-b64-key"
+    mode = _isolated_trusted_key_file.stat().st_mode & 0o777
+    assert mode == 0o600
+    assert client_module._load_pinned_update_key() == "some-b64-key"
+
+
+def test_persist_pinned_update_key_failure_does_not_raise(monkeypatch):
+    """Best-effort: a write failure must not propagate and block the
+    (already-trusted-this-once) update from being applied."""
+    import client as client_module  # noqa: PLC0415
+
+    def _boom():
+        raise PermissionError("read-only filesystem")
+
+    monkeypatch.setattr(client_module, "_trusted_update_key_path", _boom)
+    client_module._persist_pinned_update_key("some-b64-key")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# End-to-end _apply_update: the three-branch decision + the actual sink
+# ---------------------------------------------------------------------------
+
+def _reset_update_attempts(monkeypatch, client_module):
+    """_update_attempts is process-global state in client.py; reset it so
+    a test's outcome never depends on how many other tests in this
+    session already called _apply_update."""
     monkeypatch.setattr(client_module, "_update_attempts", 0)
+
+
+def test_apply_update_refuses_to_write_on_bad_signature(monkeypatch):
+    """A worker with a pinned key must return before it ever reaches the
+    file-write loop or os.execv when the signature check fails — the
+    actual sink the whole fix protects."""
+    import update_signing
+    import client as client_module  # noqa: PLC0415
+
+    pub_key_b64 = update_signing.get_public_key_b64()
+    monkeypatch.setattr(client_module, "WORKER_TRUSTED_UPDATE_KEY", pub_key_b64)
+    _reset_update_attempts(monkeypatch, client_module)
 
     class _FakeResp:
         def raise_for_status(self):
@@ -203,6 +263,7 @@ def test_apply_update_refuses_to_write_on_bad_signature(monkeypatch, tmp_path):
                 "version": "9.9.9-attacker",
                 "files": {"client.py": "import os; os.system('pwned')\n"},
                 "signature": "not-a-valid-signature-at-all==",
+                "update_signing_public_key": pub_key_b64,
             }
 
     monkeypatch.setattr(client_module, "get", lambda *a, **kw: _FakeResp())
@@ -219,3 +280,129 @@ def test_apply_update_refuses_to_write_on_bad_signature(monkeypatch, tmp_path):
 
     assert write_calls == []
     assert execv_calls == []
+
+
+def test_apply_update_bootstraps_tofu_pin_on_first_update(monkeypatch, tmp_path, _isolated_trusted_key_file):
+    """The core of the follow-up fix: a worker with NO key pinned yet
+    (env var unset, no persisted file) must still apply an update whose
+    signature it cannot check — same as pre-O-001 behavior, not a
+    regression — and must come out the other side having pinned the
+    server's offered key for next time.
+
+    Redirects client_dir (via __file__) to a scratch directory so both
+    the real .py write AND the real key-pin write happen for real,
+    against throwaway paths — rather than faking Path.write_text, which
+    would also swallow _persist_pinned_update_key's own write and make
+    this test unable to observe the thing it's testing.
+    """
+    import update_signing
+    import client as client_module  # noqa: PLC0415
+
+    scratch_dir = tmp_path / "client_dir"
+    scratch_dir.mkdir()
+    monkeypatch.setattr(client_module, "__file__", str(scratch_dir / "client.py"))
+
+    pub_key_b64 = update_signing.get_public_key_b64()
+    files = {"client.py": "print('legit update')\n"}
+    signature_b64 = update_signing.sign_payload(files)
+
+    monkeypatch.setattr(client_module, "WORKER_TRUSTED_UPDATE_KEY", None)
+    _reset_update_attempts(monkeypatch, client_module)
+    assert client_module._load_pinned_update_key() is None  # precondition
+
+    class _FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "version": "1.0.0",
+                "files": files,
+                "signature": signature_b64,
+                "update_signing_public_key": pub_key_b64,
+            }
+
+    monkeypatch.setattr(client_module, "get", lambda *a, **kw: _FakeResp())
+    execv_calls = []
+    monkeypatch.setattr(client_module.os, "execv", lambda *a: execv_calls.append(a))
+
+    client_module._apply_update("worker-1")
+
+    # The update was applied (execv reached) even though nothing was
+    # pinned yet to verify it against...
+    assert len(execv_calls) == 1
+    assert (scratch_dir / "client.py").read_text() == files["client.py"]
+    # ...and the key offered in this response is now pinned for next time.
+    assert client_module._load_pinned_update_key() == pub_key_b64
+
+
+def test_apply_update_second_update_after_bootstrap_requires_valid_signature(monkeypatch, _isolated_trusted_key_file):
+    """Proves the bootstrap pin actually bites: once a key is pinned (by
+    the previous test's scenario, reproduced here), a SUBSEQUENT update
+    with a bad signature must be refused, not silently trusted again."""
+    import update_signing
+    import client as client_module  # noqa: PLC0415
+
+    pub_key_b64 = update_signing.get_public_key_b64()
+    # Simulate: this worker already bootstrapped and pinned the key.
+    client_module._persist_pinned_update_key(pub_key_b64)
+    monkeypatch.setattr(client_module, "WORKER_TRUSTED_UPDATE_KEY", None)
+    _reset_update_attempts(monkeypatch, client_module)
+
+    class _FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "version": "2.0.0-attacker",
+                "files": {"client.py": "import os; os.system('pwned')\n"},
+                "signature": "not-a-valid-signature-at-all==",
+                "update_signing_public_key": pub_key_b64,
+            }
+
+    monkeypatch.setattr(client_module, "get", lambda *a, **kw: _FakeResp())
+    write_calls = []
+    monkeypatch.setattr(
+        client_module.Path, "write_text",
+        lambda self, *a, **kw: write_calls.append(self),
+    )
+    execv_calls = []
+    monkeypatch.setattr(client_module.os, "execv", lambda *a: execv_calls.append(a))
+
+    client_module._apply_update("worker-1")
+
+    assert write_calls == []
+    assert execv_calls == []
+
+
+def test_apply_update_unsigned_when_server_offers_no_key(monkeypatch, _isolated_trusted_key_file):
+    """A pre-O-001 server (no update_signing_public_key in the response
+    at all) must still work exactly as before this fix existed — no
+    key to pin, no verification possible, update still applies."""
+    import client as client_module  # noqa: PLC0415
+
+    monkeypatch.setattr(client_module, "WORKER_TRUSTED_UPDATE_KEY", None)
+    _reset_update_attempts(monkeypatch, client_module)
+
+    class _FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "version": "1.0.0",
+                "files": {"client.py": "print('legit')\n"},
+                # no "signature" / "update_signing_public_key" at all
+            }
+
+    monkeypatch.setattr(client_module, "get", lambda *a, **kw: _FakeResp())
+    monkeypatch.setattr(client_module.Path, "write_text", lambda self, *a, **kw: None)
+    execv_calls = []
+    monkeypatch.setattr(client_module.os, "execv", lambda *a: execv_calls.append(a))
+
+    client_module._apply_update("worker-1")
+
+    assert len(execv_calls) == 1
+    # Nothing to pin — still unpinned afterward.
+    assert client_module._load_pinned_update_key() is None

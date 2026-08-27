@@ -1724,6 +1724,26 @@ def create_app() -> web.Application:
                 "ESPHOME_VERSIONS_DIR": "/data/esphome-versions",
                 "HOSTNAME": "local-worker",
             }
+            # Security review 2026-08-27 (finding O-001): the local worker
+            # can never go through the Connect Worker enrollment flow (it's
+            # a subprocess, not a Docker container someone connects), so
+            # it's the one worker WORKER_TRUSTED_UPDATE_KEY can't reach via
+            # the env var. get_client_code's TOFU bootstrap (see
+            # client._apply_update) covers it in principle too, but in
+            # practice the whole add-on container — server and this
+            # subprocess both — always restarts together from the same
+            # image, so the local worker's version never drifts from the
+            # server's and _apply_update's version-mismatch trigger rarely
+            # if ever fires for it. Setting the key directly at spawn time
+            # means it's pinned regardless, defense-in-depth for whatever
+            # future path does trigger an update here. Never block local-
+            # worker startup on this — degrade to no key (same as an
+            # unpinned worker) if signing-key load/generation fails.
+            try:
+                from update_signing import get_public_key_b64 as _get_update_key  # noqa: PLC0415
+                local_env["WORKER_TRUSTED_UPDATE_KEY"] = _get_update_key()
+            except Exception:
+                logger.exception("Failed to load update-signing key for local worker")
             # Capture the embedded worker's stderr to a rotating-ish
             # tail file under /data so next-time-this-breaks is
             # diagnosable. #193: previously DEVNULL'd both streams, so
