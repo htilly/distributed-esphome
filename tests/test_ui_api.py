@@ -2220,6 +2220,48 @@ async def test_set_esphome_version_rejects_missing_version(tmp_path):
         await ta.close()
 
 
+async def test_set_esphome_version_rejects_path_traversal(tmp_path):
+    """Regression test for finding O-002 (2026-08-27 security review).
+
+    Before this fix, this handler only rejected the empty string — a
+    version string like "../../../data" reached VersionManager._venv_path
+    unvalidated, and _install() unconditionally shutil.rmtree()s whatever
+    that resolves to. With the container running as root and /config
+    mounted read-write, this was a one-request path to deleting the user's
+    Home Assistant configuration tree. Confirm the ingress handler now
+    rejects it with a clean 400 rather than scheduling the install.
+    """
+    ta = await _make_ui_app(tmp_path)
+    try:
+        import scanner as scanner_module
+        with patch.object(scanner_module, "ensure_esphome_installed") as fake_ensure:
+            resp = await ta.post(
+                "/ui/api/esphome-version", json={"version": "../../../data"},
+            )
+            assert resp.status == 400
+            fake_ensure.assert_not_called()
+    finally:
+        await ta.close()
+
+
+async def test_pin_target_version_rejects_path_traversal(tmp_path):
+    """Regression test for finding O-002 (2026-08-27 security review) —
+    same attacker chain as test_set_esphome_version_rejects_path_traversal,
+    reached via the per-target pin endpoint instead. A malicious pinned
+    value written into device YAML metadata here would otherwise sit
+    dormant until a later compile job resolves it via ensure_version() on
+    a worker — rejecting at pin time means it never gets that chance."""
+    ta = await _make_ui_app(tmp_path)
+    try:
+        _write_config(ta.config_dir, "device1.yaml", "device1")
+        resp = await ta.post(
+            "/ui/api/targets/device1.yaml/pin", json={"version": "../../../etc"},
+        )
+        assert resp.status == 400
+    finally:
+        await ta.close()
+
+
 # ---------------------------------------------------------------------------
 # DM.2: ICMP ping diagnostic
 # ---------------------------------------------------------------------------

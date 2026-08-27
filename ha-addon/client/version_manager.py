@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -12,6 +13,44 @@ from collections import OrderedDict
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Security review 2026-08-27 (finding O-002 / A-004): every real ESPHome
+# release name is dot-separated segments of digits, optionally followed by
+# a pre-release tag (a/b/rc/dev + optional digits) — e.g. "2026.3.1",
+# "2026.3.0b3", "2026.3.0.dev20260521". Confirmed against every legitimate
+# source that feeds a version string into this module: the PyPI release
+# list (`main._fetch_pypi_versions`), the UI version picker, and the
+# per-target pin field — none of them ever produce '/', '\', or '..'.
+# This allowlist charset therefore rejects nothing a real caller sends.
+#
+# Attacker chain this closes: `_venv_path()` used to join a caller-supplied
+# version string directly onto `VERSIONS_BASE` with no validation, and
+# `_install()` unconditionally `shutil.rmtree()`s whatever that resolves
+# to before reinstalling. A version string like "../../../data" (reachable
+# via POST /ui/api/esphome-version or the per-target pin endpoint, both of
+# which only rejected the empty string) walks outside VERSIONS_BASE — and
+# because this add-on container runs as root with /config mounted
+# read-write and /data / /config as siblings on the same filesystem, a
+# single crafted request could recursively delete the user's entire Home
+# Assistant configuration tree. The same module is imported worker-side
+# too, driven by the job's `esphome_version` field.
+_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _validate_version(version: str) -> str:
+    """Reject anything that isn't a plausible ESPHome release identifier.
+
+    Raises ``ValueError`` (never silently coerces) so a caller that races
+    this check gets an explicit, loud failure instead of a value that was
+    quietly rewritten out from under it.
+    """
+    if not _VERSION_RE.match(version):
+        raise ValueError(
+            f"Rejected ESPHome version string {version!r}: must match "
+            f"{_VERSION_RE.pattern} (dot-separated alphanumerics only, "
+            "no path separators)."
+        )
+    return version
 
 VERSIONS_BASE = Path(os.environ.get("ESPHOME_VERSIONS_DIR", "/esphome-versions"))
 # DQ.8: the disk-quota engine (``disk_quota.py``) is the authoritative
@@ -220,6 +259,26 @@ class VersionManager:
         )
 
     def _venv_path(self, version: str) -> Path:
+        """Resolve *version*'s venv directory under ``self._base``.
+
+        The sole choke point every other method routes through (directly
+        or via ``_esphome_bin``) — validating here covers ``_install``'s
+        destructive ``rmtree``, eviction, and every install/lookup path in
+        one place rather than trying to catch every call site individually.
+        Two layers, deliberately redundant: the charset allowlist rejects
+        malformed input outright, and the resolved-path containment check
+        is defense-in-depth against a future allowlist gap or a caller that
+        bypasses ``_validate_version`` some other way — see the O-002
+        finding note above ``_VERSION_RE``.
+        """
+        _validate_version(version)
+        candidate = (self._base / version).resolve()
+        base = self._base.resolve()
+        if candidate != base and base not in candidate.parents:
+            raise ValueError(
+                f"Rejected ESPHome version {version!r}: resolved path "
+                f"{candidate} escapes versions base {base}."
+            )
         return self._base / version
 
     def _esphome_bin(self, version: str) -> Path:
