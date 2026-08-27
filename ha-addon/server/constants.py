@@ -19,7 +19,16 @@ SECRETS_YAML = "secrets.yaml"
 # fix a stale image (missing system packages, old Python, old requirements).
 # Bump this when a change in the client Dockerfile requires workers to rebuild
 # their image (e.g. adding a new system dep or Python library).
-MIN_IMAGE_VERSION = "11"
+#
+# Bumped to 13 for the O-001 security fix (2026-08-27): client.py now
+# imports `cryptography` at module level to verify self-update signatures.
+# A worker still on an image below this floor doesn't have that dependency
+# installed — if it received the new .py source via auto-update, the
+# import would crash the process on the very next restart. Gating on
+# image_version means those workers keep running their old (still
+# functional) source until the operator pulls the new image, instead of
+# self-update handing them code that can't even start.
+MIN_IMAGE_VERSION = "13"
 
 # Floor at which ``scanner.create_bundle`` switches between the
 # modern, scoped-bundle path and the legacy full-config-dir tar

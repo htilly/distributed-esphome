@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any, Iterator, Optional
 
 import requests
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import ValidationError
 
 
@@ -140,6 +142,24 @@ MAX_ESPHOME_VERSIONS = int(os.environ.get("MAX_ESPHOME_VERSIONS", "3"))
 MAX_PARALLEL_JOBS = int(os.environ.get("MAX_PARALLEL_JOBS", "2"))
 HOSTNAME = os.environ.get("HOSTNAME", socket.gethostname())
 PLATFORM = os.environ.get("PLATFORM", sys.platform)
+# Security review 2026-08-27 (finding O-001): base64 Ed25519 public key,
+# pinned via the Connect Worker enrollment snippet (see
+# ConnectWorkerModal.tsx / update_signing.py on the server). When set,
+# _apply_update() refuses to write+exec a code payload whose signature
+# doesn't verify against this key — closing the "anyone with SERVER_TOKEN,
+# or an on-path attacker against the plaintext-HTTP default, can push
+# arbitrary code to every worker" chain.
+#
+# Deliberately optional, not required: making it mandatory would lock out
+# every worker connected before this fix shipped (they have no key to set)
+# on their very next update poll, with no recovery path except manually
+# editing every worker's environment. Unset means "accept unsigned
+# updates" — identical to this worker's behavior before O-001 was fixed,
+# so upgrading the add-on/server never breaks an existing worker fleet.
+# Re-running Connect Worker (which now always includes the key) is the
+# upgrade path; a WARNING is logged on every unsigned update applied so
+# operators watching logs see the gap rather than it being silent forever.
+WORKER_TRUSTED_UPDATE_KEY = os.environ.get("WORKER_TRUSTED_UPDATE_KEY", "").strip() or None
 # TG.1: comma-separated tag list. Empty / unset → register without seeding.
 # WORKER_TAGS_OVERWRITE=1 forces clobber-on-registration so scripted multi-
 # worker deployments retain the "tags travel with the docker invocation"
@@ -1432,6 +1452,44 @@ _update_attempts: int = 0
 _MAX_UPDATE_ATTEMPTS: int = 3
 
 
+def _canonical_update_payload(files: dict[str, str]) -> bytes:
+    """Must stay byte-identical to ``update_signing.canonical_payload`` on
+    the server — enforced by
+    ``tests/test_update_signing_canonical_payload_matches.py`` the same way
+    ``test_protocol.py`` pins ``protocol.py``'s server/client copies. If
+    this drifts from the server's version, every signature verification
+    fails and workers silently fall back to unsigned updates (loud in the
+    log, but still a regression worth catching before it ships)."""
+    parts = []
+    for name in sorted(files):
+        content = files[name]
+        parts.append(f"{name}\0{len(content)}\0{content}")
+    return "\n".join(parts).encode("utf-8")
+
+
+def _verify_update_signature(files: dict[str, str], signature_b64: Optional[str]) -> bool:
+    """True if *signature_b64* is a valid Ed25519 signature over *files*
+    under ``WORKER_TRUSTED_UPDATE_KEY``. Always False if no key is pinned
+    (caller decides what "no key pinned" means — see _apply_update)."""
+    if not WORKER_TRUSTED_UPDATE_KEY:
+        return False
+    try:
+        pub_bytes = base64.b64decode(WORKER_TRUSTED_UPDATE_KEY)
+        pub_key = Ed25519PublicKey.from_public_bytes(pub_bytes)
+        if not signature_b64:
+            logger.error("Update has no signature but WORKER_TRUSTED_UPDATE_KEY is set")
+            return False
+        signature = base64.b64decode(signature_b64)
+        pub_key.verify(signature, _canonical_update_payload(files))
+        return True
+    except InvalidSignature:
+        logger.error("Update signature verification FAILED — refusing to apply update")
+        return False
+    except Exception:
+        logger.exception("Update signature verification errored — refusing to apply update")
+        return False
+
+
 def _apply_update(current_client_id: str) -> None:
     """Download updated worker code from server and restart the process.
 
@@ -1453,9 +1511,33 @@ def _apply_update(current_client_id: str) -> None:
         data = resp.json()
         files = data.get("files", {})
         new_version = data.get("version", "?")
+        signature = data.get("signature")
         if not files:
             logger.warning("Update response had no files; skipping")
             return
+
+        # Security review 2026-08-27 (finding O-001): verify before writing
+        # anything. WORKER_TRUSTED_UPDATE_KEY unset means this worker
+        # hasn't been reconnected since the fix shipped — see the env var's
+        # own comment for why that stays a loud-but-allowed fallback
+        # rather than a hard refusal.
+        if WORKER_TRUSTED_UPDATE_KEY:
+            if not _verify_update_signature(files, signature):
+                logger.error(
+                    "Refusing worker update to %s — signature verification "
+                    "failed against WORKER_TRUSTED_UPDATE_KEY", new_version,
+                )
+                return
+            logger.info("Update signature verified for %s", new_version)
+        else:
+            logger.warning(
+                "Applying update to %s WITHOUT signature verification — "
+                "WORKER_TRUSTED_UPDATE_KEY is not set on this worker. "
+                "Re-run Connect Worker to pin the server's update-signing "
+                "key (finding O-001, 2026-08-27 security review).",
+                new_version,
+            )
+
         client_dir = Path(__file__).parent.resolve()
         for filename, content in files.items():
             if not filename.endswith(".py"):

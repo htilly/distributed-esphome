@@ -16,6 +16,15 @@ export interface ServerInfo {
    * label renders without a separate /ui/api/settings call.
    */
   default_worker_disk_quota_bytes?: number;
+  /**
+   * Security review 2026-08-27 (finding O-001): base64 Ed25519 public key
+   * used to verify the signature on worker self-update payloads. Not a
+   * secret — only the matching private key (held server-side only)
+   * authenticates anything. ConnectWorkerModal bakes it into a new
+   * worker's WORKER_TRUSTED_UPDATE_KEY env var. `null` if key
+   * generation failed server-side (degrades to unsigned updates).
+   */
+  update_signing_public_key?: string | null;
 }
 
 /**
