@@ -36,6 +36,30 @@ _REDACT_CONFIG_ENTRY_DATA = {CONF_TOKEN}
 # keys in a few corners — scrub them so a diagnostics bundle shared on
 # GitHub doesn't fingerprint the user's network.
 _REDACT_COORDINATOR_DATA = {
+    # Security review 2026-08-27 (finding O-006 / A-003): the coordinator
+    # stores the raw JSON body of GET /ui/api/server-info under the
+    # "server_info" key, and that body's first field — "token" — IS the
+    # shared fleet-wide worker bearer credential (the same value that
+    # authenticates every /api/v1/* worker request and is also accepted
+    # as a system bearer on /ui/api/*). async_redact_data() walks nested
+    # dicts recursively by key name, so this entry alone protects the
+    # nested "server_info.token" field without needing a path-specific
+    # rule. "server_token" is included defensively in case a future
+    # field rename swaps the wire name without this set being updated.
+    #
+    # Attacker chain this closes: a user follows Home Assistant's
+    # standard support workflow (Settings → Devices & Services → Fleet
+    # for ESPHome → Download diagnostics) and attaches the result to a
+    # public GitHub issue, as the project's own bug-report template
+    # invites. Before this fix, that dump contained the token in
+    # plaintext — anyone reading the issue could register as a worker
+    # (claiming jobs and receiving every target's `!secret` values,
+    # including WiFi PSKs and OTA passwords) and use the same token as
+    # a system bearer on /ui/api/* to read, rewrite, or delete any
+    # device config. No exploit chaining or special access was needed —
+    # just reading a public GitHub issue.
+    "token",
+    "server_token",
     # Target-level fields
     "mac_address",
     "ha_device_id",
