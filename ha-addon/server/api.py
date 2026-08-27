@@ -1186,25 +1186,32 @@ async def get_client_code(request: web.Request) -> web.Response:
             logger.exception("Failed to read worker file %s", path.name)
 
     # Security review 2026-08-27 (finding O-001): sign the payload so a
-    # worker holding WORKER_TRUSTED_UPDATE_KEY (pinned via Connect Worker)
-    # can refuse to write+exec code from anyone who merely has the shared
-    # server_token — including an on-path attacker on the plaintext-HTTP
-    # default transport. See update_signing.py for the key-distribution
-    # rationale. Workers without the env var set still accept unsigned
-    # updates (see client._apply_update) — this is additive, not a default
-    # flip, so existing installs upgrade with zero behavior change until
-    # the operator opts in via Connect Worker.
+    # worker holding a trusted update key can refuse to write+exec code
+    # from anyone who merely has the shared server_token — including an
+    # on-path attacker on the plaintext-HTTP default transport. See
+    # update_signing.py for the key-generation rationale.
+    #
+    # Follow-up (same day): the key also rides THIS response so a worker
+    # with no key pinned yet can bootstrap trust-on-first-update (TOFU) —
+    # see client._apply_update's three-branch decision. Sending the key
+    # here is safe: it's not a secret (only the private key, held
+    # server-side only, authenticates anything), and a worker that
+    # already has a pinned key (env var or a prior TOFU pin) ignores this
+    # field entirely and verifies against its own pinned copy instead.
     import update_signing  # noqa: PLC0415
     try:
         signature = update_signing.sign_payload(files)
+        public_key = update_signing.get_public_key_b64()
     except Exception:
         logger.exception("Failed to sign worker update payload — serving unsigned")
         signature = None
+        public_key = None
 
     return web.json_response({
         "version": _get_server_client_version(),
         "files": files,
         "signature": signature,
+        "update_signing_public_key": public_key,
     })
 
 

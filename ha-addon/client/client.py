@@ -144,21 +144,18 @@ HOSTNAME = os.environ.get("HOSTNAME", socket.gethostname())
 PLATFORM = os.environ.get("PLATFORM", sys.platform)
 # Security review 2026-08-27 (finding O-001): base64 Ed25519 public key,
 # pinned via the Connect Worker enrollment snippet (see
-# ConnectWorkerModal.tsx / update_signing.py on the server). When set,
-# _apply_update() refuses to write+exec a code payload whose signature
-# doesn't verify against this key — closing the "anyone with SERVER_TOKEN,
-# or an on-path attacker against the plaintext-HTTP default, can push
-# arbitrary code to every worker" chain.
-#
-# Deliberately optional, not required: making it mandatory would lock out
-# every worker connected before this fix shipped (they have no key to set)
-# on their very next update poll, with no recovery path except manually
-# editing every worker's environment. Unset means "accept unsigned
-# updates" — identical to this worker's behavior before O-001 was fixed,
-# so upgrading the add-on/server never breaks an existing worker fleet.
-# Re-running Connect Worker (which now always includes the key) is the
-# upgrade path; a WARNING is logged on every unsigned update applied so
-# operators watching logs see the gap rather than it being silent forever.
+# ConnectWorkerModal.tsx / update_signing.py on the server). This is the
+# EXPLICIT, out-of-band pin — an operator who re-ran Connect Worker has
+# confirmed the key through a channel independent of the update mechanism
+# itself, which is strictly stronger than the automatic trust-on-first-
+# update (TOFU) pin _apply_update() falls back to when this is unset (see
+# _load_pinned_update_key()). When either is present, _apply_update()
+# refuses to write+exec a code payload whose signature doesn't verify
+# against it — closing the "anyone with SERVER_TOKEN, or an on-path
+# attacker against the plaintext-HTTP default, can push arbitrary code to
+# every worker" chain. This env var always wins over a TOFU-pinned file
+# if both exist — useful for deliberate key rotation (see
+# update_signing.py's docstring for the stale-pin recovery path).
 WORKER_TRUSTED_UPDATE_KEY = os.environ.get("WORKER_TRUSTED_UPDATE_KEY", "").strip() or None
 # TG.1: comma-separated tag list. Empty / unset → register without seeding.
 # WORKER_TAGS_OVERWRITE=1 forces clobber-on-registration so scripted multi-
@@ -1467,17 +1464,18 @@ def _canonical_update_payload(files: dict[str, str]) -> bytes:
     return "\n".join(parts).encode("utf-8")
 
 
-def _verify_update_signature(files: dict[str, str], signature_b64: Optional[str]) -> bool:
+def _verify_update_signature(files: dict[str, str], signature_b64: Optional[str], key_b64: Optional[str]) -> bool:
     """True if *signature_b64* is a valid Ed25519 signature over *files*
-    under ``WORKER_TRUSTED_UPDATE_KEY``. Always False if no key is pinned
-    (caller decides what "no key pinned" means — see _apply_update)."""
-    if not WORKER_TRUSTED_UPDATE_KEY:
+    under *key_b64*. Pure verifier — the caller resolves which key counts
+    as "trusted" (env var vs. TOFU-pinned file, see
+    _load_pinned_update_key()) and decides what an absent key means."""
+    if not key_b64:
         return False
     try:
-        pub_bytes = base64.b64decode(WORKER_TRUSTED_UPDATE_KEY)
+        pub_bytes = base64.b64decode(key_b64)
         pub_key = Ed25519PublicKey.from_public_bytes(pub_bytes)
         if not signature_b64:
-            logger.error("Update has no signature but WORKER_TRUSTED_UPDATE_KEY is set")
+            logger.error("Update has no signature but a trusted update key is pinned")
             return False
         signature = base64.b64decode(signature_b64)
         pub_key.verify(signature, _canonical_update_payload(files))
@@ -1488,6 +1486,54 @@ def _verify_update_signature(files: dict[str, str], signature_b64: Optional[str]
     except Exception:
         logger.exception("Update signature verification errored — refusing to apply update")
         return False
+
+
+def _trusted_update_key_path() -> Path:
+    """Where a trust-on-first-update (TOFU) pin is persisted, next to the
+    .py files _apply_update already writes to — same directory, same
+    proven-writable location, no new volume/permission needed."""
+    return Path(__file__).parent.resolve() / ".trusted_update_key"
+
+
+def _load_pinned_update_key() -> Optional[str]:
+    """The effective trusted update key for this worker, or None if it
+    has never pinned one.
+
+    WORKER_TRUSTED_UPDATE_KEY (explicit, out-of-band via Connect Worker)
+    always wins when set. Otherwise fall back to whatever this worker
+    TOFU-pinned on a previous update — see _apply_update's bootstrap
+    branch. A worker that has done neither returns None, which
+    _apply_update treats as "never verified anything yet."
+    """
+    if WORKER_TRUSTED_UPDATE_KEY:
+        return WORKER_TRUSTED_UPDATE_KEY
+    path = _trusted_update_key_path()
+    try:
+        return path.read_text(encoding="ascii").strip() or None
+    except FileNotFoundError:
+        return None
+    except Exception:
+        logger.exception("Failed to read pinned update key from %s", path)
+        return None
+
+
+def _persist_pinned_update_key(key_b64: str) -> None:
+    """TOFU-pin *key_b64* so every future update requires a valid
+    signature against it (see _apply_update's bootstrap branch).
+
+    Best-effort: a write failure here must not block applying the update
+    that's already been trusted this one time — it just means this
+    worker stays unpinned and re-bootstraps on its next update instead of
+    starting to verify from here on. Logged loudly either way so the gap
+    is visible, not silent.
+    """
+    try:
+        path = _trusted_update_key_path()
+        path.write_text(key_b64, encoding="ascii")
+        path.chmod(0o600)
+        logger.info("Pinned update-signing key to %s for all future updates", path)
+    except Exception:
+        logger.exception("Failed to persist pinned update key — will re-bootstrap next update")
 
 
 def _apply_update(current_client_id: str) -> None:
@@ -1512,30 +1558,47 @@ def _apply_update(current_client_id: str) -> None:
         files = data.get("files", {})
         new_version = data.get("version", "?")
         signature = data.get("signature")
+        server_key = data.get("update_signing_public_key")
         if not files:
             logger.warning("Update response had no files; skipping")
             return
 
-        # Security review 2026-08-27 (finding O-001): verify before writing
-        # anything. WORKER_TRUSTED_UPDATE_KEY unset means this worker
-        # hasn't been reconnected since the fix shipped — see the env var's
-        # own comment for why that stays a loud-but-allowed fallback
-        # rather than a hard refusal.
-        if WORKER_TRUSTED_UPDATE_KEY:
-            if not _verify_update_signature(files, signature):
+        # Security review 2026-08-27 (finding O-001, TOFU follow-up same
+        # day): verify before writing anything. Three cases, in order:
+        pinned_key = _load_pinned_update_key()
+        if pinned_key:
+            # Normal case once a key exists (explicit via Connect Worker,
+            # or previously TOFU-pinned below) — every update must verify.
+            if not _verify_update_signature(files, signature, pinned_key):
                 logger.error(
                     "Refusing worker update to %s — signature verification "
-                    "failed against WORKER_TRUSTED_UPDATE_KEY", new_version,
+                    "failed against the pinned update key", new_version,
                 )
                 return
             logger.info("Update signature verified for %s", new_version)
+        elif server_key:
+            # Bootstrap: this worker has never pinned a key, but the
+            # server offered one. Trust THIS update unverified — identical
+            # to every update this worker has ever applied before this
+            # existed, so not a regression — then pin the key so every
+            # update from here on requires a valid signature. Standard
+            # trust-on-first-use tradeoff (same as an SSH host key on
+            # first connect): does not protect against an attacker who
+            # already holds server_token AND intercepts this exact
+            # update, but protects against every future compromise of
+            # that token, automatically, with no operator action needed.
+            logger.warning(
+                "No update key pinned yet — trusting update to %s "
+                "unverified this one time, then pinning the server's key "
+                "for every future update (bootstrap; O-001).", new_version,
+            )
+            _persist_pinned_update_key(server_key)
         else:
+            # Server predates O-001 (no key ever offered) — exactly
+            # today's pre-fix behavior, unchanged.
             logger.warning(
                 "Applying update to %s WITHOUT signature verification — "
-                "WORKER_TRUSTED_UPDATE_KEY is not set on this worker. "
-                "Re-run Connect Worker to pin the server's update-signing "
-                "key (finding O-001, 2026-08-27 security review).",
-                new_version,
+                "server did not offer an update-signing key.", new_version,
             )
 
         client_dir = Path(__file__).parent.resolve()

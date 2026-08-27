@@ -1057,6 +1057,11 @@ async def test_get_client_code_returns_version_and_files(tmp_path):
         assert isinstance(data["files"], dict)
         # The server module directory contains Python files, so there must be at least one
         assert len(data["files"]) > 0
+        # O-001 (2026-08-27): signature + public key ride every response so
+        # a worker with no key pinned yet can bootstrap trust-on-first-use.
+        assert "signature" in data
+        assert "update_signing_public_key" in data
+        assert data["update_signing_public_key"]  # non-empty when signing succeeds
     finally:
         await ta.close()
 
