@@ -17,6 +17,18 @@ IMAGE_TAG="${IMAGE_TAG:-latest}"
 IMAGE="ghcr.io/weirded/esphome-dist-client:${IMAGE_TAG}"
 CONTAINER="esphome-dist-client"
 
+# Security review 2026-08-27 (finding O-001) + same-day TOFU follow-up: pin
+# the server's update-signing public key on every worker this script
+# refreshes, same as ConnectWorkerModal.tsx's generated snippet already
+# does. It's not a secret — only the matching private key, held server-side
+# only, authenticates anything — so fetching it with the same token we
+# already require below is fine. Best-effort: an older server (pre-O-001)
+# won't have the field at all, and this script must keep working against
+# it, just without a key to pin (that worker falls back to the existing
+# trust-on-first-update bootstrap on its first real update instead).
+UPDATE_SIGNING_PUBLIC_KEY="$(curl -sf -H "Authorization: Bearer ${SERVER_TOKEN}" "${SERVER_URL}/ui/api/server-info" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("update_signing_public_key") or "")' 2>/dev/null || true)"
+
 SSH_OPTS=(-o ConnectTimeout=5 -o BatchMode=yes -o LogLevel=ERROR -o StrictHostKeyChecking=accept-new)
 
 ok=(); fail=(); skipped=()
@@ -38,6 +50,7 @@ refresh() {
         SERVER_TOKEN=$(printf '%q' "$SERVER_TOKEN")
         HOSTNAME_VAL=$(printf '%q' "$hostname")
         HOST_PLATFORM=$(printf '%q' "$host_platform")
+        UPDATE_SIGNING_PUBLIC_KEY=$(printf '%q' "$UPDATE_SIGNING_PUBLIC_KEY")
 
         # Non-interactive ssh gets a minimal PATH. Docker Desktop on macOS
         # installs at /usr/local/bin/docker (Intel) or /opt/homebrew/bin/docker
@@ -64,6 +77,7 @@ refresh() {
             -e SERVER_TOKEN="\$SERVER_TOKEN" \\
             -e MAX_PARALLEL_JOBS=2 \\
             -e HOST_PLATFORM="\$HOST_PLATFORM" \\
+            -e WORKER_TRUSTED_UPDATE_KEY="\$UPDATE_SIGNING_PUBLIC_KEY" \\
             -v esphome-versions:/esphome-versions \\
             "\$IMAGE" >/dev/null
 
